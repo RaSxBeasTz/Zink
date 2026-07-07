@@ -265,7 +265,6 @@ namespace Zink
         {
             InitializeComponent();
 
-            EnsureCompatibilityPlaybackEngine();
             InitializeSoundFlyout();
             _volumeUiReady = true;
 
@@ -5613,8 +5612,10 @@ namespace Zink
             return text.Substring(0, maxLength) + "...";
         }
 
-        protected override async void OnNavigatedTo(NavigationEventArgs e)
+        protected override void OnNavigatedTo(NavigationEventArgs e)
         {
+            base.OnNavigatedTo(e);
+
             try
             {
                 try
@@ -5628,17 +5629,39 @@ namespace Zink
 
                 if (e?.Parameter is WStorage.StorageFile file)
                 {
-                    await LoadAndPlayAsync(file);
+                    QueueActivatedVideoLoad(file);
                 }
                 else if (e?.Parameter is string path && !string.IsNullOrWhiteSpace(path))
                 {
-                    var fileFromPath = await WStorage.StorageFile.GetFileFromPathAsync(path);
-                    await LoadAndPlayAsync(fileFromPath);
+                    QueueActivatedVideoLoad(path);
                 }
             }
             catch { }
+        }
 
-            base.OnNavigatedTo(e);
+        private void QueueActivatedVideoLoad(object parameter)
+        {
+            _ = DispatcherQueue.TryEnqueue(async () =>
+            {
+                try
+                {
+                    await System.Threading.Tasks.Task.Yield();
+
+                    if (parameter is WStorage.StorageFile file)
+                    {
+                        await LoadAndPlayAsync(file);
+                    }
+                    else if (parameter is string path && !string.IsNullOrWhiteSpace(path))
+                    {
+                        var fileFromPath = await WStorage.StorageFile.GetFileFromPathAsync(path);
+                        await LoadAndPlayAsync(fileFromPath);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    WriteVideoAudioDiagnostics("Queued video activation load failed: " + ex.Message);
+                }
+            });
         }
 
         protected override void OnNavigatedFrom(NavigationEventArgs e)
