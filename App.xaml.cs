@@ -30,6 +30,7 @@ namespace Zink
 
         private DateTimeOffset? _replayBufferStartedAtUtc;
         private static readonly TimeSpan RequiredReplayBufferDuration = TimeSpan.FromSeconds(45);
+        private static readonly TimeSpan VideoLibraryBackgroundScanInterval = TimeSpan.FromMinutes(5);
         private const string BackgroundRunSettingKey = "ZinkBackgroundRunEnabled";
 
         public App()
@@ -181,7 +182,7 @@ namespace Zink
                 MainWindow.Closed += OnMainWindowClosed;
                 MainWindow.Activate();
 
-                _ = VideoLibraryService.Current.StartAsync(TimeSpan.FromSeconds(30));
+                _ = VideoLibraryService.Current.StartAsync(VideoLibraryBackgroundScanInterval);
 
                 if (backgroundRunEnabled && gamingReplayEnabled)
                 {
@@ -211,7 +212,7 @@ namespace Zink
                     catch { }
                 });
 
-                _ = VideoLibraryService.Current.StartAsync(TimeSpan.FromSeconds(30));
+                _ = VideoLibraryService.Current.StartAsync(VideoLibraryBackgroundScanInterval);
 
                 if (backgroundRunEnabled && gamingReplayEnabled)
                 {
@@ -225,7 +226,7 @@ namespace Zink
             MainWindow.Closed += OnMainWindowClosed;
             MainWindow.Activate();
 
-            _ = VideoLibraryService.Current.StartAsync(TimeSpan.FromSeconds(30));
+            _ = VideoLibraryService.Current.StartAsync(VideoLibraryBackgroundScanInterval);
 
             if (backgroundRunEnabled && gamingReplayEnabled)
             {

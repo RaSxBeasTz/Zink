@@ -15,6 +15,8 @@ namespace Zink.Services
         public const string EnabledSettingKey = "Zink.Diagnostics.FileLoggingEnabled";
 
         private const long MaxLogBytes = 12L * 1024L * 1024L;
+        private static readonly TimeSpan FlushInterval = TimeSpan.FromSeconds(10);
+        private static readonly TimeSpan SnapshotPublishInterval = TimeSpan.FromSeconds(30);
         private static readonly object SyncRoot = new();
         private static readonly UTF8Encoding Utf8NoBom = new(false);
 
@@ -225,8 +227,8 @@ namespace Zink.Services
             _flushTimer = new Timer(
                 _ => FlushFromTimer(),
                 null,
-                TimeSpan.FromSeconds(1),
-                TimeSpan.FromSeconds(1));
+                FlushInterval,
+                FlushInterval);
         }
 
         private static void StopFlushTimerLocked()
@@ -253,7 +255,7 @@ namespace Zink.Services
                 {
                     _deviceWriter.Flush();
                     _deviceFileStream?.Flush(false);
-                    PublishLogSnapshotsLocked(force: true);
+                    PublishLogSnapshotsLocked(force: false);
                 }
                 catch
                 {
@@ -277,7 +279,7 @@ namespace Zink.Services
                     _deviceFileStream = new FileStream(deviceLogPath, FileMode.Create, FileAccess.Write, FileShare.ReadWrite);
                     _deviceWriter = new StreamWriter(_deviceFileStream, Utf8NoBom)
                     {
-                        AutoFlush = true
+                        AutoFlush = false
                     };
                     _activeLogDirectoryPath = logDirectory;
 
@@ -484,7 +486,6 @@ namespace Zink.Services
                     _deviceWriter?.WriteLine(entry);
                 }
 
-                _deviceWriter?.Flush();
                 PublishLogSnapshotsLocked(force: false);
             }
             catch
@@ -495,7 +496,7 @@ namespace Zink.Services
         private static void PublishLogSnapshotsLocked(bool force)
         {
             var now = DateTimeOffset.UtcNow;
-            if (!force && now - _lastSnapshotPublishedUtc < TimeSpan.FromSeconds(2))
+            if (!force && now - _lastSnapshotPublishedUtc < SnapshotPublishInterval)
                 return;
 
             _lastSnapshotPublishedUtc = now;

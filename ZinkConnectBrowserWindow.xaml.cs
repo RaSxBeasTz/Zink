@@ -170,7 +170,7 @@ namespace Zink
             return _environment;
         }
 
-        private async Task CreateBrowserTabAsync(string url, bool select)
+        private async Task<WebView2?> CreateBrowserTabAsync(string url, bool select, bool navigate = true)
         {
             var browser = new WebView2
             {
@@ -200,12 +200,15 @@ namespace Zink
                 await browser.EnsureCoreWebView2Async(env);
                 await TryLoadUBlockOriginAsync(browser.CoreWebView2);
                 ConfigureBrowser(tab, browser);
-                Navigate(browser, url);
+                if (navigate)
+                    Navigate(browser, url);
                 UpdateControls();
+                return browser;
             }
             catch (Exception ex)
             {
                 StatusText.Text = $"Browser failed to start: {ex.Message}";
+                return null;
             }
         }
 
@@ -251,10 +254,10 @@ namespace Zink
 
             core.NavigationStarting += (_, args) =>
             {
-                if (TryGetYouTubeEmbedUrl(args.Uri, out var embedUrl))
+                if (TryGetYouTubeWatchUrlFromEmbed(args.Uri, out var watchUrl))
                 {
                     args.Cancel = true;
-                    core.Navigate(embedUrl);
+                    core.Navigate(watchUrl);
                     return;
                 }
 
@@ -318,14 +321,21 @@ namespace Zink
             core.NewWindowRequested += async (_, args) =>
             {
                 args.Handled = true;
-                await DispatcherQueue.EnqueueAsync(async () =>
-                {
-                    string target = string.IsNullOrWhiteSpace(args.Uri) ? HomeUrl : args.Uri;
-                    if (TryGetYouTubeEmbedUrl(target, out var embedUrl))
-                        target = embedUrl;
+                string target = NormalizeNewWindowTarget(args.Uri);
+                if (target.Equals("about:blank", StringComparison.OrdinalIgnoreCase))
+                    target = HomeUrl;
 
-                    await CreateBrowserTabAsync(target, true);
-                });
+                try
+                {
+                    await DispatcherQueue.EnqueueAsync(async () =>
+                    {
+                        await CreateBrowserTabAsync(target, true);
+                    });
+                }
+                catch
+                {
+                    args.Handled = true;
+                }
             };
 
             core.DownloadStarting += (_, args) =>
@@ -665,6 +675,9 @@ namespace Zink
             if (string.IsNullOrWhiteSpace(text))
                 return HomeUrl;
 
+            if (TryGetYouTubeWatchUrlFromEmbed(text, out var watchUrl))
+                return watchUrl;
+
             if (Uri.TryCreate(text, UriKind.Absolute, out var absolute) &&
                 (absolute.Scheme == Uri.UriSchemeHttp || absolute.Scheme == Uri.UriSchemeHttps))
             {
@@ -675,6 +688,82 @@ namespace Zink
                 return "https://" + text;
 
             return "https://www.bing.com/search?q=" + Uri.EscapeDataString(text);
+        }
+
+        private static string NormalizeNewWindowTarget(string? target)
+        {
+            if (string.IsNullOrWhiteSpace(target))
+                return "about:blank";
+
+            return TryGetYouTubeWatchUrlFromEmbed(target, out var watchUrl)
+                ? watchUrl
+                : target;
+        }
+
+        private static bool TryGetYouTubeWatchUrlFromEmbed(string? input, out string watchUrl)
+        {
+            watchUrl = string.Empty;
+
+            if (string.IsNullOrWhiteSpace(input) ||
+                !Uri.TryCreate(input, UriKind.Absolute, out var uri))
+            {
+                return false;
+            }
+
+            var host = uri.Host.ToLowerInvariant();
+            if (!host.Contains("youtube-nocookie.com", StringComparison.Ordinal) &&
+                !host.EndsWith(".youtube.com", StringComparison.Ordinal) &&
+                host != "youtube.com")
+            {
+                return false;
+            }
+
+            const string embedPrefix = "/embed/";
+            if (!uri.AbsolutePath.StartsWith(embedPrefix, StringComparison.OrdinalIgnoreCase))
+                return false;
+
+            var videoId = uri.AbsolutePath[embedPrefix.Length..].Split('/', '?', '#')[0];
+            videoId = Uri.UnescapeDataString(videoId.Trim());
+            if (string.IsNullOrWhiteSpace(videoId) ||
+                videoId.Length > 64 ||
+                videoId.Contains('/') ||
+                videoId.Contains('\\'))
+            {
+                return false;
+            }
+
+            var builder = new UriBuilder("https://www.youtube.com/watch")
+            {
+                Query = "v=" + Uri.EscapeDataString(videoId) + BuildYouTubeWatchTimeParameter(uri.Query)
+            };
+            watchUrl = builder.Uri.ToString();
+            return true;
+        }
+
+        private static string BuildYouTubeWatchTimeParameter(string query)
+        {
+            string? raw = GetQueryValue(query, "start");
+            return int.TryParse(raw, out int seconds) && seconds > 0
+                ? "&t=" + seconds + "s"
+                : string.Empty;
+        }
+
+        private static async Task NavigateNewWindowFallbackAsync(WebView2 browser, string target)
+        {
+            await Task.Delay(500);
+
+            try
+            {
+                var source = browser.CoreWebView2?.Source ?? string.Empty;
+                if (string.IsNullOrWhiteSpace(source) ||
+                    source.Equals("about:blank", StringComparison.OrdinalIgnoreCase))
+                {
+                    browser.CoreWebView2?.Navigate(target);
+                }
+            }
+            catch
+            {
+            }
         }
 
         private static bool TryGetYouTubeEmbedUrl(string? input, out string embedUrl)

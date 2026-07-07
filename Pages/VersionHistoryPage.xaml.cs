@@ -16,14 +16,7 @@ namespace Zink.Pages
                     Title: "Version 3.0.35.0",
                     Released: new DateTime(2026, 07, 07),
                     Notes:
-@"Version 3.0.35.0
-- Fixed opening movie files directly from File Explorer with Zink so file activation now reaches the video player instead of hanging on the startup loading screen.
-- Added support for media paths passed through Explorer command-line launches as well as packaged Windows file activation.
-- Fixed the startup overlay so it clears immediately when a video or music file is opened directly with Zink.
-- Added real timeouts to video and audio metadata probing so slow or unusual movie files cannot leave the app waiting forever before playback.
-- Fixed direct-open movie playback hanging on the video player page by keeping Windows-playable AAC and other supported audio streams on the native Windows media path instead of starting the custom FFmpeg audio pipe.
-- Fixed slow, laggy, and sometimes unresponsive app behaviour by reducing repeated Home Dashboard Spotify checks and throttling diagnostic log flushing/mirroring.
-- Added film poster artwork to the Video Library so film cards can show title poster art instead of only video thumbnails."
+@"Version 3.0.35.0"
                 ),
                 // 3.0.34.0
                 ["3.0.34.0"] = (
@@ -31,12 +24,22 @@ namespace Zink.Pages
                     Released: new DateTime(2026, 06, 28),
                     Notes:
 @"Version 3.0.35.0
+- Improved Video Library performance for large film folders by letting the film grid virtualize items instead of creating every film card at once.
+- Made saved films appear faster by loading the library list first, then filling thumbnails, durations, and poster artwork afterward.
+- Reduced repeated Video Library collection rebuilds while adding films so the page stays more responsive during large imports.
+- Added clearer progress text while films are being added, including how many films have loaded out of the total.
+- Added a second loading phase for cover artwork so Zink shows progress while adding cover artwork for the films.
+- Improved film cover artwork loading so poster artwork can replace plain video thumbnails when artwork is found.
+- Reduced duplicate film-cover lookups and unnecessary artwork work while keeping fallback video thumbnails.
+- Reduced background Video Library scan pressure for large folders by spacing automatic deep rescans further apart.
+- Reduced shell/startup memory pressure by decoding large background and startup images at display-friendly sizes.
 - Fixed opening movie files directly from File Explorer with Zink so file activation now reaches the video player instead of hanging on the startup loading screen.
 - Added support for media paths passed through Explorer command-line launches as well as packaged Windows file activation.
 - Fixed the startup overlay so it clears immediately when a video or music file is opened directly with Zink.
 - Added real timeouts to video and audio metadata probing so slow or unusual movie files cannot leave the app waiting forever before playback.
 - Fixed direct-open movie playback hanging on the video player page by keeping Windows-playable AAC and other supported audio streams on the native Windows media path instead of starting the custom FFmpeg audio pipe.
 - Fixed slow, laggy, and sometimes unresponsive app behaviour by reducing repeated Home Dashboard Spotify checks and throttling diagnostic log flushing/mirroring.
+- Added film poster artwork to the Video Library so film cards can show title poster art instead of only video thumbnails.
 
 Version 3.0.34.0
 - Added Duplicate Video Searcher to the Video section in the sidebar so duplicate videos in the Zink Video Library can be found in one place.

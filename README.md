@@ -79,6 +79,12 @@ Build packages for multiple platforms:
 .\Build-ZinkAppPackages.ps1 -Configuration Release -Platforms x64,arm64 -CreateBundle
 ```
 
+Build the Store package and a signed local install package at the same time:
+
+```powershell
+.\Build-ZinkAppPackages.ps1 -Configuration Release -Platforms x64,arm64 -CreateBundle -CreateInstallPackage
+```
+
 Package output is written under:
 
 ```text
@@ -92,6 +98,8 @@ After creating an MSIX or MSIX bundle, install it with:
 ```powershell
 .\Install-ZinkPackage.ps1
 ```
+
+When `-CreateInstallPackage` is used, run the copied `Install-ZinkPackage.ps1` from the generated `Install` folder so it can find the matching signed package and certificate.
 
 You can also pass explicit paths:
 

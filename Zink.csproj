@@ -91,6 +91,7 @@
     <PackageReference Include="CommunityToolkit.Mvvm" Version="8.4.2" />
     <PackageReference Include="Concentus" Version="2.2.2" />
     <PackageReference Include="fdk-aac" Version="2.0.3" />
+    <PackageReference Include="LibVLCSharp.WinUI" Version="3.10.0" />
     <PackageReference Include="Microsoft.AspNetCore.WebSockets" Version="2.3.11" />
     <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.4022.49" />
     <PackageReference Include="Microsoft.Windows.CsWinRT" Version="2.2.0" />
@@ -105,6 +106,7 @@
     <PackageReference Include="SIPSorcery" Version="10.0.11" />
     <PackageReference Include="System.Drawing.Common" Version="10.0.9" />
     <PackageReference Include="TagLibSharp" Version="2.3.0" />
+    <PackageReference Include="VideoLAN.LibVLC.Windows" Version="3.0.23.1" />
     <PackageReference Include="Vortice.Direct3D12" Version="3.8.3" />
   </ItemGroup>
 
@@ -116,11 +118,11 @@
   </Target>
 
   <ItemGroup Condition="'$(Platform)'=='x64'">
-    <Content Include="$(SolutionDir)x64\$(Configuration)\ZinkRecorderMux.dll" Condition="Exists('$(SolutionDir)x64\$(Configuration)\ZinkRecorderMux.dll')">
+    <Content Include="$(MSBuildProjectDirectory)\x64\$(Configuration)\ZinkRecorderMux.dll" Condition="Exists('$(MSBuildProjectDirectory)\x64\$(Configuration)\ZinkRecorderMux.dll')">
       <Link>ZinkRecorderMux.dll</Link>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
-    <Content Include="$(SolutionDir)x64\$(Configuration)\ZinkIntelVplEncoder.dll" Condition="Exists('$(SolutionDir)x64\$(Configuration)\ZinkIntelVplEncoder.dll')">
+    <Content Include="$(MSBuildProjectDirectory)\x64\$(Configuration)\ZinkIntelVplEncoder.dll" Condition="Exists('$(MSBuildProjectDirectory)\x64\$(Configuration)\ZinkIntelVplEncoder.dll')">
       <Link>ZinkIntelVplEncoder.dll</Link>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
@@ -128,7 +130,7 @@
 
   <PropertyGroup Condition="'$(Platform)'=='x64'">
     <IntelVplVersion>2023.1.0.43419</IntelVplVersion>
-    <IntelVplPackageDir>$(SolutionDir)Native\IntelVplEncoder\packages\</IntelVplPackageDir>
+    <IntelVplPackageDir>$(MSBuildProjectDirectory)\Native\IntelVplEncoder\packages\</IntelVplPackageDir>
     <IntelVplDevelDir>$(IntelVplPackageDir)onevpl.devel.win-x64.$(IntelVplVersion)\</IntelVplDevelDir>
     <IntelVplRuntimeDir>$(IntelVplPackageDir)onevpl.runtime.win-x64.$(IntelVplVersion)\</IntelVplRuntimeDir>
   </PropertyGroup>
@@ -139,11 +141,11 @@
   </Target>
 
   <Target Name="BuildZinkIntelVplEncoder" BeforeTargets="Build" DependsOnTargets="EnsureIntelVplPackages" Condition="'$(Platform)'=='x64'">
-    <MakeDir Directories="$(SolutionDir)x64\$(Configuration)" />
-    <MakeDir Directories="$(SolutionDir)obj\Native\IntelVplEncoder\$(Configuration)" />
+    <MakeDir Directories="$(MSBuildProjectDirectory)\x64\$(Configuration)" />
+    <MakeDir Directories="$(MSBuildProjectDirectory)\obj\Native\IntelVplEncoder\$(Configuration)" />
     <Exec Command="&quot;$(MSBuildProjectDirectory)\Native\IntelVplEncoder\build.cmd&quot; &quot;$(MSBuildProjectDirectory)&quot; &quot;$(Configuration)&quot; &quot;$(MSBuildProjectDirectory)\Native\IntelVplEncoder\packages\onevpl.devel.win-x64.$(IntelVplVersion)&quot;" />
     <ItemGroup>
-      <_IntelVplOutput Include="$(SolutionDir)x64\$(Configuration)\ZinkIntelVplEncoder.dll" />
+      <_IntelVplOutput Include="$(MSBuildProjectDirectory)\x64\$(Configuration)\ZinkIntelVplEncoder.dll" />
       <_IntelVplOutput Include="$(IntelVplRuntimeDir)runtimes\win-x64\native\libvpl.dll" />
       <_IntelVplOutput Include="$(IntelVplRuntimeDir)runtimes\win-x64\native\libvplswref64.dll" />
     </ItemGroup>
@@ -234,6 +236,7 @@
     <None Remove="Pages\XboxPage.xaml" />
     <None Remove="Pages\XPage.xaml" />
     <None Remove="Pages\YouTubeMusicPage.xaml" />
+    <None Remove="Pages\ZinkVpnPage.xaml" />
     <None Remove="RadioPage.xaml" />
     <None Remove="smoothradio.png" />
     <None Remove="SplashPage.xaml" />
@@ -266,6 +269,9 @@
     <Content Include="Tools\ffprobe.exe">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
+    <Content Include="Tools\ffmpeg.exe">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
     <PRIResource Remove="Extensions\uBlockOrigin\**\*" />
   </ItemGroup>
 
@@ -279,6 +285,9 @@
     <Content Update="Assets\splashScreen.png">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
+    <Content Update="Assets\ZinkSplashPage.png">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
     <Content Update="Assets\ZinkThemeSplash.png">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
@@ -286,6 +295,12 @@
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
     <Content Update="Assets\ZinkLogo.png">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+    <Content Update="Assets\ZinkVideoFilePreview*.png">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+    <Content Update="Assets\ZinkVideoOverlay*.png">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
     <Content Update="Assets\incoming-call.wav">
@@ -363,6 +378,9 @@
   </ItemGroup>
 
   <ItemGroup>
+    <Page Update="Pages\ZinkVpnPage.xaml">
+      <Generator>MSBuild:Compile</Generator>
+    </Page>
     <Page Update="Pages\AppThemePage.xaml">
       <Generator>MSBuild:Compile</Generator>
     </Page>
@@ -418,13 +436,13 @@
     <GenerateAppInstallerFile>False</GenerateAppInstallerFile>
 
     <!-- Store: ALWAYS create a bundle for upload -->
-    <AppxBundle>Always</AppxBundle>
-    <AppxBundlePlatforms>x86|x64|arm64</AppxBundlePlatforms>
+    <AppxBundle>Never</AppxBundle>
+    <AppxBundlePlatforms>x64</AppxBundlePlatforms>
 
     <AppxPackageSigningTimestampDigestAlgorithm>SHA256</AppxPackageSigningTimestampDigestAlgorithm>
     <AppxAutoIncrementPackageRevision>True</AppxAutoIncrementPackageRevision>
     <AppxSymbolPackageEnabled>False</AppxSymbolPackageEnabled>
-    <GenerateTestArtifacts>True</GenerateTestArtifacts>
+    <GenerateTestArtifacts>False</GenerateTestArtifacts>
 
     <!-- IMPORTANT: Do NOT generate/use temporary store certs for Release outputs. -->
     <GenerateTemporaryStoreCertificate>False</GenerateTemporaryStoreCertificate>
@@ -432,24 +450,25 @@
     <HoursBetweenUpdateChecks>0</HoursBetweenUpdateChecks>
 
     <!-- Keep package outputs outside OneDrive so packaging does not sync generated installers. -->
-    <AppxPackageDir>$(LOCALAPPDATA)\Zink\PackageOutput\</AppxPackageDir>
+    <AppxPackageDir>C:\Users\Franc\Downloads\</AppxPackageDir>
     <ZinkPackageArtifactDir>$(LOCALAPPDATA)\Zink\PackageOutput\BundleArtifacts\</ZinkPackageArtifactDir>
 
     <SupportedOSPlatformVersion>10.0.19041.0</SupportedOSPlatformVersion>
 
-    <!-- Debug: signed for local install/testing. Release: unsigned for Partner Center upload. -->
-    <AppxPackageSigningEnabled Condition="'$(Configuration)'=='Debug'">True</AppxPackageSigningEnabled>
-    <AppxPackageSigningEnabled Condition="'$(Configuration)'!='Debug'">False</AppxPackageSigningEnabled>
+    <!-- Local packages must be signed so App Installer can verify the publisher certificate. -->
+    <ZinkLocalPackageSigningEnabled Condition="'$(ZinkLocalPackageSigningEnabled)'==''">true</ZinkLocalPackageSigningEnabled>
+    <AppxPackageSigningEnabled Condition="'$(ZinkLocalPackageSigningEnabled)'=='true'">True</AppxPackageSigningEnabled>
+    <EnableSigningChecks Condition="'$(ZinkLocalPackageSigningEnabled)'=='true'">False</EnableSigningChecks>
 
     <!-- Don't override x86/x64/arm64 PlatformTarget with AnyCPU -->
     <PlatformTarget Condition="'$(PlatformTarget)'==''">AnyCPU</PlatformTarget>
 
-    <PackageCertificateKeyFile Condition="'$(Configuration)'=='Debug'">Zink_TemporaryKey.pfx</PackageCertificateKeyFile>
+    <PackageCertificateKeyFile Condition="'$(ZinkLocalPackageSigningEnabled)'=='true'">Zink_TemporaryKey.pfx</PackageCertificateKeyFile>
   </PropertyGroup>
 
   <Target Name="CopyZinkRecorderMuxToAppX" AfterTargets="Build" Condition="'$(Platform)'=='x64'">
     <PropertyGroup>
-      <_MuxSource>$(SolutionDir)x64\$(Configuration)\ZinkRecorderMux.dll</_MuxSource>
+      <_MuxSource>$(MSBuildProjectDirectory)\x64\$(Configuration)\ZinkRecorderMux.dll</_MuxSource>
       <_AppXPath>$(OutDir)AppX\ZinkRecorderMux.dll</_AppXPath>
     </PropertyGroup>
 

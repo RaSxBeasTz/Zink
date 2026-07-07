@@ -14,9 +14,13 @@ namespace Zink.Pages
         private readonly DispatcherTimer _glassApplyTimer;
         private global::Windows.UI.Color _pendingGlassColor;
         private static readonly global::Windows.UI.Color DefaultGlassColor =
-            global::Windows.UI.Color.FromArgb(255, 56, 255, 102);
+            global::Windows.UI.Color.FromArgb(255, 6, 64, 74);
         private static readonly global::Windows.UI.Color LegacyDefaultGlassColor =
             global::Windows.UI.Color.FromArgb(255, 59, 117, 130);
+        private static readonly global::Windows.UI.Color PreviousEmeraldDefaultGlassColor =
+            global::Windows.UI.Color.FromArgb(255, 14, 143, 61);
+        private static readonly global::Windows.UI.Color PreviousNeonDefaultGlassColor =
+            global::Windows.UI.Color.FromArgb(255, 56, 255, 102);
 
         public AppThemePage()
         {
@@ -225,9 +229,9 @@ namespace Zink.Pages
 
             SetBrush("ThemePanelBrush", WithAlpha(color, 88));
             SetBrush("ThemeCardBrush", WithAlpha(color, 56));
-            PageGradientStart.Color = WithAlpha(Darken(color, 110), 112);
-            PageGradientMiddle.Color = WithAlpha(Darken(color, 52), 120);
-            PageGradientEnd.Color = WithAlpha(Darken(color, 126), 144);
+            PageGradientStart.Color = global::Windows.UI.Color.FromArgb(144, 0, 8, 20);
+            PageGradientMiddle.Color = WithAlpha(Darken(color, 26), 120);
+            PageGradientEnd.Color = WithAlpha(color, 128);
 
             try
             {
@@ -304,7 +308,13 @@ namespace Zink.Pages
         {
             return color.R == LegacyDefaultGlassColor.R &&
                 color.G == LegacyDefaultGlassColor.G &&
-                color.B == LegacyDefaultGlassColor.B;
+                color.B == LegacyDefaultGlassColor.B ||
+                color.R == PreviousEmeraldDefaultGlassColor.R &&
+                color.G == PreviousEmeraldDefaultGlassColor.G &&
+                color.B == PreviousEmeraldDefaultGlassColor.B ||
+                color.R == PreviousNeonDefaultGlassColor.R &&
+                color.G == PreviousNeonDefaultGlassColor.G &&
+                color.B == PreviousNeonDefaultGlassColor.B;
         }
     }
 }

@@ -18,62 +18,64 @@
             <!-- Use your custom BooleanToVisibilityConverter -->
             <conv:BooleanToVisibilityConverter x:Key="BooleanToVisibilityConverter" />
 
-            <Color x:Key="ZinkThemeShellStartColor">#010B16</Color>
-            <Color x:Key="ZinkThemeShellMiddleColor">#003F37</Color>
-            <Color x:Key="ZinkThemeShellEndColor">#38D94A</Color>
+            <Color x:Key="ZinkThemeShellStartColor">#000814</Color>
+            <Color x:Key="ZinkThemeShellMiddleColor">#062D38</Color>
+            <Color x:Key="ZinkThemeShellEndColor">#06404A</Color>
             <Color x:Key="ZinkThemeAccentColor">#38FF66</Color>
-            <Color x:Key="ZinkThemeAccentAltColor">#14D8E8</Color>
+            <Color x:Key="ZinkThemeAccentAltColor">#11D8E8</Color>
+            <Color x:Key="ZinkThemeLimeColor">#C9FF3D</Color>
 
             <SolidColorBrush x:Key="ApplicationPageBackgroundThemeBrush" Color="#00000000"/>
-            <SolidColorBrush x:Key="ZinkThemeBackgroundBrush" Color="#010B16"/>
-            <SolidColorBrush x:Key="ZinkThemeSurfaceBrush" Color="#7A07151B"/>
-            <SolidColorBrush x:Key="ZinkThemeCardBrush" Color="#520A2329"/>
-            <SolidColorBrush x:Key="ZinkThemeCardHoverBrush" Color="#6A0E3338"/>
-            <SolidColorBrush x:Key="ZinkThemeStrokeBrush" Color="#6638FF66"/>
-            <SolidColorBrush x:Key="ZinkThemeStrokeSubtleBrush" Color="#3D14D8E8"/>
+            <SolidColorBrush x:Key="ZinkThemeBackgroundBrush" Color="#000814"/>
+            <SolidColorBrush x:Key="ZinkThemeSurfaceBrush" Color="#90040F16"/>
+            <SolidColorBrush x:Key="ZinkThemeCardBrush" Color="#6604161A"/>
+            <SolidColorBrush x:Key="ZinkThemeCardHoverBrush" Color="#7A0B3340"/>
+            <SolidColorBrush x:Key="ZinkThemeStrokeBrush" Color="#6611D8E8"/>
+            <SolidColorBrush x:Key="ZinkThemeStrokeSubtleBrush" Color="#4438FF66"/>
             <SolidColorBrush x:Key="ZinkThemeTextBrush" Color="#F4FFFFFF"/>
-            <SolidColorBrush x:Key="ZinkThemeSubtleTextBrush" Color="#B5C8E7E2"/>
-            <SolidColorBrush x:Key="ZinkThemeMutedTextBrush" Color="#80B8D6D0"/>
+            <SolidColorBrush x:Key="ZinkThemeSubtleTextBrush" Color="#BDE7FFF6"/>
+            <SolidColorBrush x:Key="ZinkThemeMutedTextBrush" Color="#8EC1E3DD"/>
             <SolidColorBrush x:Key="ZinkThemeAccentBrush" Color="#38FF66"/>
-            <SolidColorBrush x:Key="ZinkThemeAccentAltBrush" Color="#14D8E8"/>
+            <SolidColorBrush x:Key="ZinkThemeAccentAltBrush" Color="#11D8E8"/>
+            <SolidColorBrush x:Key="ZinkThemeLimeBrush" Color="#C9FF3D"/>
             <SolidColorBrush x:Key="ZinkThemeAccentSoftBrush" Color="#2E38FF66"/>
 
             <SolidColorBrush x:Key="AccentBrush" Color="#38FF66"/>
             <SolidColorBrush x:Key="TextBrush" Color="#F4FFFFFF"/>
-            <SolidColorBrush x:Key="SubtleTextBrush" Color="#B5C8E7E2"/>
-            <SolidColorBrush x:Key="BoxBrush" Color="#520A2329"/>
+            <SolidColorBrush x:Key="SubtleTextBrush" Color="#BDE7FFF6"/>
+            <SolidColorBrush x:Key="BoxBrush" Color="#6604161A"/>
 
-            <SolidColorBrush x:Key="LayerFillColorDefaultBrush" Color="#3F38FF66"/>
-            <SolidColorBrush x:Key="ZinkGlassPanelBrush" Color="#40061A1F"/>
-            <SolidColorBrush x:Key="ZinkGlassCardBrush" Color="#300A2329"/>
-            <SolidColorBrush x:Key="ZinkGlassBorderBrush" Color="#8038FF66"/>
-            <SolidColorBrush x:Key="ZinkGlassHoverBrush" Color="#2B14D8E8"/>
-            <SolidColorBrush x:Key="ZinkGlassSelectedBrush" Color="#3638FF66"/>
+            <SolidColorBrush x:Key="LayerFillColorDefaultBrush" Color="#3311D8E8"/>
+            <SolidColorBrush x:Key="ZinkGlassPanelBrush" Color="#52040F16"/>
+            <SolidColorBrush x:Key="ZinkGlassCardBrush" Color="#3D04161A"/>
+            <SolidColorBrush x:Key="ZinkGlassBorderBrush" Color="#7A11D8E8"/>
+            <SolidColorBrush x:Key="ZinkGlassHoverBrush" Color="#3511D8E8"/>
+            <SolidColorBrush x:Key="ZinkGlassSelectedBrush" Color="#4038FF66"/>
 
             <SolidColorBrush x:Key="SystemControlHighlightAccentBrush" Color="#38FF66"/>
             <SolidColorBrush x:Key="SystemControlHighlightAccentBrushPointerOver" Color="#7BFF88"/>
-            <SolidColorBrush x:Key="SystemControlHighlightAccentBrushPressed" Color="#14D8E8"/>
+            <SolidColorBrush x:Key="SystemControlHighlightAccentBrushPressed" Color="#11D8E8"/>
             <SolidColorBrush x:Key="AccentFillColorDefaultBrush" Color="#38FF66"/>
             <SolidColorBrush x:Key="AccentFillColorSecondaryBrush" Color="#CC38FF66"/>
-            <SolidColorBrush x:Key="AccentFillColorTertiaryBrush" Color="#9914D8E8"/>
+            <SolidColorBrush x:Key="AccentFillColorTertiaryBrush" Color="#9911D8E8"/>
             <SolidColorBrush x:Key="AccentTextFillColorPrimaryBrush" Color="#38FF66"/>
             <SolidColorBrush x:Key="TextFillColorPrimaryBrush" Color="#F4FFFFFF"/>
-            <SolidColorBrush x:Key="TextFillColorSecondaryBrush" Color="#B5C8E7E2"/>
-            <SolidColorBrush x:Key="TextFillColorTertiaryBrush" Color="#80B8D6D0"/>
-            <SolidColorBrush x:Key="ControlFillColorDefaultBrush" Color="#400A2329"/>
-            <SolidColorBrush x:Key="ControlFillColorSecondaryBrush" Color="#4D102F35"/>
-            <SolidColorBrush x:Key="ControlFillColorTertiaryBrush" Color="#3614D8E8"/>
-            <SolidColorBrush x:Key="ControlFillColorInputActiveBrush" Color="#9907151B"/>
-            <SolidColorBrush x:Key="ControlStrokeColorDefaultBrush" Color="#6638FF66"/>
-            <SolidColorBrush x:Key="ControlStrokeColorSecondaryBrush" Color="#3314D8E8"/>
-            <SolidColorBrush x:Key="CardBackgroundFillColorDefaultBrush" Color="#460A2329"/>
-            <SolidColorBrush x:Key="CardStrokeColorDefaultBrush" Color="#6638FF66"/>
+            <SolidColorBrush x:Key="TextFillColorSecondaryBrush" Color="#BDE7FFF6"/>
+            <SolidColorBrush x:Key="TextFillColorTertiaryBrush" Color="#8EC1E3DD"/>
+            <SolidColorBrush x:Key="ControlFillColorDefaultBrush" Color="#5204161A"/>
+            <SolidColorBrush x:Key="ControlFillColorSecondaryBrush" Color="#64112F2C"/>
+            <SolidColorBrush x:Key="ControlFillColorTertiaryBrush" Color="#3611D8E8"/>
+            <SolidColorBrush x:Key="ControlFillColorInputActiveBrush" Color="#B0040F16"/>
+            <SolidColorBrush x:Key="ControlStrokeColorDefaultBrush" Color="#6611D8E8"/>
+            <SolidColorBrush x:Key="ControlStrokeColorSecondaryBrush" Color="#4038FF66"/>
+            <SolidColorBrush x:Key="CardBackgroundFillColorDefaultBrush" Color="#5A04161A"/>
+            <SolidColorBrush x:Key="CardStrokeColorDefaultBrush" Color="#6611D8E8"/>
             <SolidColorBrush x:Key="FocusStrokeColorOuterBrush" Color="#38FF66"/>
-            <SolidColorBrush x:Key="FocusStrokeColorInnerBrush" Color="#010B16"/>
+            <SolidColorBrush x:Key="FocusStrokeColorInnerBrush" Color="#000814"/>
 
             <SolidColorBrush x:Key="ScrollBarThumbFill" Color="#CC38FF66"/>
             <SolidColorBrush x:Key="ScrollBarThumbFillPointerOver" Color="#FF7BFF88"/>
-            <SolidColorBrush x:Key="ScrollBarThumbFillPressed" Color="#FF14D8E8"/>
+            <SolidColorBrush x:Key="ScrollBarThumbFillPressed" Color="#FF11D8E8"/>
             <SolidColorBrush x:Key="ScrollBarThumbFillDisabled" Color="#5538FF66"/>
             <SolidColorBrush x:Key="ScrollBarPanningThumbFill" Color="#CC38FF66"/>
             <SolidColorBrush x:Key="ScrollBarPanningThumbFillPointerOver" Color="#FF7BFF88"/>

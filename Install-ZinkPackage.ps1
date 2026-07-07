@@ -14,7 +14,7 @@ function Test-IsAdministrator {
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 
 if ([string]::IsNullOrWhiteSpace($PackagePath)) {
-    $PackagePath = Get-ChildItem -LiteralPath $scriptDir -File |
+    $PackagePath = Get-ChildItem -LiteralPath $scriptDir -Recurse -File |
         Where-Object { $_.Name -like "Zink_*.msixbundle" -or $_.Name -like "Zink_*.msix" } |
         Sort-Object LastWriteTime -Descending |
         Select-Object -First 1 -ExpandProperty FullName
@@ -40,6 +40,20 @@ Import-Certificate -FilePath $CertificatePath -CertStoreLocation "$storeRoot\Tru
 Import-Certificate -FilePath $CertificatePath -CertStoreLocation "$storeRoot\Root" | Out-Null
 
 Write-Host "Installing Zink package: $PackagePath"
-Add-AppxPackage -Path $PackagePath -ForceApplicationShutdown
+$packageDir = Split-Path -Parent $PackagePath
+$dependenciesDir = Join-Path $packageDir "Dependencies"
+$dependencyPaths = @()
+
+if (Test-Path -LiteralPath $dependenciesDir) {
+    $dependencyPaths = Get-ChildItem -LiteralPath $dependenciesDir -Recurse -File |
+        Where-Object { $_.Extension -in ".appx", ".msix" } |
+        Select-Object -ExpandProperty FullName
+}
+
+if ($dependencyPaths.Count -gt 0) {
+    Add-AppxPackage -Path $PackagePath -DependencyPath $dependencyPaths -ForceApplicationShutdown
+} else {
+    Add-AppxPackage -Path $PackagePath -ForceApplicationShutdown
+}
 
 Write-Host "Zink installed successfully."

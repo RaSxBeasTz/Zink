@@ -16,17 +16,17 @@
             <SolidColorBrush x:Key="NavigationViewTopPaneBackground" Color="Transparent"/>
 
             <SolidColorBrush x:Key="NavigationViewItemBackground" Color="Transparent"/>
-            <SolidColorBrush x:Key="NavigationViewItemBackgroundPointerOver" Color="#2414D8E8"/>
-            <SolidColorBrush x:Key="NavigationViewItemBackgroundSelected" Color="#3838FF66"/>
-            <SolidColorBrush x:Key="NavigationViewItemBackgroundPressed" Color="#3014D8E8"/>
+            <SolidColorBrush x:Key="NavigationViewItemBackgroundPointerOver" Color="#2E11D8E8"/>
+            <SolidColorBrush x:Key="NavigationViewItemBackgroundSelected" Color="#4038FF66"/>
+            <SolidColorBrush x:Key="NavigationViewItemBackgroundPressed" Color="#3838FF66"/>
             <SolidColorBrush x:Key="NavigationViewItemForeground" Color="#F4FFFFFF"/>
             <SolidColorBrush x:Key="NavigationViewItemForegroundPointerOver" Color="White"/>
             <SolidColorBrush x:Key="NavigationViewItemForegroundSelected" Color="#38FF66"/>
-            <SolidColorBrush x:Key="NavigationViewItemIconForeground" Color="#B5C8E7E2"/>
+            <SolidColorBrush x:Key="NavigationViewItemIconForeground" Color="#BDE7FFF6"/>
             <SolidColorBrush x:Key="NavigationViewItemIconForegroundPointerOver" Color="White"/>
             <SolidColorBrush x:Key="NavigationViewItemIconForegroundSelected" Color="#38FF66"/>
-            <SolidColorBrush x:Key="NavigationViewItemHeaderForeground" Color="#B5C8E7E2"/>
-            <SolidColorBrush x:Key="NavigationViewItemSeparatorForeground" Color="#8038FF66"/>
+            <SolidColorBrush x:Key="NavigationViewItemHeaderForeground" Color="#BDE7FFF6"/>
+            <SolidColorBrush x:Key="NavigationViewItemSeparatorForeground" Color="#8A38FF66"/>
             <Style TargetType="FontIcon">
                 <Setter Property="Width" Value="24"/>
                 <Setter Property="Height" Value="24"/>
@@ -46,9 +46,9 @@
 
         <Grid.Background>
             <LinearGradientBrush StartPoint="0,0" EndPoint="1,1">
-                <GradientStop x:Name="ShellGradientStart" Color="#B0010B16" Offset="0"/>
-                <GradientStop x:Name="ShellGradientMiddle" Color="#82003F37" Offset="0.55"/>
-                <GradientStop x:Name="ShellGradientEnd" Color="#6638D94A" Offset="1"/>
+                <GradientStop x:Name="ShellGradientStart" Color="#DE000814" Offset="0"/>
+                <GradientStop x:Name="ShellGradientMiddle" Color="#A0062D38" Offset="0.52"/>
+                <GradientStop x:Name="ShellGradientEnd" Color="#7606404A" Offset="1"/>
             </LinearGradientBrush>
         </Grid.Background>
 
@@ -58,13 +58,17 @@
         </Grid.ColumnDefinitions>
 
         <Image Grid.ColumnSpan="2"
-               Source="ms-appx:///Assets/ZinkGeneratedThemeBackground.png"
                Stretch="UniformToFill"
-               Opacity="0.38"
-               IsHitTestVisible="False"/>
+               Opacity="0.46"
+               IsHitTestVisible="False">
+            <Image.Source>
+                <BitmapImage UriSource="ms-appx:///Assets/ZinkGeneratedThemeBackground.png"
+                             DecodePixelWidth="1920"/>
+            </Image.Source>
+        </Image>
 
         <Rectangle Grid.ColumnSpan="2"
-                   Fill="#52010710"
+                   Fill="#6400040A"
                    IsHitTestVisible="False"/>
 
         <Border x:Name="SidebarGlassHost"
@@ -130,6 +134,12 @@
                 <NavigationViewItem Content="Zink Connect" Tag="ZinkConnect">
                     <NavigationViewItem.Icon>
                         <FontIcon Glyph="&#xE774;" FontFamily="Segoe Fluent Icons"/>
+                    </NavigationViewItem.Icon>
+                </NavigationViewItem>
+
+                <NavigationViewItem Content="Zink VPN" Tag="ZinkVpn">
+                    <NavigationViewItem.Icon>
+                        <FontIcon Glyph="&#xE72E;" FontFamily="Segoe Fluent Icons"/>
                     </NavigationViewItem.Icon>
                 </NavigationViewItem>
 
@@ -239,9 +249,24 @@
                             </NavigationViewItem.Icon>
                         </NavigationViewItem>
 
-                        <NavigationViewItem Content="Video Library" Tag="VideoLibrary">
+                        <NavigationViewItem Tag="VideoLibrary">
                             <NavigationViewItem.Icon>
                                 <FontIcon Glyph="&#xE8F1;" FontFamily="Segoe Fluent Icons"/>
+                            </NavigationViewItem.Icon>
+                            <StackPanel Orientation="Horizontal" Spacing="8">
+                                <TextBlock Text="Video Library"/>
+                                <ProgressRing x:Name="VideoLibrarySidebarBusyRing"
+                                              Width="16"
+                                              Height="16"
+                                              VerticalAlignment="Center"
+                                              IsActive="False"
+                                              Visibility="Collapsed"/>
+                            </StackPanel>
+                        </NavigationViewItem>
+
+                        <NavigationViewItem Content="Duplicate Video Searcher" Tag="DuplicateVideoSearcher">
+                            <NavigationViewItem.Icon>
+                                <FontIcon Glyph="&#xE8EE;" FontFamily="Segoe Fluent Icons"/>
                             </NavigationViewItem.Icon>
                         </NavigationViewItem>
 
@@ -627,12 +652,16 @@
 
         <Grid x:Name="StartupOverlay"
               Grid.ColumnSpan="2"
-              Background="#CC00080B"
+              Background="#D6000814"
               Canvas.ZIndex="9999">
-            <Image Source="ms-appx:///Assets/ZinkThemeSplash.png"
-                   Stretch="UniformToFill"
+            <Image Stretch="UniformToFill"
                    HorizontalAlignment="Stretch"
-                   VerticalAlignment="Stretch"/>
+                   VerticalAlignment="Stretch">
+                <Image.Source>
+                    <BitmapImage UriSource="ms-appx:///Assets/ZinkSplashPage.png"
+                                 DecodePixelWidth="1920"/>
+                </Image.Source>
+            </Image>
 
             <Border Width="88"
                     Height="88"
@@ -640,10 +669,10 @@
                     HorizontalAlignment="Center"
                     VerticalAlignment="Bottom"
                     CornerRadius="44"
-                    BorderBrush="#8A38FF66"
+                    BorderBrush="#A838FF66"
                     BorderThickness="1">
                 <Border.Background>
-                    <SolidColorBrush Color="#6600080B"/>
+                    <SolidColorBrush Color="#7600040A"/>
                 </Border.Background>
 
                 <ProgressRing IsActive="True"

@@ -100,13 +100,36 @@ namespace Zink
             SidebarNav.IsPaneOpen = true;
             SetSidebarColumnForPaneState(true);
 
+            ContentFrame.Navigating += ContentFrame_Navigating;
             ContentFrame.Navigated += ContentFrame_Navigated;
             RootGrid.Loaded += RootGrid_Loaded_StartInitialNavigation;
 
             SocialManager.Instance.Realtime.IncomingCall -= Realtime_IncomingCall_Global;
             SocialManager.Instance.Realtime.IncomingCall += Realtime_IncomingCall_Global;
 
+            VideoLibraryService.Current.BusyChanged -= VideoLibraryService_BusyChanged;
+            VideoLibraryService.Current.BusyChanged += VideoLibraryService_BusyChanged;
+            UpdateVideoLibrarySidebarBusyIndicator(VideoLibraryService.Current.IsBusy);
+
             _ = EnsureRealtimeConnectedIfLoggedInAsync();
+        }
+
+        private void VideoLibraryService_BusyChanged(object? sender, EventArgs e)
+        {
+            DispatcherQueue.TryEnqueue(() => UpdateVideoLibrarySidebarBusyIndicator(VideoLibraryService.Current.IsBusy));
+        }
+
+        private void UpdateVideoLibrarySidebarBusyIndicator(bool isBusy)
+        {
+            try
+            {
+                if (VideoLibrarySidebarBusyRing == null)
+                    return;
+
+                VideoLibrarySidebarBusyRing.IsActive = isBusy;
+                VideoLibrarySidebarBusyRing.Visibility = isBusy ? Visibility.Visible : Visibility.Collapsed;
+            }
+            catch { }
         }
 
         private async void RootGrid_Loaded_StartInitialNavigation(object sender, RoutedEventArgs e)
@@ -1032,6 +1055,7 @@ namespace Zink
                 "Search" => typeof(SearchResultsPage),
                 "Home" => typeof(HomeDashboardPage),
                 "ZinkConnect" => typeof(ZinkConnectPage),
+                "ZinkVpn" => typeof(ZinkVpnPage),
                 "MusicPlayer" => typeof(MusicPlayerPage),
                 "MusicLibrary" => typeof(MusicLibraryPage),
                 "YouTubeMusic" => typeof(YouTubeMusicPage),
@@ -1183,6 +1207,7 @@ namespace Zink
         private void MainWindow_Closed(object sender, WindowEventArgs args)
         {
             SocialManager.Instance.Realtime.IncomingCall -= Realtime_IncomingCall_Global;
+            VideoLibraryService.Current.BusyChanged -= VideoLibraryService_BusyChanged;
 
             _hotkeyService?.Dispose();
             _hotkeyService = null;
@@ -1877,6 +1902,34 @@ namespace Zink
                 color.B == PreviousNeonDefaultGlassTint.B;
         }
 
+        private void ContentFrame_Navigating(object sender, NavigatingCancelEventArgs e)
+        {
+            if (ContentFrame.Content is DependencyObject outgoingPage)
+            {
+                CloseWebViews(outgoingPage);
+            }
+        }
+
+        private void CloseWebViews(DependencyObject root)
+        {
+            if (root is WebView2 webView)
+            {
+                _discordPresenceWebViews.Remove(webView);
+
+                try { webView.CoreWebView2?.Stop(); } catch { }
+                try { webView.CoreWebView2?.Navigate("about:blank"); } catch { }
+                try { webView.Close(); } catch { }
+
+                return;
+            }
+
+            var childCount = VisualTreeHelper.GetChildrenCount(root);
+            for (var i = 0; i < childCount; i++)
+            {
+                CloseWebViews(VisualTreeHelper.GetChild(root, i));
+            }
+        }
+
         private void ContentFrame_Navigated(object sender, NavigationEventArgs e)
         {
             try
@@ -1950,6 +2003,9 @@ namespace Zink
 
                     case "ZinkConnect":
                         DiscordPresenceService.Instance.SetPagePresence(displayName, "Connect", "Connecting devices with Zink Connect");
+                        break;
+                    case "ZinkVpn":
+                        DiscordPresenceService.Instance.SetPagePresence(displayName, "VPN", "Using Zink VPN");
                         break;
 
                     case "MusicPlayer":
@@ -2394,6 +2450,7 @@ namespace Zink
             return tag switch
             {
                 "Home" => "Home dashboard",
+                "ZinkVpn" => "Zink VPN",
                 "MusicPlayer" => "Music player",
                 "MusicLibrary" => "Music library",
                 "YouTubeMusic" => "YouTube Music",
@@ -2470,6 +2527,7 @@ namespace Zink
                 if (t == typeof(SearchResultsPage)) return "Search";
                 if (t == typeof(HomeDashboardPage)) return "Home";
                 if (t == typeof(ZinkConnectPage)) return "ZinkConnect";
+                if (t == typeof(ZinkVpnPage)) return "ZinkVpn";
                 if (t == typeof(MusicPlayerPage)) return "MusicPlayer";
                 if (t == typeof(MusicLibraryPage)) return "MusicLibrary";
                 if (t == typeof(YouTubeMusicPage)) return "YouTubeMusic";

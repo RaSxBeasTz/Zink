@@ -127,6 +127,51 @@ namespace Zink.Services
             catch { }
         }
 
+        public static void RemovePayload(string? payload, string? type = null)
+        {
+            try
+            {
+                if (string.IsNullOrWhiteSpace(payload))
+                    return;
+
+                var removedAny = false;
+
+                for (var i = Recent.Count - 1; i >= 0; i--)
+                {
+                    var item = Recent[i];
+                    var payloadMatches = string.Equals(item.Payload, payload, StringComparison.OrdinalIgnoreCase);
+                    var typeMatches = string.IsNullOrWhiteSpace(type) ||
+                                      string.Equals(item.Type, type, StringComparison.OrdinalIgnoreCase);
+
+                    if (payloadMatches && typeMatches)
+                    {
+                        Recent.RemoveAt(i);
+                        removedAny = true;
+                    }
+                }
+
+                var last = GetLast();
+                if (last != null &&
+                    string.Equals(last.Payload, payload, StringComparison.OrdinalIgnoreCase) &&
+                    (string.IsNullOrWhiteSpace(type) || string.Equals(last.Type, type, StringComparison.OrdinalIgnoreCase)))
+                {
+                    if (Recent.Count > 0)
+                        SaveLast(Recent[0]);
+                    else
+                        GetSettings().Values.Remove(KEY_LAST);
+
+                    removedAny = true;
+                }
+
+                if (!removedAny)
+                    return;
+
+                SaveRecent();
+                Changed?.Invoke(null, EventArgs.Empty);
+            }
+            catch { }
+        }
+
         public static TimeSpan GetTotalWatchedTime()
         {
             try

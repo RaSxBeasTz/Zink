@@ -7,13 +7,14 @@
   xmlns:uap6="http://schemas.microsoft.com/appx/manifest/uap/windows10/6"
   xmlns:uap7="http://schemas.microsoft.com/appx/manifest/uap/windows10/7"
   xmlns:uap11="http://schemas.microsoft.com/appx/manifest/uap/windows10/11"
+  xmlns:desktop5="http://schemas.microsoft.com/appx/manifest/desktop/windows10/5"
   xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
-  IgnorableNamespaces="uap uap3 uap5 uap6 uap7 uap11 rescap">
+  IgnorableNamespaces="uap uap3 uap5 uap6 uap7 uap11 desktop5 rescap">
 
   <Identity
     Name="FrancisHayle.Zink-MusicVideoPlayer"
     Publisher="CN=3FFFC630-A58A-41F5-B554-BA1A779ED16E"
-    Version="3.0.34.0" />
+    Version="3.0.47.0" />
 
   <Properties>
     <DisplayName>Zink - Music &amp; Video Player</DisplayName>
@@ -64,9 +65,9 @@
             DisplayName="Zink" />
         </uap5:Extension>
         <uap:Extension Category="windows.fileTypeAssociation">
-          <uap:FileTypeAssociation Name="zink-video">
+          <uap:FileTypeAssociation Name="zink-video" desktop5:ThumbnailTypeOverlay="Assets\ZinkVideoOverlay.png">
             <uap:DisplayName>Zink Video</uap:DisplayName>
-            <uap:Logo>Assets\Square44x44Logo.png</uap:Logo>
+            <uap:Logo>Assets\ZinkVideoOverlay.png</uap:Logo>
             <uap:SupportedFileTypes>
               <uap:FileType>.mp4</uap:FileType>
               <uap:FileType>.mkv</uap:FileType>

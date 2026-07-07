@@ -8,11 +8,18 @@
     mc:Ignorable="d"
     Background="{ThemeResource ApplicationPageBackgroundThemeBrush}">
 
-    <Grid Padding="20">
-        <Grid.RowDefinitions>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="*"/>
-        </Grid.RowDefinitions>
+    <Page.Resources>
+        <SolidColorBrush x:Key="ScrollBarThumbFill" Color="White"/>
+        <SolidColorBrush x:Key="ScrollBarThumbFillPointerOver" Color="White"/>
+        <SolidColorBrush x:Key="ScrollBarThumbFillPressed" Color="White"/>
+    </Page.Resources>
+
+    <Grid>
+        <Grid Padding="20">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="*"/>
+            </Grid.RowDefinitions>
 
         <!-- Header + actions -->
         <StackPanel Spacing="10">
@@ -34,12 +41,50 @@
                            Text=""
                            TextTrimming="CharacterEllipsis"/>
             </StackPanel>
+
+            <Grid ColumnSpacing="10">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
+                    <ColumnDefinition Width="Auto"/>
+                </Grid.ColumnDefinitions>
+
+                <TextBox x:Name="SearchBox"
+                         PlaceholderText="Search films by name, file type, folder, or duration"
+                         TextChanged="SearchBox_TextChanged"/>
+                <ComboBox x:Name="SortByBox"
+                          Grid.Column="1"
+                          Header="Sort by"
+                          SelectedIndex="0"
+                          SelectionChanged="SortByBox_SelectionChanged"
+                          MinWidth="180">
+                    <ComboBoxItem Content="Recently added" Tag="recent"/>
+                    <ComboBoxItem Content="Title A-Z" Tag="title-az"/>
+                    <ComboBoxItem Content="Title Z-A" Tag="title-za"/>
+                    <ComboBoxItem Content="Longest first" Tag="longest"/>
+                    <ComboBoxItem Content="Shortest first" Tag="shortest"/>
+                    <ComboBoxItem Content="File type" Tag="type"/>
+                </ComboBox>
+                <Button x:Name="ClearSearchButton"
+                        Grid.Column="2"
+                        Content="Clear"
+                        Click="ClearSearchButton_Click"/>
+            </Grid>
+
+            <TextBlock x:Name="SearchResultText"
+                       Opacity="0.7"
+                       FontSize="12"
+                       Text=""/>
         </StackPanel>
 
         <!-- Thumbnails -->
         <GridView Grid.Row="1"
                   ItemsSource="{x:Bind Videos, Mode=OneWay}"
                   IsItemClickEnabled="True"
+                  ScrollViewer.VerticalScrollBarVisibility="Visible"
+                  ScrollViewer.VerticalScrollMode="Enabled"
+                  ScrollViewer.HorizontalScrollBarVisibility="Disabled"
+                  ScrollViewer.HorizontalScrollMode="Disabled"
                   ItemClick="GridView_ItemClick"
                   SelectionMode="None">
             <GridView.ItemsPanel>
@@ -53,18 +98,68 @@
                 <DataTemplate>
                     <StackPanel Width="220" Spacing="8">
                         <Border CornerRadius="12" Height="330" Background="#202020">
-                            <Image Source="{Binding Thumbnail}" Stretch="UniformToFill"/>
+                            <Grid>
+                                <StackPanel Padding="18"
+                                            Spacing="10"
+                                            VerticalAlignment="Center">
+                                    <TextBlock Text="{Binding Name}"
+                                               TextWrapping="WrapWholeWords"
+                                               TextAlignment="Center"
+                                               FontSize="22"
+                                               FontWeight="SemiBold"/>
+                                    <TextBlock Text="{Binding FileName}"
+                                               TextWrapping="WrapWholeWords"
+                                               TextAlignment="Center"
+                                               Opacity="0.55"
+                                               FontSize="12"/>
+                                </StackPanel>
+                                <Image Source="{Binding Thumbnail}" Stretch="UniformToFill"/>
+                            </Grid>
                         </Border>
-                        <TextBlock Text="{Binding Name}" TextTrimming="CharacterEllipsis" />
+                        <Grid ColumnSpacing="8">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="Auto"/>
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Text="{Binding Name}"
+                                       TextTrimming="CharacterEllipsis" />
+                            <TextBlock Grid.Column="1"
+                                       Text="{Binding ReleaseDateText}"
+                                       Opacity="0.7"
+                                       FontSize="12"
+                                       VerticalAlignment="Center"/>
+                        </Grid>
                         <TextBlock Text="{Binding DurationText}" Opacity="0.7" FontSize="12"/>
 
                         <!-- Button still here -->
                         <Button Content="Play with the Zink Video Player"
                                 Click="PlayWithVideoPlayer_Click"
                                 CommandParameter="{Binding}"/>
+                        <Button Content="Learn about this film"
+                                Click="LearnAboutFilm_Click"
+                                CommandParameter="{Binding}"/>
                     </StackPanel>
                 </DataTemplate>
             </GridView.ItemTemplate>
         </GridView>
+        </Grid>
+
+        <Grid x:Name="MovieLibraryLoadingOverlay"
+              Background="#CC000000"
+              Visibility="Collapsed">
+            <StackPanel HorizontalAlignment="Center"
+                        VerticalAlignment="Center"
+                        Spacing="14">
+                <ProgressRing x:Name="MovieLibraryLoadingRing"
+                              Width="52"
+                              Height="52"
+                              IsActive="False"/>
+                <TextBlock x:Name="MovieLibraryLoadingText"
+                           Text="Loading films..."
+                           FontSize="16"
+                           FontWeight="SemiBold"
+                           HorizontalAlignment="Center"/>
+            </StackPanel>
+        </Grid>
     </Grid>
 </Page>

@@ -5,11 +5,14 @@ using Microsoft.UI.Xaml.Navigation;
 using System;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
+using System.ComponentModel;
 using System.IO;
 using System.Linq;
 using System.Net.Http;
+using System.Runtime.CompilerServices;
 using System.Text.Json;
 using System.Text.RegularExpressions;
+using System.Threading;
 using System.Threading.Tasks;
 using Windows.Storage;
 using Windows.Storage.AccessCache;
@@ -26,13 +29,19 @@ namespace Zink.Pages
     public sealed partial class VideoLibraryPage : Page
     {
         public ObservableCollection<VideoItem> Videos { get; } = new();
+        private readonly List<VideoItem> _allVideos = new();
+        private static readonly List<VideoItem> CachedVideos = new();
+        private static bool _hasLoadedVideoCache;
+        private static int _lastKnownLibraryCount;
 
         private const string LibraryFileName = "video_library.json";
         private readonly string[] _exts = new[] { ".mp4", ".mkv", ".avi", ".mov", ".m4v", ".wmv" };
         private static readonly HttpClient MovieArtworkHttpClient = new() { Timeout = TimeSpan.FromSeconds(5) };
         private static readonly Dictionary<string, byte[]?> MovieArtworkCache = new(StringComparer.OrdinalIgnoreCase);
+        private static readonly SemaphoreSlim MovieArtworkLookupGate = new(6, 6);
         private static readonly string[] MovieArtworkExtensions = new[] { ".jpg", ".jpeg", ".png", ".webp" };
         private static readonly string[] MovieArtworkNames = new[] { "poster", "cover", "folder", "movie", "title" };
+        private static readonly HashSet<string> QueuedReleaseDateKeys = new(StringComparer.OrdinalIgnoreCase);
 
         // Prompt suppression (so you don't get nagged every time you visit the page)
         private const string EmptyPromptDismissedKey = "VideoLibrary_EmptyPromptDismissed";
@@ -40,13 +49,18 @@ namespace Zink.Pages
 
         // Prevent overlapping refreshes
         private bool _isRefreshing;
+        private int _filmLoadingDepth;
 
         // Status message auto-clear
         private DispatcherTimer? _statusClearTimer;
+        private readonly HashSet<string> _queuedArtworkKeys = new(StringComparer.OrdinalIgnoreCase);
+        private int _pendingArtworkLoads;
+        private int _totalArtworkLoads;
 
         // Dialog + scan info
         private bool _scanDialogShowing;
         private VideoLibraryScanResult? _lastScanResult;
+        private VideoLibraryScanResult? _pendingScanDialogResult;
         private DateTime _lastDialogAtUtc = DateTime.MinValue;
 
         static VideoLibraryPage()
@@ -82,6 +96,8 @@ namespace Zink.Pages
 
         private void VideoLibraryPage_Unsubscribe(object sender, RoutedEventArgs e)
         {
+            UpdateCachedVideos();
+
             try
             {
                 VideoLibraryService.Current.LibraryChanged -= VideoLibraryService_LibraryChanged;
@@ -98,8 +114,11 @@ namespace Zink.Pages
             // Avoid re-running if Loaded fires again for any reason
             if (_emptyPromptShownThisSession) return;
 
-            // Ensure persisted library is loaded first
-            await LoadPersistedAsync();
+            // Restore the last in-memory library first so returning to the page is instant.
+            var restoredFromCache = RestoreCachedVideos();
+
+            // Ensure persisted library is loaded, but only add entries that are not already cached.
+            await LoadPersistedAsync(showLoadingOverlay: !restoredFromCache);
 
             // Now prompt if still empty
             await PromptForFolderIfEmptyAsync();
@@ -111,7 +130,7 @@ namespace Zink.Pages
             _emptyPromptShownThisSession = true;
 
             // If there are items, no prompt needed
-            if (Videos.Count > 0) return;
+            if (_allVideos.Count > 0) return;
 
             // If user previously dismissed, do not show again
             try
@@ -135,7 +154,7 @@ namespace Zink.Pages
                 Content = "This section is empty. Would you like to choose the folder where your videos are stored so Zink can keep them here for future use?",
                 PrimaryButtonText = "Choose folder",
                 SecondaryButtonText = "Not now",
-                CloseButtonText = "Don’t ask again",
+                CloseButtonText = "Don't ask again",
                 DefaultButton = ContentDialogButton.Primary
             };
 
@@ -147,7 +166,7 @@ namespace Zink.Pages
             }
             else if (result == ContentDialogResult.None)
             {
-                // "Don’t ask again"
+                // "Don't ask again"
                 try
                 {
                     ApplicationData.Current.LocalSettings.Values[EmptyPromptDismissedKey] = true;
@@ -201,7 +220,7 @@ namespace Zink.Pages
             }
             catch { }
 
-            Videos.Clear();
+            ClearVideoLists();
             await LoadPersistedAsync();
         }
 
@@ -256,7 +275,11 @@ namespace Zink.Pages
 
                 if (LibraryStatusText != null)
                 {
-                    if (e.Added == 0 && e.Removed == 0)
+                    if (_filmLoadingDepth > 0 && e.Added > 0)
+                        LibraryStatusText.Text = e.Removed == 0
+                            ? $"Found {e.Added} new videos. Loading films..."
+                            : $"Found {e.Added} new videos and {e.Removed} removed. Loading films...";
+                    else if (e.Added == 0 && e.Removed == 0)
                         LibraryStatusText.Text = "Video library is up to date.";
                     else if (e.Removed == 0)
                         LibraryStatusText.Text = $"Finished adding videos ({e.Added} new).";
@@ -274,13 +297,7 @@ namespace Zink.Pages
             {
                 try
                 {
-                    if (e.Added == 0 && e.Removed == 0) return;
-
-                    var now = DateTime.UtcNow;
-                    if ((now - _lastDialogAtUtc).TotalSeconds < 20) return;
-                    _lastDialogAtUtc = now;
-
-                    await ShowLibraryInfoDialogAsync("Video Library Updated", BuildScanFinishedMessage(e));
+                    await TryShowScanFinishedDialogAsync(e);
                 }
                 catch { }
             });
@@ -296,8 +313,7 @@ namespace Zink.Pages
                     if (_isRefreshing) return;
                     _isRefreshing = true;
 
-                    Videos.Clear();
-                    await LoadPersistedAsync();
+                    await LoadPersistedAsync(showLoadingOverlay: false);
                 }
                 catch { }
                 finally
@@ -305,6 +321,181 @@ namespace Zink.Pages
                     _isRefreshing = false;
                 }
             });
+        }
+
+        private void BeginFilmLoading()
+        {
+            _filmLoadingDepth++;
+            VideoLibraryService.Current.BeginLibraryBusy();
+
+            try
+            {
+                if (MovieLibraryLoadingOverlay != null)
+                    MovieLibraryLoadingOverlay.Visibility = Visibility.Visible;
+
+                if (MovieLibraryLoadingRing != null)
+                    MovieLibraryLoadingRing.IsActive = true;
+
+                UpdateFilmLoadingProgress(0, 0);
+            }
+            catch { }
+        }
+
+        private void EndFilmLoading()
+        {
+            if (_filmLoadingDepth > 0)
+            {
+                _filmLoadingDepth--;
+                VideoLibraryService.Current.EndLibraryBusy();
+            }
+
+            if (_filmLoadingDepth != 0)
+                return;
+
+            try
+            {
+                if (MovieLibraryLoadingRing != null)
+                    MovieLibraryLoadingRing.IsActive = false;
+
+                if (MovieLibraryLoadingOverlay != null)
+                    MovieLibraryLoadingOverlay.Visibility = Visibility.Collapsed;
+
+                if (MovieLibraryLoadingText != null)
+                    MovieLibraryLoadingText.Text = "Loading films...";
+            }
+            catch { }
+
+            if (_pendingArtworkLoads > 0)
+                ShowArtworkLoadingOverlay();
+
+            TryShowPendingScanDialog();
+        }
+
+        private void UpdateFilmLoadingProgress(int loaded, int total)
+        {
+            try
+            {
+                if (MovieLibraryLoadingText == null)
+                    return;
+
+                MovieLibraryLoadingText.Text = total > 0
+                    ? $"Adding the films in your folder {loaded} out of {total}"
+                    : "Adding the films in your folder...";
+            }
+            catch { }
+        }
+
+        private void BeginArtworkLoading()
+        {
+            _pendingArtworkLoads++;
+            _totalArtworkLoads++;
+
+            try
+            {
+                if (_filmLoadingDepth == 0)
+                    ShowArtworkLoadingOverlay();
+            }
+            catch { }
+        }
+
+        private void EndArtworkLoading()
+        {
+            if (_pendingArtworkLoads > 0)
+                _pendingArtworkLoads--;
+
+            try
+            {
+                if (_pendingArtworkLoads > 0)
+                {
+                    if (_filmLoadingDepth == 0)
+                        ShowArtworkLoadingOverlay();
+                }
+                else
+                {
+                    HideArtworkLoadingOverlay();
+                    _totalArtworkLoads = 0;
+                }
+            }
+            catch { }
+        }
+
+        private string BuildArtworkProgressText()
+        {
+            var total = Math.Max(_totalArtworkLoads, _pendingArtworkLoads);
+            var completed = Math.Max(0, total - _pendingArtworkLoads);
+
+            return total > 0
+                ? $"Adding cover artwork for the films {completed} out of {total}"
+                : "Adding cover artwork for the films...";
+        }
+
+        private void ShowArtworkLoadingOverlay()
+        {
+            try
+            {
+                if (MovieLibraryLoadingOverlay != null)
+                    MovieLibraryLoadingOverlay.Visibility = Visibility.Visible;
+
+                if (MovieLibraryLoadingRing != null)
+                    MovieLibraryLoadingRing.IsActive = true;
+
+                if (MovieLibraryLoadingText != null)
+                    MovieLibraryLoadingText.Text = BuildArtworkProgressText();
+            }
+            catch { }
+        }
+
+        private void HideArtworkLoadingOverlay()
+        {
+            if (_filmLoadingDepth != 0)
+                return;
+
+            try
+            {
+                if (MovieLibraryLoadingRing != null)
+                    MovieLibraryLoadingRing.IsActive = false;
+
+                if (MovieLibraryLoadingOverlay != null)
+                    MovieLibraryLoadingOverlay.Visibility = Visibility.Collapsed;
+
+                if (MovieLibraryLoadingText != null)
+                    MovieLibraryLoadingText.Text = "Loading films...";
+            }
+            catch { }
+        }
+
+        private void TryShowPendingScanDialog()
+        {
+            if (_filmLoadingDepth != 0 || _pendingScanDialogResult == null)
+                return;
+
+            var result = _pendingScanDialogResult;
+            _pendingScanDialogResult = null;
+
+            DispatcherQueue.TryEnqueue(async () =>
+            {
+                try { await TryShowScanFinishedDialogAsync(result); }
+                catch { }
+            });
+        }
+
+        private async Task TryShowScanFinishedDialogAsync(VideoLibraryScanResult result)
+        {
+            if (result.Added == 0 && result.Removed == 0)
+                return;
+
+            if (_filmLoadingDepth > 0)
+            {
+                _pendingScanDialogResult = result;
+                return;
+            }
+
+            var now = DateTime.UtcNow;
+            if ((now - _lastDialogAtUtc).TotalSeconds < 20)
+                return;
+
+            _lastDialogAtUtc = now;
+            await ShowLibraryInfoDialogAsync("Video Library Updated", BuildScanFinishedMessage(result));
         }
 
         private async Task ShowLibraryInfoDialogAsync(string title, string message)
@@ -381,30 +572,271 @@ namespace Zink.Pages
             catch { }
         }
 
+        private void SearchBox_TextChanged(object sender, TextChangedEventArgs e)
+        {
+            ApplyVideoSearch();
+        }
+
+        private void SortByBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
+        {
+            ApplyVideoSearch();
+        }
+
+        private void ClearSearchButton_Click(object sender, RoutedEventArgs e)
+        {
+            if (SearchBox != null)
+                SearchBox.Text = "";
+
+            ApplyVideoSearch();
+        }
+
+        private void ClearVideoLists()
+        {
+            _allVideos.Clear();
+            Videos.Clear();
+            UpdateSearchResultText();
+        }
+
+        private void AddVideoItem(VideoItem item)
+        {
+            _allVideos.Add(item);
+
+            ApplyVideoSearch();
+            UpdateCachedVideos();
+        }
+
+        private void AddVideoItems(IEnumerable<VideoItem> items, bool refreshView = true)
+        {
+            var added = false;
+
+            foreach (var item in items)
+            {
+                _allVideos.Add(item);
+                added = true;
+            }
+
+            if (!added)
+                return;
+
+            if (refreshView)
+            {
+                ApplyVideoSearch();
+                UpdateCachedVideos();
+            }
+        }
+
+        private bool RestoreCachedVideos()
+        {
+            try
+            {
+                if (!_hasLoadedVideoCache || CachedVideos.Count == 0)
+                    return false;
+
+                _allVideos.Clear();
+                _allVideos.AddRange(CachedVideos);
+                ApplyVideoSearch();
+                return _allVideos.Count > 0;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private void UpdateCachedVideos()
+        {
+            try
+            {
+                CachedVideos.Clear();
+                CachedVideos.AddRange(_allVideos);
+                _hasLoadedVideoCache = CachedVideos.Count > 0;
+            }
+            catch { }
+        }
+
+        private bool HasVideoItem(string folderToken, string relativePath)
+        {
+            return _allVideos.Any(v =>
+                string.Equals(v.FolderToken, folderToken, StringComparison.OrdinalIgnoreCase) &&
+                string.Equals(v.RelativePath, relativePath, StringComparison.OrdinalIgnoreCase));
+        }
+
+        private static string BuildVideoKey(string folderToken, string relativePath)
+        {
+            return $"{folderToken}|{relativePath}";
+        }
+
+        private void ApplyVideoSearch()
+        {
+            var query = GetSearchQuery();
+            var filtered = GetSortedVideos(_allVideos.Where(v => VideoMatchesSearch(v, query))).ToList();
+
+            Videos.Clear();
+            foreach (var item in filtered)
+            {
+                Videos.Add(item);
+            }
+
+            UpdateSearchResultText();
+        }
+
+        private string GetSearchQuery()
+        {
+            try { return SearchBox?.Text?.Trim() ?? ""; }
+            catch { return ""; }
+        }
+
+        private IEnumerable<VideoItem> GetSortedVideos(IEnumerable<VideoItem> videos)
+        {
+            var sortKey = GetSelectedSortKey();
+
+            return sortKey switch
+            {
+                "title-az" => videos.OrderBy(v => v.Name, StringComparer.CurrentCultureIgnoreCase),
+                "title-za" => videos.OrderByDescending(v => v.Name, StringComparer.CurrentCultureIgnoreCase),
+                "longest" => videos.OrderByDescending(v => v.Duration).ThenBy(v => v.Name, StringComparer.CurrentCultureIgnoreCase),
+                "shortest" => videos.OrderBy(v => v.Duration == TimeSpan.Zero).ThenBy(v => v.Duration).ThenBy(v => v.Name, StringComparer.CurrentCultureIgnoreCase),
+                "type" => videos.OrderBy(v => Path.GetExtension(v.FileName), StringComparer.CurrentCultureIgnoreCase).ThenBy(v => v.Name, StringComparer.CurrentCultureIgnoreCase),
+                _ => videos.Reverse()
+            };
+        }
+
+        private string GetSelectedSortKey()
+        {
+            try
+            {
+                if (SortByBox?.SelectedItem is ComboBoxItem item &&
+                    item.Tag is string tag &&
+                    !string.IsNullOrWhiteSpace(tag))
+                {
+                    return tag;
+                }
+            }
+            catch { }
+
+            return "recent";
+        }
+        private static bool VideoMatchesSearch(VideoItem item, string query)
+        {
+            if (string.IsNullOrWhiteSpace(query))
+                return true;
+
+            var terms = query.Split(' ', StringSplitOptions.RemoveEmptyEntries)
+                .Select(t => t.Trim())
+                .Where(t => !string.IsNullOrWhiteSpace(t))
+                .ToArray();
+
+            if (terms.Length == 0)
+                return true;
+
+            var extension = Path.GetExtension(item.FileName);
+            var type = extension.TrimStart('.');
+            var searchable = new[]
+            {
+                item.Name,
+                item.FileName,
+                item.RelativePath,
+                extension,
+                type,
+                item.DurationText
+            };
+
+            return terms.All(term =>
+                searchable.Any(value =>
+                    !string.IsNullOrWhiteSpace(value) &&
+                    value.Contains(term, StringComparison.OrdinalIgnoreCase)));
+        }
+
+        private void UpdateSearchResultText()
+        {
+            try
+            {
+                if (SearchResultText == null) return;
+
+                var query = GetSearchQuery();
+                if (string.IsNullOrWhiteSpace(query))
+                {
+                    var libraryCount = GetStableLibraryCount(_allVideos.Count);
+                    SearchResultText.Text = libraryCount == 1
+                        ? "1 film in your library"
+                        : $"{libraryCount} films in your library";
+                    return;
+                }
+
+                SearchResultText.Text = Videos.Count == 1
+                    ? $"1 film found for \"{query}\""
+                    : $"{Videos.Count} films found for \"{query}\"";
+            }
+            catch { }
+        }
+
+        private static int GetStableLibraryCount(int currentCount)
+        {
+            RememberLibraryCount(currentCount);
+            return Math.Max(currentCount, _lastKnownLibraryCount);
+        }
+
+        private static void RememberLibraryCount(int count)
+        {
+            if (count > _lastKnownLibraryCount)
+                _lastKnownLibraryCount = count;
+        }
         private async Task AddFolderContentsAsync(StorageFolder folder, string folderToken)
         {
-            var q = new QueryOptions(CommonFileQuery.DefaultQuery, _exts) { FolderDepth = FolderDepth.Deep };
-            var result = folder.CreateFileQueryWithOptions(q);
-            var files = await result.GetFilesAsync();
-
-            foreach (var file in files)
+            BeginFilmLoading();
+            try
             {
-                var relPath = GetRelativePath(folder.Path, file.Path);
+                var q = new QueryOptions(CommonFileQuery.DefaultQuery, _exts) { FolderDepth = FolderDepth.Deep };
+                var result = folder.CreateFileQueryWithOptions(q);
+                var files = await result.GetFilesAsync();
+                var loadedFilms = 0;
+                var totalFilms = files.Count;
+                UpdateFilmLoadingProgress(loadedFilms, totalFilms);
 
-                if (Videos.Any(v => v.FolderToken == folderToken &&
-                                   v.RelativePath.Equals(relPath, StringComparison.OrdinalIgnoreCase)))
-                    continue;
+                var existingKeys = _allVideos
+                    .Select(v => BuildVideoKey(v.FolderToken, v.RelativePath))
+                    .ToHashSet(StringComparer.OrdinalIgnoreCase);
+                var pendingItems = new List<VideoItem>();
 
-                var item = new VideoItem
+                foreach (var file in files)
                 {
-                    Name = file.DisplayName,
-                    FileName = file.Name,
-                    FolderToken = folderToken,
-                    RelativePath = relPath
-                };
+                    var relPath = GetRelativePath(folder.Path, file.Path);
+                    var key = BuildVideoKey(folderToken, relPath);
 
-                await PopulateThumbnailAndDurationAsync(file, item);
-                Videos.Add(item);
+                    if (!existingKeys.Add(key))
+                    {
+                        loadedFilms++;
+                        UpdateFilmLoadingProgress(loadedFilms, totalFilms);
+                        continue;
+                    }
+
+                    var item = new VideoItem
+                    {
+                        Name = file.DisplayName,
+                        FileName = file.Name,
+                        FolderToken = folderToken,
+                        RelativePath = relPath
+                    };
+
+                    await PopulateThumbnailAndDurationAsync(file, item);
+                    pendingItems.Add(item);
+                    loadedFilms++;
+                    UpdateFilmLoadingProgress(loadedFilms, totalFilms);
+
+                    if (pendingItems.Count >= 25)
+                    {
+                        AddVideoItems(pendingItems, refreshView: false);
+                        pendingItems.Clear();
+                    }
+                }
+
+                AddVideoItems(pendingItems, refreshView: false);
+                ApplyVideoSearch();
+                UpdateCachedVideos();
+            }
+            finally
+            {
+                EndFilmLoading();
             }
         }
 
@@ -418,7 +850,7 @@ namespace Zink.Pages
         {
             try
             {
-                await PopulateMovieArtworkAsync(file, item);
+                var hasLocalArtwork = await TrySetLocalMovieArtworkAsync(file, item);
 
                 if (item.Thumbnail == null)
                 {
@@ -436,19 +868,106 @@ namespace Zink.Pages
                 var props = await file.Properties.GetVideoPropertiesAsync();
                 if (props != null && props.Duration != TimeSpan.Zero)
                     item.Duration = props.Duration;
+
+                if (!hasLocalArtwork)
+                    QueueMovieArtworkLoad(item);
+
+                QueueReleaseDateLoad(item);
             }
             catch { }
         }
 
-        private async Task PopulateMovieArtworkAsync(StorageFile file, VideoItem item)
+        private void QueueReleaseDateLoad(VideoItem item)
         {
-            if (await TrySetLocalMovieArtworkAsync(file, item))
+            if (!string.IsNullOrWhiteSpace(item.ReleaseDateText))
                 return;
 
-            var posterBytes = await TryFindMovieArtworkBytesAsync(item.Name);
-            if (posterBytes == null || posterBytes.Length == 0)
+            var key = BuildVideoKey(item.FolderToken, item.RelativePath);
+            if (!QueuedReleaseDateKeys.Add(key))
                 return;
 
+            _ = LoadReleaseDateInBackgroundAsync(item, key);
+        }
+
+        private void QueueReleaseDateLoads(IEnumerable<VideoItem> items)
+        {
+            foreach (var item in items)
+                QueueReleaseDateLoad(item);
+        }
+
+        private async Task LoadReleaseDateInBackgroundAsync(VideoItem item, string key)
+        {
+            try
+            {
+                var info = await FilmInfoService.GetFilmInfoAsync(item.Name);
+                if (info == null || string.IsNullOrWhiteSpace(info.ReleaseDateText))
+                    return;
+
+                DispatcherQueue.TryEnqueue(() =>
+                {
+                    try { item.ReleaseDateText = info.ReleaseDateText; }
+                    catch { }
+                });
+            }
+            catch { }
+            finally
+            {
+                QueuedReleaseDateKeys.Remove(key);
+            }
+        }
+
+        private void QueueMovieArtworkLoad(VideoItem item)
+        {
+            var key = BuildVideoKey(item.FolderToken, item.RelativePath);
+            if (!_queuedArtworkKeys.Add(key))
+                return;
+
+            BeginArtworkLoading();
+
+            _ = LoadMovieArtworkInBackgroundAsync(item, key);
+        }
+
+        private void QueueMovieArtworkLoads(IEnumerable<VideoItem> items)
+        {
+            foreach (var item in items)
+                QueueMovieArtworkLoad(item);
+        }
+
+        private async Task LoadMovieArtworkInBackgroundAsync(VideoItem item, string key)
+        {
+            try
+            {
+                await MovieArtworkLookupGate.WaitAsync();
+                byte[]? posterBytes;
+
+                try
+                {
+                    posterBytes = await TryFindMovieArtworkBytesAsync(item.Name);
+                }
+                finally
+                {
+                    MovieArtworkLookupGate.Release();
+                }
+
+                if (posterBytes == null || posterBytes.Length == 0)
+                    return;
+
+                DispatcherQueue.TryEnqueue(async () =>
+                {
+                    try { await SetMovieArtworkAsync(item, posterBytes); }
+                    catch { }
+                });
+            }
+            catch { }
+            finally
+            {
+                _queuedArtworkKeys.Remove(key);
+                DispatcherQueue.TryEnqueue(EndArtworkLoading);
+            }
+        }
+
+        private static async Task SetMovieArtworkAsync(VideoItem item, byte[] posterBytes)
+        {
             using var stream = new InMemoryRandomAccessStream();
             using (var writer = new DataWriter(stream.GetOutputStreamAt(0)))
             {
@@ -593,21 +1112,64 @@ namespace Zink.Pages
             cleaned = Regex.Replace(cleaned, @"\s+", " ").Trim();
             return cleaned;
         }
-
-        private async Task LoadPersistedAsync()
+        private async Task LoadPersistedAsync(bool showLoadingOverlay = true)
         {
+            var loadingStarted = false;
+
             try
             {
                 var file = await ApplicationData.Current.LocalFolder.TryGetItemAsync(LibraryFileName) as StorageFile;
-                if (file == null) return;
+                if (file == null)
+                {
+                    UpdateSearchResultText();
+                    return;
+                }
 
                 using var s = await file.OpenReadAsync();
                 using var stream = s.AsStreamForRead();
                 var saved = await JsonSerializer.DeserializeAsync<VideoLibrarySave>(stream);
 
-                if (saved?.Items == null || saved.Items.Count == 0) return;
+                if (saved?.Items == null || saved.Items.Count == 0)
+                {
+                    ClearVideoLists();
+                    UpdateCachedVideos();
+                    return;
+                }
 
-                foreach (var entry in saved.Items)
+                RememberLibraryCount(saved.Items.Count);
+
+                var savedKeys = saved.Items
+                    .Select(i => BuildVideoKey(i.FolderToken, i.RelativePath))
+                    .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+                var removedStaleItems = _allVideos.RemoveAll(v =>
+                    !savedKeys.Contains(BuildVideoKey(v.FolderToken, v.RelativePath))) > 0;
+
+                var currentKeys = _allVideos
+                    .Select(v => BuildVideoKey(v.FolderToken, v.RelativePath))
+                    .ToHashSet(StringComparer.OrdinalIgnoreCase);
+                var missingEntries = saved.Items
+                    .Where(entry => !currentKeys.Contains(BuildVideoKey(entry.FolderToken, entry.RelativePath)))
+                    .ToList();
+
+                if (removedStaleItems)
+                    ApplyVideoSearch();
+                else
+                    UpdateSearchResultText();
+
+                if (showLoadingOverlay || missingEntries.Count > 0)
+                {
+                    BeginFilmLoading();
+                    loadingStarted = true;
+                }
+
+                var pendingItems = new List<VideoItem>();
+                var metadataItems = new List<(StorageFile File, VideoItem Item)>();
+                var loadedFilms = 0;
+                var totalFilms = missingEntries.Count;
+                UpdateFilmLoadingProgress(loadedFilms, totalFilms);
+
+                foreach (var entry in missingEntries)
                 {
                     try
                     {
@@ -624,14 +1186,55 @@ namespace Zink.Pages
                                 RelativePath = entry.RelativePath
                             };
 
-                            await PopulateThumbnailAndDurationAsync(f, item);
-                            Videos.Add(item);
+                            pendingItems.Add(item);
+                            metadataItems.Add((f, item));
+
+                            if (pendingItems.Count >= 25)
+                            {
+                                AddVideoItems(pendingItems, refreshView: false);
+                                pendingItems.Clear();
+                            }
                         }
                     }
                     catch { }
+                    finally
+                    {
+                        loadedFilms++;
+                        UpdateFilmLoadingProgress(loadedFilms, totalFilms);
+                    }
                 }
+
+                AddVideoItems(pendingItems, refreshView: false);
+                ApplyVideoSearch();
+                UpdateCachedVideos();
+
+                _ = LoadVideoMetadataInBackgroundAsync(metadataItems);
             }
             catch { }
+            finally
+            {
+                if (loadingStarted)
+                    EndFilmLoading();
+            }
+        }
+
+        private async Task LoadVideoMetadataInBackgroundAsync(List<(StorageFile File, VideoItem Item)> items)
+        {
+            if (items.Count == 0)
+            {
+                QueueMovieArtworkLoads(_allVideos.Where(v => v.Thumbnail == null));
+                QueueReleaseDateLoads(_allVideos);
+                return;
+            }
+
+            foreach (var (file, item) in items)
+            {
+                await PopulateThumbnailAndDurationAsync(file, item);
+                await Task.Yield();
+            }
+
+            QueueMovieArtworkLoads(items.Select(i => i.Item).Where(v => v.Thumbnail == null));
+            QueueReleaseDateLoads(items.Select(i => i.Item));
         }
 
         private async Task PersistAsync()
@@ -640,8 +1243,8 @@ namespace Zink.Pages
             {
                 var save = new VideoLibrarySave
                 {
-                    FolderTokens = Videos.Select(v => v.FolderToken).Distinct().ToList(),
-                    Items = Videos.Select(v => new VideoLibraryEntry
+                    FolderTokens = _allVideos.Select(v => v.FolderToken).Distinct().ToList(),
+                    Items = _allVideos.Select(v => new VideoLibraryEntry
                     {
                         Name = v.Name,
                         FileName = v.FileName,
@@ -665,6 +1268,17 @@ namespace Zink.Pages
             await PlayInVideoPlayerAsync(item);
         }
 
+        private void LearnAboutFilm_Click(object sender, RoutedEventArgs e)
+        {
+            if (sender is not Button btn || btn.CommandParameter is not VideoItem item) return;
+
+            try
+            {
+                App.MainWindow.MainFrame.Navigate(typeof(FilmInfoPage), item);
+            }
+            catch { }
+        }
+
         // Thumbnail click -> play in VideoPlayerPage
         private async void GridView_ItemClick(object sender, ItemClickEventArgs e)
         {
@@ -686,15 +1300,63 @@ namespace Zink.Pages
         }
     }
 
-    public sealed class VideoItem
+    public sealed class VideoItem : INotifyPropertyChanged
     {
         public string Name { get; set; } = "";
         public string FileName { get; set; } = "";
         public string FolderToken { get; set; } = "";
         public string RelativePath { get; set; } = "";
-        public TimeSpan Duration { get; set; } = TimeSpan.Zero;
-        public BitmapImage? Thumbnail { get; set; }
+        private TimeSpan _duration = TimeSpan.Zero;
+        private BitmapImage? _thumbnail;
+        private string _releaseDateText = "";
+
+        public TimeSpan Duration
+        {
+            get => _duration;
+            set
+            {
+                if (_duration == value)
+                    return;
+
+                _duration = value;
+                OnPropertyChanged();
+                OnPropertyChanged(nameof(DurationText));
+            }
+        }
+
+        public BitmapImage? Thumbnail
+        {
+            get => _thumbnail;
+            set
+            {
+                if (ReferenceEquals(_thumbnail, value))
+                    return;
+
+                _thumbnail = value;
+                OnPropertyChanged();
+            }
+        }
+
+        public string ReleaseDateText
+        {
+            get => _releaseDateText;
+            set
+            {
+                if (string.Equals(_releaseDateText, value, StringComparison.Ordinal))
+                    return;
+
+                _releaseDateText = value ?? "";
+                OnPropertyChanged();
+            }
+        }
+
         public string DurationText => Duration == TimeSpan.Zero ? "" : $"{(int)Duration.TotalMinutes}:{Duration.Seconds:00}";
+        public event PropertyChangedEventHandler? PropertyChanged;
+
+        private void OnPropertyChanged([CallerMemberName] string? propertyName = null)
+        {
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(propertyName));
+        }
     }
 
     public sealed class VideoLibrarySave

@@ -196,10 +196,10 @@ namespace Zink
             }
         }
 
-        private async Task AddNewTabAsync(Uri? source = null)
+        private async Task<BrowserTab?> AddNewTabAsync(Uri? source = null, bool navigate = true)
         {
             if (_browserEnvironment == null)
-                return;
+                return null;
 
             var tab = new BrowserTab
             {
@@ -217,7 +217,10 @@ namespace Zink
             BrowserHost.Children.Add(tab.View);
             await ConfigureTabBrowserAsync(tab);
             ActivateTab(tab);
-            tab.View.CoreWebView2.Navigate(tab.Source);
+            if (navigate)
+                tab.View.CoreWebView2.Navigate(tab.Source);
+
+            return tab;
         }
 
         private async Task ConfigureTabBrowserAsync(BrowserTab tab)
@@ -1298,11 +1301,45 @@ namespace Zink
                 Title = $"{sender.DocumentTitle} - Zink Connect";
         }
 
-        private void CoreWebView2_NewWindowRequested(CoreWebView2 sender, CoreWebView2NewWindowRequestedEventArgs args)
+        private async void CoreWebView2_NewWindowRequested(CoreWebView2 sender, CoreWebView2NewWindowRequestedEventArgs args)
         {
             args.Handled = true;
-            if (!string.IsNullOrWhiteSpace(args.Uri) && Uri.TryCreate(args.Uri, UriKind.Absolute, out var uri))
-                _ = AddNewTabAsync(uri);
+
+            try
+            {
+                var initialUri = GetNewWindowInitialUri(args.Uri);
+                await AddNewTabAsync(initialUri);
+            }
+            catch
+            {
+                args.Handled = true;
+            }
+        }
+
+        private static Uri GetNewWindowInitialUri(string? uri)
+        {
+            if (!string.IsNullOrWhiteSpace(uri) && Uri.TryCreate(uri, UriKind.Absolute, out var parsed))
+                return parsed;
+
+            return new Uri("about:blank");
+        }
+
+        private static async Task NavigateNewTabFallbackAsync(WebView2 view, string target)
+        {
+            await Task.Delay(500);
+
+            try
+            {
+                var source = view.CoreWebView2?.Source ?? string.Empty;
+                if (string.IsNullOrWhiteSpace(source) ||
+                    source.Equals("about:blank", StringComparison.OrdinalIgnoreCase))
+                {
+                    view.CoreWebView2?.Navigate(target);
+                }
+            }
+            catch
+            {
+            }
         }
 
         private void CoreWebView2_ContainsFullScreenElementChanged(CoreWebView2 sender, object args)

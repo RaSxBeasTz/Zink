@@ -1,0 +1,92 @@
+<Page
+    x:Class="Zink.Pages.FilmInfoPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    mc:Ignorable="d"
+    Background="{ThemeResource ApplicationPageBackgroundThemeBrush}">
+
+    <Grid Padding="24">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+        </Grid.RowDefinitions>
+
+        <StackPanel Orientation="Horizontal" Spacing="12">
+            <Button Content="Back"
+                    Click="BackButton_Click"/>
+            <TextBlock Text="Film Info"
+                       FontSize="28"
+                       FontWeight="SemiBold"/>
+        </StackPanel>
+
+        <ScrollViewer Grid.Row="1"
+                      Margin="0,22,0,0"
+                      VerticalScrollBarVisibility="Auto"
+                      VerticalScrollMode="Enabled">
+            <Grid ColumnSpacing="24">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="260"/>
+                    <ColumnDefinition Width="*"/>
+                </Grid.ColumnDefinitions>
+
+                <Border CornerRadius="12"
+                        Height="390"
+                        Background="#202020"
+                        VerticalAlignment="Top">
+                    <Grid>
+                        <StackPanel Padding="18"
+                                    Spacing="10"
+                                    VerticalAlignment="Center">
+                            <TextBlock x:Name="PosterTitleText"
+                                       TextWrapping="WrapWholeWords"
+                                       TextAlignment="Center"
+                                       FontSize="22"
+                                       FontWeight="SemiBold"/>
+                            <TextBlock x:Name="PosterFileText"
+                                       TextWrapping="WrapWholeWords"
+                                       TextAlignment="Center"
+                                       Opacity="0.55"
+                                       FontSize="12"/>
+                        </StackPanel>
+                        <Image x:Name="PosterImage"
+                               Stretch="UniformToFill"/>
+                    </Grid>
+                </Border>
+
+                <StackPanel Grid.Column="1"
+                            Spacing="14"
+                            MaxWidth="900">
+                    <TextBlock x:Name="TitleText"
+                               TextWrapping="WrapWholeWords"
+                               FontSize="34"
+                               FontWeight="SemiBold"/>
+                    <TextBlock x:Name="ReleaseDateText"
+                               TextWrapping="WrapWholeWords"
+                               Opacity="0.75"
+                               FontSize="15"/>
+
+                    <StackPanel x:Name="LoadingPanel"
+                                Orientation="Horizontal"
+                                Spacing="10">
+                        <ProgressRing Width="20"
+                                      Height="20"
+                                      IsActive="True"/>
+                        <TextBlock Text="Looking up film info..."
+                                   Opacity="0.75"/>
+                    </StackPanel>
+
+                    <TextBlock x:Name="OverviewText"
+                               TextWrapping="WrapWholeWords"
+                               FontSize="17"
+                               LineHeight="26"/>
+
+                    <HyperlinkButton x:Name="SourceButton"
+                                     Content="Open source"
+                                     Visibility="Collapsed"/>
+                </StackPanel>
+            </Grid>
+        </ScrollViewer>
+    </Grid>
+</Page>

@@ -18,21 +18,55 @@ namespace Zink.Services
         public static VideoLibraryService Current { get; } = new VideoLibraryService();
 
         private const string LibraryFileName = "video_library.json";
-        private readonly string[] _exts = new[] { ".mp4", ".mkv", ".avi", ".mov", ".m4v", ".wmv" };
+        private readonly string[] _exts = new[]
+        {
+            ".mp4", ".m4v", ".mkv", ".avi", ".mov", ".wmv", ".webm", ".flv",
+            ".ts", ".m2ts", ".mts", ".mpg", ".mpeg", ".3gp", ".3g2", ".ogv",
+            ".vob", ".divx", ".asf"
+        };
 
         private readonly SemaphoreSlim _gate = new SemaphoreSlim(1, 1);
         private readonly HashSet<string> _folderTokens = new(StringComparer.OrdinalIgnoreCase);
 
         private DispatcherTimer? _timer;
         private bool _started;
+        private int _scanDepth;
+        private int _busyDepth;
 
         public event EventHandler? LibraryChanged;
+        public event EventHandler? BusyChanged;
 
         // ✅ NEW: status events for UI (spinner + message)
         public event EventHandler? ScanStarted;
         public event EventHandler<VideoLibraryScanResult>? ScanFinished;
+        public bool IsScanning => _scanDepth > 0;
+        public bool IsBusy => _busyDepth > 0;
 
         private VideoLibraryService() { }
+
+        public void BeginLibraryBusy()
+        {
+            var wasBusy = IsBusy;
+            _busyDepth++;
+
+            if (!wasBusy)
+            {
+                try { BusyChanged?.Invoke(this, EventArgs.Empty); } catch { }
+            }
+        }
+
+        public void EndLibraryBusy()
+        {
+            var wasBusy = IsBusy;
+
+            if (_busyDepth > 0)
+                _busyDepth--;
+
+            if (wasBusy && !IsBusy)
+            {
+                try { BusyChanged?.Invoke(this, EventArgs.Empty); } catch { }
+            }
+        }
 
         public async Task StartAsync(TimeSpan? interval = null)
         {
@@ -94,6 +128,8 @@ namespace Zink.Services
         public async Task RescanAsync(bool pruneMissing)
         {
             // Fire "started" before we take the gate (so UI can react quickly)
+            _scanDepth++;
+            BeginLibraryBusy();
             try { ScanStarted?.Invoke(this, EventArgs.Empty); } catch { }
 
             int added = 0;
@@ -118,6 +154,9 @@ namespace Zink.Services
 
                 bool changed = false;
                 HashSet<(string token, string rel)>? seen = pruneMissing ? new HashSet<(string, string)>() : null;
+                var existingKeys = saved.Items
+                    .Select(v => BuildVideoKey(v.FolderToken, v.RelativePath))
+                    .ToHashSet(StringComparer.OrdinalIgnoreCase);
 
                 foreach (var token in _folderTokens.ToList())
                 {
@@ -140,11 +179,8 @@ namespace Zink.Services
                             if (pruneMissing)
                                 seen!.Add((token, rel));
 
-                            bool exists = saved.Items.Any(v =>
-                                v.FolderToken.Equals(token, StringComparison.OrdinalIgnoreCase) &&
-                                v.RelativePath.Equals(rel, StringComparison.OrdinalIgnoreCase));
-
-                            if (exists) continue;
+                            if (!existingKeys.Add(BuildVideoKey(token, rel)))
+                                continue;
 
                             saved.Items.Add(new VideoLibraryEntry
                             {
@@ -185,6 +221,9 @@ namespace Zink.Services
             finally
             {
                 _gate.Release();
+                if (_scanDepth > 0)
+                    _scanDepth--;
+                EndLibraryBusy();
 
                 // ✅ Notify UI we’re done (even if nothing changed)
                 try
@@ -199,6 +238,11 @@ namespace Zink.Services
         {
             try { return Path.GetRelativePath(baseDir, fullPath); }
             catch { return Path.GetFileName(fullPath); }
+        }
+
+        private static string BuildVideoKey(string folderToken, string relativePath)
+        {
+            return $"{folderToken}|{relativePath}";
         }
 
         private async Task LoadTokensAndEnsureSaveShapeAsync()

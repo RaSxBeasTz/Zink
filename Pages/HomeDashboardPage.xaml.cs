@@ -55,6 +55,7 @@ namespace Zink.Pages
         private bool _spotifyDesktopRefreshInFlight;
         private string _lastSpotifyDesktopDisplay = "";
         private DateTimeOffset _lastSpotifyDiagnosticAtUtc;
+        private DateTimeOffset _lastSpotifyDesktopRefreshQueuedUtc = DateTimeOffset.MinValue;
         private readonly List<MissedCallNotification> _missedCalls = new();
 
         private static readonly HashSet<string> MusicExt = new(StringComparer.OrdinalIgnoreCase)
@@ -443,9 +444,14 @@ namespace Zink.Pages
 
         private void QueueSpotifyDesktopRefresh()
         {
+            var now = DateTimeOffset.UtcNow;
+            if (now - _lastSpotifyDesktopRefreshQueuedUtc < TimeSpan.FromSeconds(5))
+                return;
+
             if (_spotifyDesktopRefreshInFlight)
                 return;
 
+            _lastSpotifyDesktopRefreshQueuedUtc = now;
             _spotifyDesktopRefreshInFlight = true;
             _ = RefreshSpotifyDesktopNowPlayingAsync();
         }
@@ -699,7 +705,7 @@ namespace Zink.Pages
         private void WriteSpotifyDiagnosticsThrottled(string message)
         {
             var now = DateTimeOffset.UtcNow;
-            if (now - _lastSpotifyDiagnosticAtUtc < TimeSpan.FromSeconds(10))
+            if (now - _lastSpotifyDiagnosticAtUtc < TimeSpan.FromMinutes(1))
                 return;
 
             _lastSpotifyDiagnosticAtUtc = now;

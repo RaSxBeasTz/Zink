@@ -1,0 +1,202 @@
+<Page
+    x:Class="Zink.Pages.ZinkVpnPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    Background="Transparent">
+
+    <Page.Resources>
+        <SolidColorBrush x:Key="GlassPanelBrush" Color="#B0141820"/>
+        <SolidColorBrush x:Key="GlassPanelStrongBrush" Color="#C2182530"/>
+        <SolidColorBrush x:Key="GlassTileBrush" Color="#8F101820"/>
+        <SolidColorBrush x:Key="GlassPanelBorderBrush" Color="#33FFFFFF"/>
+        <SolidColorBrush x:Key="MutedTextBrush" Color="#B7C8D2DC"/>
+
+        <Style x:Key="GlassPanelStyle" TargetType="Border">
+            <Setter Property="CornerRadius" Value="26"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="BorderBrush" Value="{StaticResource GlassPanelBorderBrush}"/>
+            <Setter Property="Background" Value="{StaticResource GlassPanelBrush}"/>
+        </Style>
+
+        <Style x:Key="GlassButtonStyle" TargetType="Button">
+            <Setter Property="MinHeight" Value="46"/>
+            <Setter Property="Padding" Value="18,0"/>
+            <Setter Property="CornerRadius" Value="23"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="BorderBrush" Value="#7CBFEFFF"/>
+            <Setter Property="Background" Value="#183947"/>
+            <Setter Property="Foreground" Value="White"/>
+        </Style>
+    </Page.Resources>
+
+    <Grid RequestedTheme="Dark">
+        <Grid.Background>
+            <LinearGradientBrush StartPoint="0,0" EndPoint="1,1">
+                <GradientStop Color="#70062D38" Offset="0"/>
+                <GradientStop Color="#780B4450" Offset="0.52"/>
+                <GradientStop Color="#9000080B" Offset="1"/>
+            </LinearGradientBrush>
+        </Grid.Background>
+
+        <ScrollViewer VerticalScrollBarVisibility="Auto"
+                      HorizontalScrollBarVisibility="Disabled">
+            <StackPanel Padding="32"
+                        Spacing="18">
+                <Border Style="{StaticResource GlassPanelStyle}"
+                        Padding="24">
+                    <Grid ColumnSpacing="22">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto"/>
+                            <ColumnDefinition Width="*"/>
+                        </Grid.ColumnDefinitions>
+
+                        <Border Width="104"
+                                Height="104"
+                                CornerRadius="24"
+                                Background="{StaticResource GlassPanelStrongBrush}"
+                                BorderBrush="#44FFFFFF"
+                                BorderThickness="1">
+                            <FontIcon Glyph="&#xE72E;"
+                                      FontFamily="Segoe Fluent Icons"
+                                      FontSize="46"
+                                      Foreground="#38FF66"
+                                      HorizontalAlignment="Center"
+                                      VerticalAlignment="Center"/>
+                        </Border>
+
+                        <StackPanel Grid.Column="1"
+                                    Spacing="8"
+                                    VerticalAlignment="Center">
+                            <TextBlock Text="Zink VPN"
+                                       FontSize="34"
+                                       FontWeight="SemiBold"
+                                       Foreground="White"/>
+                            <TextBlock Text="One button connects to your Windows VPN profile."
+                                       FontSize="16"
+                                       Foreground="{StaticResource MutedTextBrush}"
+                                       TextWrapping="WrapWholeWords"/>
+                            <TextBlock x:Name="StatusText"
+                                       Text="Checking VPN status..."
+                                       FontSize="15"
+                                       Foreground="White"
+                                       TextWrapping="WrapWholeWords"/>
+                            <TextBlock x:Name="DiagnosticText"
+                                       FontSize="12"
+                                       Foreground="{StaticResource MutedTextBrush}"
+                                       TextWrapping="WrapWholeWords"
+                                       Visibility="Collapsed"/>
+                        </StackPanel>
+                    </Grid>
+                </Border>
+
+                <Border Style="{StaticResource GlassPanelStyle}"
+                        Padding="22">
+                    <Grid ColumnSpacing="18"
+                          RowSpacing="16">
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/>
+                        </Grid.RowDefinitions>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="Auto"/>
+                        </Grid.ColumnDefinitions>
+
+                        <StackPanel Spacing="6">
+                            <TextBlock Text="Connection"
+                                       FontSize="22"
+                                       FontWeight="SemiBold"
+                                       Foreground="White"/>
+                            <TextBlock Text="Uses the Windows VPN profile named Zink VPN."
+                                       Foreground="{StaticResource MutedTextBrush}"
+                                       TextWrapping="WrapWholeWords"/>
+                        </StackPanel>
+
+                        <Button x:Name="ConnectButton"
+                                Grid.Column="1"
+                                Style="{StaticResource GlassButtonStyle}"
+                                Click="ConnectButton_Click"
+                                VerticalAlignment="Center">
+                            <StackPanel Orientation="Horizontal" Spacing="8">
+                                <FontIcon Glyph="&#xE768;" FontFamily="Segoe Fluent Icons" FontSize="16"/>
+                                <TextBlock x:Name="ConnectButtonText" Text="Connect"/>
+                            </StackPanel>
+                        </Button>
+
+                        <StackPanel Grid.Row="1"
+                                    Grid.ColumnSpan="2"
+                                    Spacing="10">
+                            <TextBlock Text="A VPN hides your public IP address from websites and routes downloads through the VPN server, but the app needs a real VPN server or provider profile to connect to."
+                                       Foreground="{StaticResource MutedTextBrush}"
+                                       TextWrapping="WrapWholeWords"/>
+                            <StackPanel Orientation="Horizontal"
+                                        Spacing="10">
+                                <Button x:Name="RefreshButton"
+                                        Style="{StaticResource GlassButtonStyle}"
+                                        Click="RefreshButton_Click">
+                                    <StackPanel Orientation="Horizontal" Spacing="8">
+                                        <FontIcon Glyph="&#xE72C;" FontFamily="Segoe Fluent Icons" FontSize="16"/>
+                                        <TextBlock Text="Refresh"/>
+                                    </StackPanel>
+                                </Button>
+
+                                <Button x:Name="OpenSettingsButton"
+                                        Style="{StaticResource GlassButtonStyle}"
+                                        Click="OpenSettingsButton_Click">
+                                    <StackPanel Orientation="Horizontal" Spacing="8">
+                                        <FontIcon Glyph="&#xE713;" FontFamily="Segoe Fluent Icons" FontSize="16"/>
+                                        <TextBlock Text="VPN settings"/>
+                                    </StackPanel>
+                                </Button>
+                            </StackPanel>
+                        </StackPanel>
+                    </Grid>
+                </Border>
+
+                <Border Style="{StaticResource GlassPanelStyle}"
+                        Padding="22">
+                    <StackPanel Spacing="14">
+                        <StackPanel Spacing="6">
+                            <TextBlock Text="Credentials"
+                                       FontSize="22"
+                                       FontWeight="SemiBold"
+                                       Foreground="White"/>
+                            <TextBlock Text="Saved locally in Windows Credential Locker and used only for this VPN connection."
+                                       Foreground="{StaticResource MutedTextBrush}"
+                                       TextWrapping="WrapWholeWords"/>
+                        </StackPanel>
+
+                        <Grid ColumnSpacing="14">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="*"/>
+                            </Grid.ColumnDefinitions>
+
+                            <StackPanel Spacing="6">
+                                <TextBlock Text="Username"
+                                           Foreground="White"
+                                           FontWeight="SemiBold"/>
+                                <TextBox x:Name="VpnUsernameBox"
+                                         PlaceholderText="hide.me username"/>
+                            </StackPanel>
+
+                            <StackPanel Grid.Column="1"
+                                        Spacing="6">
+                                <TextBlock Text="Password"
+                                           Foreground="White"
+                                           FontWeight="SemiBold"/>
+                                <PasswordBox x:Name="VpnPasswordBox"
+                                             PlaceholderText="hide.me password"/>
+                            </StackPanel>
+                        </Grid>
+
+                        <CheckBox x:Name="SaveCredentialsCheckBox"
+                                  Content="Remember credentials on this PC"
+                                  IsChecked="True"
+                                  Foreground="White"/>
+                    </StackPanel>
+                </Border>
+            </StackPanel>
+        </ScrollViewer>
+    </Grid>
+</Page>
