@@ -11,6 +11,20 @@ namespace Zink.Pages
         private readonly Dictionary<string, (string Title, DateTime? Released, string Notes)> _changelog =
             new(StringComparer.OrdinalIgnoreCase)
             {
+                // 3.0.35.0
+                ["3.0.35.0"] = (
+                    Title: "Version 3.0.35.0",
+                    Released: new DateTime(2026, 07, 07),
+                    Notes:
+@"Version 3.0.35.0
+- Fixed opening movie files directly from File Explorer with Zink so file activation now reaches the video player instead of hanging on the startup loading screen.
+- Added support for media paths passed through Explorer command-line launches as well as packaged Windows file activation.
+- Fixed the startup overlay so it clears immediately when a video or music file is opened directly with Zink.
+- Added real timeouts to video and audio metadata probing so slow or unusual movie files cannot leave the app waiting forever before playback.
+- Fixed direct-open movie playback hanging on the video player page by keeping Windows-playable AAC and other supported audio streams on the native Windows media path instead of starting the custom FFmpeg audio pipe.
+- Fixed slow, laggy, and sometimes unresponsive app behaviour by reducing repeated Home Dashboard Spotify checks and throttling diagnostic log flushing/mirroring.
+- Added film poster artwork to the Video Library so film cards can show title poster art instead of only video thumbnails."
+                ),
                 // 3.0.34.0
                 ["3.0.34.0"] = (
                     Title: "Version 3.0.34.0",

@@ -7,13 +7,16 @@ using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.IO;
 using System.Linq;
+using System.Net.Http;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using Windows.Storage;
 using Windows.Storage.AccessCache;
 using Windows.Storage.FileProperties;
 using Windows.Storage.Pickers;
 using Windows.Storage.Search;
+using Windows.Storage.Streams;
 using WinRT.Interop;
 
 using Zink.Services;
@@ -26,6 +29,10 @@ namespace Zink.Pages
 
         private const string LibraryFileName = "video_library.json";
         private readonly string[] _exts = new[] { ".mp4", ".mkv", ".avi", ".mov", ".m4v", ".wmv" };
+        private static readonly HttpClient MovieArtworkHttpClient = new() { Timeout = TimeSpan.FromSeconds(5) };
+        private static readonly Dictionary<string, byte[]?> MovieArtworkCache = new(StringComparer.OrdinalIgnoreCase);
+        private static readonly string[] MovieArtworkExtensions = new[] { ".jpg", ".jpeg", ".png", ".webp" };
+        private static readonly string[] MovieArtworkNames = new[] { "poster", "cover", "folder", "movie", "title" };
 
         // Prompt suppression (so you don't get nagged every time you visit the page)
         private const string EmptyPromptDismissedKey = "VideoLibrary_EmptyPromptDismissed";
@@ -41,6 +48,11 @@ namespace Zink.Pages
         private bool _scanDialogShowing;
         private VideoLibraryScanResult? _lastScanResult;
         private DateTime _lastDialogAtUtc = DateTime.MinValue;
+
+        static VideoLibraryPage()
+        {
+            MovieArtworkHttpClient.DefaultRequestHeaders.UserAgent.ParseAdd("Mozilla/5.0");
+        }
 
         public VideoLibraryPage()
         {
@@ -406,13 +418,18 @@ namespace Zink.Pages
         {
             try
             {
-                using (var thumb = await file.GetThumbnailAsync(ThumbnailMode.VideosView, 220, ThumbnailOptions.UseCurrentScale))
+                await PopulateMovieArtworkAsync(file, item);
+
+                if (item.Thumbnail == null)
                 {
-                    if (thumb != null)
+                    using (var thumb = await file.GetThumbnailAsync(ThumbnailMode.VideosView, 220, ThumbnailOptions.UseCurrentScale))
                     {
-                        var bmp = new BitmapImage();
-                        await bmp.SetSourceAsync(thumb);
-                        item.Thumbnail = bmp;
+                        if (thumb != null)
+                        {
+                            var bmp = new BitmapImage();
+                            await bmp.SetSourceAsync(thumb);
+                            item.Thumbnail = bmp;
+                        }
                     }
                 }
 
@@ -421,6 +438,160 @@ namespace Zink.Pages
                     item.Duration = props.Duration;
             }
             catch { }
+        }
+
+        private async Task PopulateMovieArtworkAsync(StorageFile file, VideoItem item)
+        {
+            if (await TrySetLocalMovieArtworkAsync(file, item))
+                return;
+
+            var posterBytes = await TryFindMovieArtworkBytesAsync(item.Name);
+            if (posterBytes == null || posterBytes.Length == 0)
+                return;
+
+            using var stream = new InMemoryRandomAccessStream();
+            using (var writer = new DataWriter(stream.GetOutputStreamAt(0)))
+            {
+                writer.WriteBytes(posterBytes);
+                await writer.StoreAsync();
+                await writer.FlushAsync();
+            }
+
+            stream.Seek(0);
+            var bitmap = new BitmapImage { DecodePixelWidth = 440 };
+            await bitmap.SetSourceAsync(stream);
+            item.Thumbnail = bitmap;
+        }
+
+        private static async Task<bool> TrySetLocalMovieArtworkAsync(StorageFile file, VideoItem item)
+        {
+            try
+            {
+                var folder = await file.GetParentAsync();
+                if (folder == null)
+                    return false;
+
+                var baseName = Path.GetFileNameWithoutExtension(file.Name);
+                foreach (var artworkName in GetLocalMovieArtworkFileNames(baseName))
+                {
+                    if (await folder.TryGetItemAsync(artworkName) is StorageFile artworkFile)
+                    {
+                        using var stream = await artworkFile.OpenReadAsync();
+                        var bmp = new BitmapImage { DecodePixelWidth = 440 };
+                        await bmp.SetSourceAsync(stream);
+                        item.Thumbnail = bmp;
+                        return true;
+                    }
+                }
+            }
+            catch { }
+
+            return false;
+        }
+
+        private static IEnumerable<string> GetLocalMovieArtworkFileNames(string baseName)
+        {
+            foreach (var ext in MovieArtworkExtensions)
+                yield return baseName + ext;
+
+            foreach (var name in MovieArtworkNames)
+                foreach (var ext in MovieArtworkExtensions)
+                    yield return name + ext;
+        }
+
+        private static async Task<byte[]?> TryFindMovieArtworkBytesAsync(string title)
+        {
+            var searchTitle = CleanMovieSearchTitle(title);
+            if (string.IsNullOrWhiteSpace(searchTitle))
+                return null;
+
+            if (MovieArtworkCache.TryGetValue(searchTitle, out var cached))
+                return cached;
+
+            byte[]? result = null;
+
+            try
+            {
+                var artworkUrl = await TryFindImdbMovieArtworkUrlAsync(searchTitle);
+                if (!string.IsNullOrWhiteSpace(artworkUrl))
+                    result = await MovieArtworkHttpClient.GetByteArrayAsync(artworkUrl);
+            }
+            catch { }
+
+            MovieArtworkCache[searchTitle] = result;
+            return result;
+        }
+
+        private static async Task<string?> TryFindImdbMovieArtworkUrlAsync(string searchTitle)
+        {
+            var suggestionKey = BuildImdbSuggestionKey(searchTitle);
+            if (string.IsNullOrWhiteSpace(suggestionKey))
+                return null;
+
+            var url = $"https://v3.sg.media-imdb.com/suggestion/{suggestionKey[0]}/{Uri.EscapeDataString(suggestionKey)}.json";
+            using var response = await MovieArtworkHttpClient.GetAsync(url);
+            if (!response.IsSuccessStatusCode)
+                return null;
+
+            using var stream = await response.Content.ReadAsStreamAsync();
+            using var doc = await JsonDocument.ParseAsync(stream);
+
+            if (!doc.RootElement.TryGetProperty("d", out var results) ||
+                results.ValueKind != JsonValueKind.Array)
+            {
+                return null;
+            }
+
+            string? fallbackUrl = null;
+            var wanted = NormalizeMovieTitleForMatch(searchTitle);
+
+            foreach (var result in results.EnumerateArray())
+            {
+                if (!result.TryGetProperty("l", out var nameElement) ||
+                    nameElement.ValueKind != JsonValueKind.String ||
+                    !result.TryGetProperty("i", out var imageElement) ||
+                    !imageElement.TryGetProperty("imageUrl", out var urlElement) ||
+                    urlElement.ValueKind != JsonValueKind.String)
+                {
+                    continue;
+                }
+
+                var imageUrl = urlElement.GetString();
+                if (string.IsNullOrWhiteSpace(imageUrl))
+                    continue;
+
+                fallbackUrl ??= imageUrl;
+
+                var candidate = NormalizeMovieTitleForMatch(nameElement.GetString() ?? string.Empty);
+                if (string.Equals(candidate, wanted, StringComparison.OrdinalIgnoreCase))
+                    return imageUrl;
+            }
+
+            return fallbackUrl;
+        }
+
+        private static string BuildImdbSuggestionKey(string title)
+        {
+            var key = Regex.Replace(title.ToLowerInvariant(), @"[^a-z0-9]+", "_").Trim('_');
+            return key;
+        }
+
+        private static string NormalizeMovieTitleForMatch(string title)
+        {
+            var normalized = title.Replace('&', ' ');
+            normalized = Regex.Replace(normalized, @"[^a-zA-Z0-9]+", " ");
+            normalized = Regex.Replace(normalized, @"\s+", " ").Trim();
+            return normalized;
+        }
+
+        private static string CleanMovieSearchTitle(string title)
+        {
+            var cleaned = Path.GetFileNameWithoutExtension(title ?? string.Empty);
+            cleaned = cleaned.Replace('.', ' ').Replace('_', ' ');
+            cleaned = Regex.Replace(cleaned, @"\b(480p|720p|1080p|2160p|4k|bluray|brrip|web[- ]?dl|webrip|hdrip|dvdrip|x264|x265|h264|h265|hevc|aac|dts|yts|proper|repack)\b", " ", RegexOptions.IgnoreCase);
+            cleaned = Regex.Replace(cleaned, @"\[[^\]]*\]|\{[^\}]*\}", " ");
+            cleaned = Regex.Replace(cleaned, @"\s+", " ").Trim();
+            return cleaned;
         }
 
         private async Task LoadPersistedAsync()

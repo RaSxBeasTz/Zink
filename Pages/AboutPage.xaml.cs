@@ -10,7 +10,7 @@ namespace Zink.Pages
     public sealed partial class AboutPage : Page
     {
         // ? Latest version shown in About (match VersionHistoryPage keys)
-        private const string LatestVersion = "3.0.34.0";
+        private const string LatestVersion = "3.0.35.0";
 
         public AboutPage()
         {
@@ -34,6 +34,12 @@ namespace Zink.Pages
         {
             var assemblyLocation = Assembly.GetExecutingAssembly().Location;
             return File.GetLastWriteTime(assemblyLocation);
+        }
+
+        // Learn More for 3.0.35.0
+        private void LearnMore3035Button_Click(object sender, RoutedEventArgs e)
+        {
+            Frame.Navigate(typeof(VersionHistoryPage), "3.0.35.0");
         }
 
         // Learn More for 3.0.34.0

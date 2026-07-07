@@ -52,7 +52,7 @@
             <GridView.ItemTemplate>
                 <DataTemplate>
                     <StackPanel Width="220" Spacing="8">
-                        <Border CornerRadius="12" Height="124" Background="#202020">
+                        <Border CornerRadius="12" Height="330" Background="#202020">
                             <Image Source="{Binding Thumbnail}" Stretch="UniformToFill"/>
                         </Border>
                         <TextBlock Text="{Binding Name}" TextTrimming="CharacterEllipsis" />
