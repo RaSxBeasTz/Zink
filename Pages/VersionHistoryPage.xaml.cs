@@ -11,24 +11,20 @@ namespace Zink.Pages
         private readonly Dictionary<string, (string Title, DateTime? Released, string Notes)> _changelog =
             new(StringComparer.OrdinalIgnoreCase)
             {
-                // 3.0.35.0
-                ["3.0.35.0"] = (
-                    Title: "Version 3.0.35.0",
-                    Released: new DateTime(2026, 07, 05),
+                // 3.0.34.0
+                ["3.0.34.0"] = (
+                    Title: "Version 3.0.34.0",
+                    Released: new DateTime(2026, 06, 28),
                     Notes:
 @"Version 3.0.35.0
 - Fixed opening movie files directly from File Explorer with Zink so file activation now reaches the video player instead of hanging on the startup loading screen.
 - Added support for media paths passed through Explorer command-line launches as well as packaged Windows file activation.
 - Fixed the startup overlay so it clears immediately when a video or music file is opened directly with Zink.
 - Added real timeouts to video and audio metadata probing so slow or unusual movie files cannot leave the app waiting forever before playback.
-- Fixed direct-open movie playback hanging on the video player page by keeping Windows-playable AAC and other supported audio streams on the native Windows media path instead of starting the custom FFmpeg audio pipe."
-                ),
-                // 3.0.34.0
-                ["3.0.34.0"] = (
-                    Title: "Version 3.0.34.0",
-                    Released: new DateTime(2026, 06, 28),
-                    Notes:
-@"Version 3.0.34.0
+- Fixed direct-open movie playback hanging on the video player page by keeping Windows-playable AAC and other supported audio streams on the native Windows media path instead of starting the custom FFmpeg audio pipe.
+- Fixed slow, laggy, and sometimes unresponsive app behaviour by reducing repeated Home Dashboard Spotify checks and throttling diagnostic log flushing/mirroring.
+
+Version 3.0.34.0
 - Added Duplicate Video Searcher to the Video section in the sidebar so duplicate videos in the Zink Video Library can be found in one place.
 - Added duplicate video results grouped by matching video name and file size, with quick actions to play each video.
 - Added Open file location for duplicate videos so Zink opens the folder containing the selected file and highlights it when Windows allows.
@@ -50,7 +46,6 @@ namespace Zink.Pages
 - Updated the package certificate to match the app publisher identity and extended the local signing certificate validity to 2046.
 - Improved the packaging setup so Visual Studio local package builds are signed by default while Store upload builds can still opt out when needed."
                 ),
-
                 // 3.0.33.0
                 ["3.0.33.0"] = (
                     Title: "Version 3.0.33.0",

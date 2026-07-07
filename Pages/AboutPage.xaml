@@ -113,18 +113,6 @@
                                        FontSize="22"
                                        FontWeight="SemiBold"
                                        Foreground="White"/>
-
-                            <Border Style="{StaticResource VersionRowStyle}">
-                                <Grid ColumnSpacing="12">
-                                    <Grid.ColumnDefinitions>
-                                        <ColumnDefinition Width="*"/>
-                                        <ColumnDefinition Width="Auto"/>
-                                    </Grid.ColumnDefinitions>
-                                    <TextBlock Text="Version 3.0.35.0" Foreground="White" FontWeight="SemiBold" VerticalAlignment="Center"/>
-                                    <Button x:Name="LearnMore3035Button" Grid.Column="1" Style="{StaticResource GlassButtonStyle}" Content="Learn More" Click="LearnMore3035Button_Click"/>
-                                </Grid>
-                            </Border>
-
                             <Border Style="{StaticResource VersionRowStyle}">
                                 <Grid ColumnSpacing="12">
                                     <Grid.ColumnDefinitions>
