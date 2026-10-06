@@ -276,6 +276,12 @@
                             </NavigationViewItem.Icon>
                         </NavigationViewItem>
 
+                        <NavigationViewItem Content="Duplicate Video Searcher" Tag="DuplicateVideoSearcher">
+                            <NavigationViewItem.Icon>
+                                <FontIcon Glyph="&#xE8EE;" FontFamily="Segoe Fluent Icons"/>
+                            </NavigationViewItem.Icon>
+                        </NavigationViewItem>
+
                         <NavigationViewItem Content="Screen Recorder" Tag="ScreenRecorder">
                             <NavigationViewItem.Icon>
                                 <FontIcon Glyph="&#xE722;" FontFamily="Segoe Fluent Icons"/>
