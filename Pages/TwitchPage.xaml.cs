@@ -4,6 +4,9 @@ using Microsoft.UI.Xaml.Media;
 using Microsoft.Web.WebView2.Core;
 using System;
 using System.IO;
+using System.Net.Http;
+using System.Security.Cryptography;
+using System.Text;
 using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml.Navigation;
 
@@ -12,9 +15,18 @@ namespace Zink.Pages
     public sealed partial class TwitchPage : Page
     {
         private static readonly Uri TwitchHome = new("https://www.twitch.tv/");
+        private static readonly HttpClient TwitchAdBlockClient = new()
+        {
+            Timeout = TimeSpan.FromSeconds(15)
+        };
+        private const string TwitchAdBlockScriptUrl =
+            "https://raw.githubusercontent.com/ryanbr/TwitchAdSolutions/v68.5.1/vaft/vaft.user.js";
+        private const string TwitchAdBlockScriptSha256 =
+            "556f0001c62f6650771aa7cade948abbd36dcc7fd12c10d667f85723392984a0";
         private AppWindow _appWindow;
+        private bool _adBlockAttached;
 
-        // ? saved “card” visuals so we can restore after fullscreen
+        // ? saved â€œcardâ€ visuals so we can restore after fullscreen
         private Thickness _savedHostMargin;
         private CornerRadius _savedHostCornerRadius;
         private Thickness _savedHostBorderThickness;
@@ -38,6 +50,7 @@ namespace Zink.Pages
 
                 var env = await CoreWebView2Environment.CreateWithOptionsAsync(null, userDataFolder, null);
                 await TwitchWebView.EnsureCoreWebView2Async(env);
+                await ConfigureTwitchAdBlockAsync();
 
                 // ? In-player fullscreen -> app fullscreen + sidebar hide
                 TwitchWebView.CoreWebView2.ContainsFullScreenElementChanged += CoreWebView2_ContainsFullScreenElementChanged;
@@ -71,7 +84,7 @@ namespace Zink.Pages
 
             if (sender.ContainsFullScreenElement)
             {
-                // ? TRUE edge-to-edge: remove the “card” styling
+                // ? TRUE edge-to-edge: remove the â€œcardâ€ styling
                 HostBorder.Margin = new Thickness(0);
                 HostBorder.CornerRadius = new CornerRadius(0);
                 HostBorder.BorderThickness = new Thickness(0);
@@ -108,6 +121,139 @@ namespace Zink.Pages
                 e.Handled = true;
                 try { TwitchWebView.CoreWebView2.Navigate(e.Uri); } catch { }
             };
+        }
+
+        private async System.Threading.Tasks.Task ConfigureTwitchAdBlockAsync()
+        {
+            if (_adBlockAttached || TwitchWebView?.CoreWebView2 == null)
+                return;
+
+            string script = await LoadVerifiedTwitchAdBlockScriptAsync();
+            var core = TwitchWebView.CoreWebView2;
+            core.AddWebResourceRequestedFilter("*", CoreWebView2WebResourceContext.All);
+            core.WebResourceRequested += TwitchWebView_WebResourceRequested;
+
+            if (!string.IsNullOrWhiteSpace(script))
+                await core.AddScriptToExecuteOnDocumentCreatedAsync(script);
+
+            await core.AddScriptToExecuteOnDocumentCreatedAsync(TwitchCosmeticAdShieldScript);
+            _adBlockAttached = true;
+        }
+
+        private void TwitchWebView_WebResourceRequested(
+            CoreWebView2 sender,
+            CoreWebView2WebResourceRequestedEventArgs args)
+        {
+            try
+            {
+                string uri = args.Request.Uri ?? string.Empty;
+                if (!IsBlockedTwitchAdRequest(uri))
+                    return;
+
+                args.Response = sender.Environment.CreateWebResourceResponse(
+                    new global::Windows.Storage.Streams.InMemoryRandomAccessStream(),
+                    204,
+                    "No Content",
+                    "Content-Type: text/plain");
+            }
+            catch { }
+        }
+
+        private static bool IsBlockedTwitchAdRequest(string uri)
+        {
+            if (string.IsNullOrWhiteSpace(uri))
+                return false;
+
+            return uri.Contains("doubleclick.net", StringComparison.OrdinalIgnoreCase) ||
+                   uri.Contains("googlesyndication.com", StringComparison.OrdinalIgnoreCase) ||
+                   uri.Contains("googleadservices.com", StringComparison.OrdinalIgnoreCase) ||
+                   uri.Contains("amazon-adsystem.com", StringComparison.OrdinalIgnoreCase) ||
+                   uri.Contains("scorecardresearch.com", StringComparison.OrdinalIgnoreCase) ||
+                   uri.Contains("adservice.google.", StringComparison.OrdinalIgnoreCase) ||
+                   uri.Contains("/pagead/", StringComparison.OrdinalIgnoreCase) ||
+                   uri.Contains("/pubads", StringComparison.OrdinalIgnoreCase) ||
+                   uri.Contains("/securepubads", StringComparison.OrdinalIgnoreCase) ||
+                   uri.Contains("spade.twitch.tv", StringComparison.OrdinalIgnoreCase) ||
+                   uri.Contains("video-ad-stats", StringComparison.OrdinalIgnoreCase) ||
+                   uri.Contains("ad-impression", StringComparison.OrdinalIgnoreCase) ||
+                   uri.Contains("ad_quartile", StringComparison.OrdinalIgnoreCase);
+        }
+
+        private const string TwitchCosmeticAdShieldScript = @"
+(() => {
+    if (window.__zinkTwitchCosmeticAdShieldInstalled) return;
+    window.__zinkTwitchCosmeticAdShieldInstalled = true;
+
+    const selectors = [
+        '[data-a-target=""video-ad-label""]',
+        '[data-a-target=""video-ad-countdown""]',
+        '[data-test-selector=""sad-overlay""]',
+        '.stream-display-ad',
+        '.channel-leaderboard-header-rotating',
+        '[class*=""ad-banner""]',
+        '[class*=""AdBanner""]',
+        '[data-a-target*=""ad-banner""]',
+        '[data-test-selector*=""ad-banner""]'
+    ];
+
+    function removeAds() {
+        try {
+            if (!location.hostname.endsWith('twitch.tv')) return;
+            for (const selector of selectors) {
+                for (const node of document.querySelectorAll(selector)) {
+                    try { node.remove(); } catch {}
+                }
+            }
+        } catch {}
+    }
+
+    new MutationObserver(removeAds).observe(document.documentElement, {
+        childList: true,
+        subtree: true
+    });
+    setInterval(removeAds, 250);
+    removeAds();
+})();
+";
+
+        private static async System.Threading.Tasks.Task<string> LoadVerifiedTwitchAdBlockScriptAsync()
+        {
+            string cacheFolder = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                "ZinkTwitchWebViewData");
+            string cachePath = Path.Combine(cacheFolder, "ZinkTwitchAdBlock.v68.5.1.js");
+
+            try
+            {
+                if (File.Exists(cachePath))
+                {
+                    string cachedScript = await File.ReadAllTextAsync(cachePath);
+                    if (HasExpectedTwitchAdBlockHash(cachedScript))
+                        return cachedScript;
+                }
+
+                string downloadedScript = await TwitchAdBlockClient.GetStringAsync(TwitchAdBlockScriptUrl);
+                if (!HasExpectedTwitchAdBlockHash(downloadedScript))
+                    return string.Empty;
+
+                Directory.CreateDirectory(cacheFolder);
+                await File.WriteAllTextAsync(cachePath, downloadedScript, new UTF8Encoding(false));
+                return downloadedScript;
+            }
+            catch
+            {
+                return string.Empty;
+            }
+        }
+
+        private static bool HasExpectedTwitchAdBlockHash(string script)
+        {
+            if (string.IsNullOrWhiteSpace(script))
+                return false;
+
+            byte[] actualHash = SHA256.HashData(Encoding.UTF8.GetBytes(script));
+            byte[] expectedHash = Convert.FromHexString(TwitchAdBlockScriptSha256);
+            return CryptographicOperations.FixedTimeEquals(actualHash, expectedHash);
         }
 
         private static void ApplyStoreCompliantTwitchWebViewPolicy(CoreWebView2 webView)

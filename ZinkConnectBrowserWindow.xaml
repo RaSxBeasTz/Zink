@@ -3,10 +3,12 @@
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
     xmlns:controls="using:Microsoft.UI.Xaml.Controls"
+    xmlns:primitives="using:Microsoft.UI.Xaml.Controls.Primitives"
     xmlns:wv2="using:Microsoft.UI.Xaml.Controls">
 
     <Grid x:Name="Root" Background="#101820">
         <Grid.RowDefinitions>
+            <RowDefinition x:Name="TitleBarRow" Height="36"/>
             <RowDefinition x:Name="TabsRow" Height="40"/>
             <RowDefinition x:Name="ToolbarRow" Height="54"/>
             <RowDefinition x:Name="FavoritesRow" Height="42"/>
@@ -14,7 +16,48 @@
             <RowDefinition x:Name="StatusRow" Height="32"/>
         </Grid.RowDefinitions>
 
-        <Grid Grid.Row="0" Background="#151F29">
+        <Grid x:Name="BrowserTitleBar" Grid.Row="0" Padding="12,0,148,0">
+            <Grid.Background>
+                <AcrylicBrush TintColor="#102534"
+                              TintOpacity="0.78"
+                              FallbackColor="#102534"/>
+            </Grid.Background>
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="Auto"/>
+                <ColumnDefinition Width="*"/>
+            </Grid.ColumnDefinitions>
+            <Border Width="22"
+                    Height="22"
+                    CornerRadius="7"
+                    Background="#263FE7F4"
+                    BorderBrush="#594DE8F4"
+                    BorderThickness="1">
+                <FontIcon Glyph="&#xE774;"
+                          FontFamily="Segoe Fluent Icons"
+                          FontSize="12"
+                          Foreground="#EAFBFF"/>
+            </Border>
+            <StackPanel Grid.Column="1"
+                        Margin="9,0,0,0"
+                        Orientation="Horizontal"
+                        Spacing="7"
+                        VerticalAlignment="Center">
+                <TextBlock Text="Zink Connect"
+                           Foreground="#F2FBFF"
+                           FontSize="12"
+                           FontWeight="SemiBold"/>
+                <Border Width="1" Height="12" Background="#3DFFFFFF"/>
+                <TextBlock Text="Browser"
+                           Foreground="#9FC8D8E2"
+                           FontSize="11"/>
+            </StackPanel>
+            <Border Grid.ColumnSpan="2"
+                    VerticalAlignment="Bottom"
+                    Height="1"
+                    Background="#334DE8F4"/>
+        </Grid>
+
+        <Grid Grid.Row="1" Background="#151F29">
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="*"/>
                 <ColumnDefinition Width="Auto"/>
@@ -58,7 +101,7 @@
             </Button>
         </Grid>
 
-        <Grid Grid.Row="1" Padding="10,7" ColumnSpacing="8" Background="#151F29">
+        <Grid Grid.Row="2" Padding="10,7" ColumnSpacing="8" Background="#151F29">
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="Auto"/>
                 <ColumnDefinition Width="Auto"/>
@@ -98,7 +141,7 @@
             </Button>
         </Grid>
 
-        <Grid Grid.Row="2" Background="#101820" Padding="10,5" ColumnSpacing="8">
+        <Grid Grid.Row="3" Background="#101820" Padding="10,5" ColumnSpacing="8">
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="Auto"/>
                 <ColumnDefinition Width="Auto"/>
@@ -143,40 +186,55 @@
             </Button>
         </Grid>
 
-        <Grid Grid.Row="3" Background="#080C10">
+        <Grid Grid.Row="4" Background="#080C10">
             <Grid x:Name="BrowserHost"/>
 
             <Grid x:Name="SettingsPage"
                   Visibility="Collapsed"
                   Background="#101820"
                   Padding="34">
-                <StackPanel MaxWidth="760" Spacing="24" HorizontalAlignment="Left">
-                    <TextBlock Text="Zink Connect Settings"
-                               Foreground="White"
-                               FontSize="28"
-                               FontWeight="SemiBold"/>
-                    <Border Background="#182633" BorderBrush="#35FFFFFF" BorderThickness="1" CornerRadius="8" Padding="20">
-                        <Grid ColumnSpacing="20">
-                            <Grid.ColumnDefinitions>
-                                <ColumnDefinition Width="*"/>
-                                <ColumnDefinition Width="Auto"/>
-                            </Grid.ColumnDefinitions>
-                            <StackPanel Spacing="6">
-                                <TextBlock Text="Launch Zink browser only"
-                                           Foreground="White"
-                                           FontSize="16"
-                                           FontWeight="SemiBold"/>
-                                <TextBlock Text="When Zink Connect is clicked in the sidebar, open this browser and send the main Zink window to the tray."
-                                           Foreground="#B8D8E7F2"
-                                           TextWrapping="WrapWholeWords"
-                                           FontSize="13"/>
-                            </StackPanel>
-                            <ToggleSwitch x:Name="LaunchBrowserOnlyToggle"
-                                          Grid.Column="1"
-                                          MinWidth="100"
-                                          Toggled="LaunchBrowserOnlyToggle_Toggled"/>
-                        </Grid>
-                    </Border>
+                <Grid ColumnSpacing="14">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="Auto"/>
+                    </Grid.ColumnDefinitions>
+
+                    <ScrollViewer x:Name="SettingsScrollViewer"
+                                  VerticalScrollBarVisibility="Hidden"
+                                  VerticalScrollMode="Enabled"
+                                  HorizontalScrollBarVisibility="Disabled"
+                                  HorizontalScrollMode="Disabled"
+                                  HorizontalAlignment="Stretch"
+                                  VerticalAlignment="Stretch"
+                                  ViewChanged="SettingsScrollViewer_ViewChanged"
+                                  SizeChanged="SettingsScrollViewer_SizeChanged">
+                        <StackPanel MaxWidth="760" Spacing="24" HorizontalAlignment="Left">
+                        <TextBlock Text="Zink Connect Settings"
+                                   Foreground="White"
+                                   FontSize="28"
+                                   FontWeight="SemiBold"/>
+                        <Border Background="#182633" BorderBrush="#35FFFFFF" BorderThickness="1" CornerRadius="8" Padding="20">
+                            <Grid ColumnSpacing="20">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="Auto"/>
+                                </Grid.ColumnDefinitions>
+                                <StackPanel Spacing="6">
+                                    <TextBlock Text="Launch Zink browser only"
+                                               Foreground="White"
+                                               FontSize="16"
+                                               FontWeight="SemiBold"/>
+                                    <TextBlock Text="When Zink Connect is clicked in the sidebar, open this browser and send the main Zink window to the tray."
+                                               Foreground="#B8D8E7F2"
+                                               TextWrapping="WrapWholeWords"
+                                               FontSize="13"/>
+                                </StackPanel>
+                                <ToggleSwitch x:Name="LaunchBrowserOnlyToggle"
+                                              Grid.Column="1"
+                                              MinWidth="100"
+                                              Toggled="LaunchBrowserOnlyToggle_Toggled"/>
+                            </Grid>
+                        </Border>
 
                     <Border Background="#182633" BorderBrush="#35FFFFFF" BorderThickness="1" CornerRadius="8" Padding="20">
                         <Grid ColumnSpacing="20">
@@ -198,6 +256,29 @@
                                           Grid.Column="1"
                                           MinWidth="100"
                                           Toggled="BrowsingHistoryToggle_Toggled"/>
+                        </Grid>
+                    </Border>
+
+                    <Border Background="#182633" BorderBrush="#35FFFFFF" BorderThickness="1" CornerRadius="8" Padding="20">
+                        <Grid ColumnSpacing="20">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="Auto"/>
+                            </Grid.ColumnDefinitions>
+                            <StackPanel Spacing="6">
+                                <TextBlock Text="Remember website sign-ins and cookie preferences"
+                                           Foreground="White"
+                                           FontSize="16"
+                                           FontWeight="SemiBold"/>
+                                <TextBlock Text="Keep Zink Connect website sessions, saved sign-in data, cookies, and site preferences available after app restarts, updates, and reinstalls when local app data is kept."
+                                           Foreground="#B8D8E7F2"
+                                           TextWrapping="WrapWholeWords"
+                                           FontSize="13"/>
+                            </StackPanel>
+                            <ToggleSwitch x:Name="RememberSignInAndCookiePreferencesToggle"
+                                          Grid.Column="1"
+                                          MinWidth="100"
+                                          Toggled="RememberSignInAndCookiePreferencesToggle_Toggled"/>
                         </Grid>
                     </Border>
 
@@ -256,7 +337,34 @@
                             </Button>
                         </Grid>
                     </Border>
-                </StackPanel>
+                        </StackPanel>
+                    </ScrollViewer>
+
+                    <primitives:ScrollBar x:Name="SettingsScrollBar"
+                                          Grid.Column="1"
+                                          Width="12"
+                                          Orientation="Vertical"
+                                          HorizontalAlignment="Right"
+                                          VerticalAlignment="Stretch"
+                                          Minimum="0"
+                                          SmallChange="48"
+                                          LargeChange="240"
+                                          Background="#33000000"
+                                          Foreground="White"
+                                          ValueChanged="SettingsScrollBar_ValueChanged">
+                        <primitives:ScrollBar.Resources>
+                            <SolidColorBrush x:Key="ScrollBarThumbFill" Color="White"/>
+                            <SolidColorBrush x:Key="ScrollBarThumbFillPointerOver" Color="White"/>
+                            <SolidColorBrush x:Key="ScrollBarThumbFillPressed" Color="White"/>
+                            <SolidColorBrush x:Key="ScrollBarThumbFillDisabled" Color="#66FFFFFF"/>
+                            <SolidColorBrush x:Key="ScrollBarPanningThumbFill" Color="White"/>
+                            <SolidColorBrush x:Key="ScrollBarPanningThumbFillPointerOver" Color="White"/>
+                            <SolidColorBrush x:Key="ScrollBarPanningThumbFillPressed" Color="White"/>
+                            <SolidColorBrush x:Key="ScrollBarTrackFill" Color="#22000000"/>
+                            <SolidColorBrush x:Key="ScrollBarTrackFillPointerOver" Color="#33000000"/>
+                        </primitives:ScrollBar.Resources>
+                    </primitives:ScrollBar>
+                </Grid>
             </Grid>
 
             <Grid x:Name="HistoryPage"
@@ -312,7 +420,7 @@
             </Grid>
         </Grid>
 
-        <Grid Grid.Row="4" Padding="12,0" Background="#151F29">
+        <Grid Grid.Row="5" Padding="12,0" Background="#151F29">
             <TextBlock x:Name="StatusText"
                        Text="Ready"
                        Foreground="#CFE8F3"

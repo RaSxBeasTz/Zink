@@ -30,6 +30,7 @@ namespace Zink.Services
         private const uint TPM_LEFTALIGN = 0x0000;
         private const uint TPM_RIGHTBUTTON = 0x0002;
         private const uint TPM_BOTTOMALIGN = 0x0020;
+        private const uint TPM_RETURNCMD = 0x0100;
         private const uint MF_STRING = 0x00000000;
         private const uint MF_SEPARATOR = 0x00000800;
 
@@ -156,25 +157,49 @@ namespace Zink.Services
             try
             {
                 AppendMenu(menu, MF_STRING, ID_OPEN, "Open Zink");
-                AppendMenu(menu, MF_STRING, ID_SAVE, "Save the last 45 seconds");
+                int replaySeconds = Recording.RecordingPreferences.BackgroundReplayDurationSeconds;
+                string replayLength = replaySeconds < 60
+                    ? $"{replaySeconds} seconds"
+                    : $"{replaySeconds / 60} minute{(replaySeconds == 60 ? "" : "s")}";
+                AppendMenu(menu, MF_STRING, ID_SAVE, $"Save the last {replayLength}");
                 AppendMenu(menu, MF_SEPARATOR, 0, null);
                 AppendMenu(menu, MF_STRING, ID_EXIT, "Exit");
 
                 GetCursorPos(out POINT pt);
                 SetForegroundWindow(hWnd);
 
-                TrackPopupMenu(
+                int commandId = TrackPopupMenu(
                     menu,
-                    TPM_LEFTALIGN | TPM_RIGHTBUTTON | TPM_BOTTOMALIGN,
+                    TPM_LEFTALIGN | TPM_RIGHTBUTTON | TPM_BOTTOMALIGN | TPM_RETURNCMD,
                     pt.X,
                     pt.Y,
                     0,
                     hWnd,
                     IntPtr.Zero);
+
+                InvokeCommand(commandId);
             }
             finally
             {
                 DestroyMenu(menu);
+            }
+        }
+
+        private void InvokeCommand(int commandId)
+        {
+            switch (commandId)
+            {
+                case ID_OPEN:
+                    OpenClicked?.Invoke(this, EventArgs.Empty);
+                    break;
+
+                case ID_SAVE:
+                    SaveLast45SecondsClicked?.Invoke(this, EventArgs.Empty);
+                    break;
+
+                case ID_EXIT:
+                    ExitClicked?.Invoke(this, EventArgs.Empty);
+                    break;
             }
         }
 
@@ -323,7 +348,7 @@ namespace Zink.Services
         private static extern bool SetForegroundWindow(IntPtr hWnd);
 
         [DllImport("user32.dll")]
-        private static extern bool TrackPopupMenu(
+        private static extern int TrackPopupMenu(
             IntPtr hMenu,
             uint uFlags,
             int x,

@@ -367,6 +367,8 @@
                             <RowDefinition Height="Auto"/>
                             <RowDefinition Height="Auto"/>
                             <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/>
                             <RowDefinition Height="*"/>
                         </Grid.RowDefinitions>
 
@@ -437,6 +439,46 @@
                                         Click="ResetTwitchButton_Click"/>
                             </StackPanel>
                         </StackPanel>
+                        <Button Grid.Row="8"
+                                Style="{StaticResource StreamButtonStyle}"
+                                Content="Discord sound control">
+                            <Button.Flyout>
+                                <Flyout>
+                                    <StackPanel Width="280" Spacing="10">
+                                        <TextBlock Text="Discord sound control"
+                                                   FontSize="17"
+                                                   FontWeight="SemiBold"/>
+                                        <ToggleSwitch x:Name="IncludeDiscordSoundToggle"
+                                                      Header="Include Discord sound in stream"
+                                                      IsOn="True"
+                                                      Toggled="IncludeDiscordSoundToggle_Toggled"/>
+                                        <TextBlock Text="When excluded, you can still hear Discord normally, but its audio is removed from the stream's desktop mix."
+                                                   TextWrapping="Wrap"
+                                                   Opacity="0.75"/>
+                                    </StackPanel>
+                                </Flyout>
+                            </Button.Flyout>
+                        </Button>
+                        <Button Grid.Row="9"
+                                Style="{StaticResource StreamButtonStyle}"
+                                Content="Spotify sound control">
+                            <Button.Flyout>
+                                <Flyout>
+                                    <StackPanel Width="280" Spacing="10">
+                                        <TextBlock Text="Spotify sound control"
+                                                   FontSize="17"
+                                                   FontWeight="SemiBold"/>
+                                        <ToggleSwitch x:Name="IncludeSpotifySoundToggle"
+                                                      Header="Include Spotify sound in stream"
+                                                      IsOn="True"
+                                                      Toggled="IncludeSpotifySoundToggle_Toggled"/>
+                                        <TextBlock Text="When excluded, you can still hear Spotify normally, but its audio is removed from the stream's desktop mix. Only one app can be excluded at a time."
+                                                   TextWrapping="Wrap"
+                                                   Opacity="0.75"/>
+                                    </StackPanel>
+                                </Flyout>
+                            </Button.Flyout>
+                        </Button>
                     </Grid>
                 </Border>
 

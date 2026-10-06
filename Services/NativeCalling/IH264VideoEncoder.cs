@@ -19,6 +19,7 @@ namespace Zink.Services.NativeCalling
         int HardwareInputRequests { get; }
         int HardwareOutputRequests { get; }
         bool UsesHardwareEventPump { get; }
+        bool RecoveryKeyFrameRequestPending { get; }
 
         IReadOnlyList<H264EncodedFrame> Encode(Bitmap bitmap, long? timestampMilliseconds = null);
         IReadOnlyList<H264EncodedFrame> EncodeGpuBgraTexture(Texture2D sourceTexture, int sourceWidth, int sourceHeight, long? timestampMilliseconds);

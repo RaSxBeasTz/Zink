@@ -50,6 +50,7 @@ namespace Zink.Services
         private Uri? _artistImageUri = null;
 
         private DateTimeOffset _startedAt = default;
+        private TimeSpan _elapsedBeforePause = TimeSpan.Zero;
         private bool _isPlaying;
 
         // ================= SHARED RADIO VOLUME =================
@@ -223,8 +224,10 @@ namespace Zink.Services
         {
             get
             {
-                if (_startedAt == default) return TimeSpan.Zero;
-                var span = DateTimeOffset.Now - _startedAt;
+                if (!_isPlaying || _startedAt == default)
+                    return _elapsedBeforePause;
+
+                var span = _elapsedBeforePause + (DateTimeOffset.Now - _startedAt);
                 return span < TimeSpan.Zero ? TimeSpan.Zero : span;
             }
         }
@@ -268,6 +271,7 @@ namespace Zink.Services
         {
             RaiseOnUI(() =>
             {
+                bool stationChanged = !string.Equals(StationTitle, stationTitle ?? "—", StringComparison.Ordinal);
                 StationTitle = stationTitle ?? "—";
                 _stationLogoUri = stationLogoUri;
 
@@ -279,7 +283,11 @@ namespace Zink.Services
                 SecondaryText = "";
                 GenericArtworkUri = ArtworkOrLogo ?? _stationLogoUri;
 
-                IsPlaying = isPlaying;
+                if (stationChanged)
+                    ResetElapsed(isPlaying);
+                else
+                    SetPlayingState(isPlaying);
+
                 SafeFire(NowPlayingChanged);
             });
         }
@@ -292,10 +300,8 @@ namespace Zink.Services
                 SongTitle = title ?? "";
                 Duration = duration;
                 _artistImageUri = artistImageUri;
-                _startedAt = DateTimeOffset.Now;
 
                 OnPropertyChanged(nameof(ArtworkOrLogo));
-                OnPropertyChanged(nameof(Elapsed));
 
                 if (CurrentKind == MediaKind.Radio)
                 {
@@ -310,7 +316,7 @@ namespace Zink.Services
             });
         }
 
-        public void SetIsPlaying(bool isPlaying) => RaiseOnUI(() => IsPlaying = isPlaying);
+        public void SetIsPlaying(bool isPlaying) => RaiseOnUI(() => SetPlayingState(isPlaying));
 
         public void SetGenericNowPlaying(MediaKind kind, string primary, string secondary, Uri? artworkUri, bool isPlaying)
         {
@@ -355,7 +361,21 @@ namespace Zink.Services
 
         public void RequestPlay() { try { PlayRequested?.Invoke(); } catch { } }
         public void RequestPause() { try { PauseRequested?.Invoke(); } catch { } }
-        public void RequestStop() { try { StopRequested?.Invoke(); } catch { } }
+        public void RequestStop()
+        {
+            try { StopRequested?.Invoke(); } catch { }
+            RaiseOnUI(() => ResetElapsed(false));
+        }
+        public void RequestWidgetStop()
+        {
+            try { PauseRequested?.Invoke(); } catch { }
+            RaiseOnUI(() => ResetElapsed(false));
+        }
+        public void RequestLive()
+        {
+            RaiseOnUI(() => ResetElapsed(true));
+            try { PlayRequested?.Invoke(); } catch { }
+        }
 
         // ================= INotifyPropertyChanged =================
         public event PropertyChangedEventHandler? PropertyChanged;
@@ -367,6 +387,35 @@ namespace Zink.Services
         private void SafeFire(EventHandler? ev)
         {
             try { ev?.Invoke(this, EventArgs.Empty); } catch { }
+        }
+
+        private void SetPlayingState(bool isPlaying)
+        {
+            if (isPlaying == IsPlaying)
+                return;
+
+            if (isPlaying)
+            {
+                _startedAt = DateTimeOffset.Now;
+            }
+            else if (_startedAt != default)
+            {
+                var played = DateTimeOffset.Now - _startedAt;
+                if (played > TimeSpan.Zero)
+                    _elapsedBeforePause += played;
+                _startedAt = default;
+            }
+
+            IsPlaying = isPlaying;
+            OnPropertyChanged(nameof(Elapsed));
+        }
+
+        private void ResetElapsed(bool isPlaying)
+        {
+            _elapsedBeforePause = TimeSpan.Zero;
+            _startedAt = isPlaying ? DateTimeOffset.Now : default;
+            IsPlaying = isPlaying;
+            OnPropertyChanged(nameof(Elapsed));
         }
 
         private void RaiseOnUI(Action action)

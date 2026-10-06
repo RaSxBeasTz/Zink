@@ -105,6 +105,7 @@
                 <!-- Stage -->
                 <Grid Grid.Column="0">
                     <Border x:Name="CallStageBorder"
+                  Margin="0,10,0,0"
                   CornerRadius="30"
                   Background="#12000000"
                   BorderBrush="#26FFFFFF"
@@ -236,7 +237,15 @@
                                         </Border>
 
                                         <StackPanel x:Name="RemoteScreenWatchUsersPanel"
-                                                    Spacing="10"/>
+                                                    Spacing="10">
+                                            <Button x:Name="RemoteScreenWatchButton"
+                                                    Content="Watch now"
+                                                    HorizontalAlignment="Stretch"
+                                                    HorizontalContentAlignment="Center"
+                                                    Padding="18,12"
+                                                    CornerRadius="12"
+                                                    Click="RemoteScreenWatchButton_Click"/>
+                                        </StackPanel>
                                     </StackPanel>
                                 </Border>
 
@@ -306,7 +315,7 @@
                                         <FontIcon Glyph="&#xE946;"
                                   FontSize="16"
                                   Foreground="White"/>
-                                        <TextBlock Text="Stream information"
+                                        <TextBlock Text="The screen share information"
                                    VerticalAlignment="Center"
                                    FontSize="13"
                                    FontWeight="SemiBold"
@@ -400,29 +409,29 @@
                             </Grid>
                             <!-- Control dock -->
                             <Border x:Name="CallControlDock"
-                      HorizontalAlignment="Center"
+                      HorizontalAlignment="Stretch"
                       VerticalAlignment="Bottom"
-                      Margin="0,0,0,18"
-                      Padding="12,10,12,12"
+                      Margin="18,0,18,6"
+                      Padding="18,10,18,12"
                       CornerRadius="34"
                       Background="#D4111318"
                       BorderBrush="#30FFFFFF"
                       BorderThickness="1"
-                      MaxWidth="900"
                       MinHeight="96">
                                 <ScrollViewer HorizontalScrollBarVisibility="Auto"
                               HorizontalScrollMode="Auto"
                               VerticalScrollBarVisibility="Disabled"
                               VerticalScrollMode="Disabled"
                               VerticalAlignment="Center">
-                                    <StackPanel Orientation="Horizontal" Spacing="8">
+                                    <StackPanel Orientation="Horizontal" Spacing="8" HorizontalAlignment="Center">
 
                                     <StackPanel Width="80" Spacing="6" HorizontalAlignment="Center">
-                                        <Button x:Name="HeadphonesButton"
+                                        <Button x:Name="SoundDeviceButton"
                             Width="56"
                             Height="56"
+                            HorizontalAlignment="Center"
                             CornerRadius="28"
-                            Click="HeadphonesButton_Click"
+                            Click="SoundDeviceButton_Click"
                             Background="#171A20"
                             BorderBrush="#2FFFFFFF"
                             BorderThickness="1">
@@ -430,7 +439,7 @@
                                 FontSize="24"
                                 Foreground="White"/>
                                         </Button>
-                                        <TextBlock Text="Headphones"
+                                        <TextBlock Text="Sound"
                                Foreground="White"
                                FontSize="11"
                                TextTrimming="CharacterEllipsis"
@@ -438,20 +447,21 @@
                                     </StackPanel>
 
                                     <StackPanel Width="80" Spacing="6" HorizontalAlignment="Center">
-                                        <Button x:Name="MuteToggleButton"
+                                        <Button x:Name="ScreenShareCodecButton"
                             Width="56"
                             Height="56"
+                            HorizontalAlignment="Center"
                             CornerRadius="28"
-                            Click="MuteToggleButton_Click"
+                            Click="ScreenShareCodecButton_Click"
                             Background="#171A20"
                             BorderBrush="#2FFFFFFF"
                             BorderThickness="1">
-                                            <FontIcon x:Name="MuteIcon"
-                                Glyph="&#xE720;"
+                                            <FontIcon Glyph="&#xE945;"
                                 FontSize="24"
                                 Foreground="White"/>
                                         </Button>
-                                        <TextBlock Text="Mute"
+                                        <TextBlock x:Name="ScreenShareCodecLabel"
+                               Text="AV1X"
                                Foreground="White"
                                FontSize="11"
                                TextTrimming="CharacterEllipsis"
@@ -462,8 +472,9 @@
                                         <Button x:Name="DeafenToggleButton"
                             Width="56"
                             Height="56"
+                            HorizontalAlignment="Center"
                             CornerRadius="28"
-                            Click="DeafenToggleButton_Click"
+                            Click="DeafenMenuButton_Click"
                             Background="#171A20"
                             BorderBrush="#2FFFFFFF"
                             BorderThickness="1">
@@ -482,6 +493,7 @@
                                         <Button x:Name="ScreenShareToggleButton"
                             Width="56"
                             Height="56"
+                            HorizontalAlignment="Center"
                             CornerRadius="28"
                             Click="ScreenShareToggleButton_Click"
                             Background="#171A20"
@@ -505,6 +517,7 @@
                                         <Button x:Name="ScreenShareQualityButton"
                             Width="56"
                             Height="56"
+                            HorizontalAlignment="Center"
                             CornerRadius="28"
                             Click="ScreenShareQualityButton_Click"
                             Background="#171A20"
@@ -515,7 +528,7 @@
                                 Foreground="White"/>
                                         </Button>
                                         <TextBlock x:Name="ScreenShareQualityLabel"
-                               Text="720p"
+                               Text="720p 30 FPS"
                                Foreground="White"
                                FontSize="11"
                                TextTrimming="CharacterEllipsis"
@@ -526,6 +539,7 @@
                                         <Button x:Name="ScreenShareSoundButton"
                             Width="56"
                             Height="56"
+                            HorizontalAlignment="Center"
                             CornerRadius="28"
                             Click="ScreenShareSoundButton_Click"
                             Background="#171A20"
@@ -535,7 +549,7 @@
                                 FontSize="24"
                                 Foreground="White"/>
                                         </Button>
-                                        <TextBlock Text="Sound"
+                                        <TextBlock Text="Share audio"
                                Foreground="White"
                                FontSize="11"
                                TextTrimming="CharacterEllipsis"
@@ -546,6 +560,7 @@
                                         <Button x:Name="ScreenShareDetailsButton"
                             Width="56"
                             Height="56"
+                            HorizontalAlignment="Center"
                             CornerRadius="28"
                             Click="ScreenShareDetailsButton_Click"
                             Background="#171A20"
@@ -566,6 +581,7 @@
                                         <Button x:Name="LocalPreviewRestoreButton"
                             Width="56"
                             Height="56"
+                            HorizontalAlignment="Center"
                             CornerRadius="28"
                             Click="LocalPreviewRestoreButton_Click"
                             Background="#171A20"
@@ -586,6 +602,7 @@
                                         <Button x:Name="FullscreenDockButton"
                             Width="56"
                             Height="56"
+                            HorizontalAlignment="Center"
                             CornerRadius="28"
                             Click="FullscreenButton_Click"
                             Background="#171A20"
@@ -608,6 +625,7 @@
                                         <Button x:Name="MoreButton"
                             Width="56"
                             Height="56"
+                            HorizontalAlignment="Center"
                             CornerRadius="28"
                             Click="MoreButton_Click"
                             Background="#171A20"
@@ -628,6 +646,7 @@
                                         <Button x:Name="EndButton"
                             Width="56"
                             Height="56"
+                            HorizontalAlignment="Center"
                             CornerRadius="28"
                             Click="EndButton_Click"
                             Background="#F04F50"
@@ -658,13 +677,13 @@
                   BorderBrush="#26FFFFFF"
                   BorderThickness="1">
                         <StackPanel Spacing="12">
-                            <TextBlock Text="Members"
+                            <TextBlock Text="The members in the call"
                          FontSize="20"
                          FontWeight="SemiBold"
                          Foreground="White"/>
 
                             <TextBlock x:Name="MembersSummaryText"
-                         Text="In call - 1"
+                         Text="The current number of people in the call: 1"
                          FontSize="13"
                          Foreground="#A8A8A8"/>
 
@@ -678,7 +697,7 @@
                       Padding="12,8">
                                 <StackPanel Orientation="Horizontal" Spacing="8" HorizontalAlignment="Center">
                                     <FontIcon Glyph="&#xE710;" FontSize="16" Foreground="White"/>
-                                    <TextBlock Text="Add Friend"
+                                    <TextBlock Text="Add a friend to the call"
                                Foreground="White"
                                FontWeight="SemiBold"/>
                                 </StackPanel>
@@ -783,7 +802,7 @@
                       Padding="14">
                                 <StackPanel Spacing="8">
                                     <TextBlock x:Name="CallTimerText"
-                             Text="Duration: 00:00"
+                             Text="The duration of the call: 00:00"
                              Foreground="#D0D0D0"/>
                                     <TextBlock x:Name="TargetUserText"
                              Text="Target user: -"
@@ -830,6 +849,18 @@
                 </StackPanel>
             </Border>
         </Grid>
+
+        <InfoBar x:Name="SidebarCollapsedInfoBar"
+                 Title="Sidebar collapsed"
+                 Message="To save space, the sidebar has been shut. To open it again, click the three white lines."
+                 Severity="Informational"
+                 IsOpen="False"
+                 IsClosable="False"
+                 HorizontalAlignment="Left"
+                 VerticalAlignment="Top"
+                 MaxWidth="620"
+                 Margin="8,18,24,0"
+                 Canvas.ZIndex="9000"/>
 
         <Border x:Name="FullscreenExitHotspot"
                 HorizontalAlignment="Right"

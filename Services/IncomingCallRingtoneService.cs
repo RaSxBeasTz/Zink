@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.IO;
 using System.Runtime.InteropServices;
 using System.Threading.Tasks;
 using NAudio.Wave;
@@ -26,13 +27,30 @@ namespace Zink.Services
 
         public static void TryStart()
         {
+            TryStartIncoming();
+        }
+
+        public static void TryStartIncoming()
+        {
             try
             {
-                Instance.Start();
+                Instance.Start(CallSoundKind.Incoming);
             }
             catch (Exception ex)
             {
                 Debug.WriteLine($"[IncomingCallSound] Start skipped because ringtone service is unavailable: {ex}");
+            }
+        }
+
+        public static void TryStartOutgoing()
+        {
+            try
+            {
+                Instance.Start(CallSoundKind.Outgoing);
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"[OutgoingCallSound] Start skipped because call sound service is unavailable: {ex}");
             }
         }
 
@@ -49,7 +67,8 @@ namespace Zink.Services
         }
 
         private readonly object _syncRoot = new();
-        private readonly List<WaveOutEvent> _outputs = new();
+        private readonly List<WaveOut> _outputs = new();
+        private readonly List<IDisposable> _sources = new();
         private DateTimeOffset _startedAt;
         private int _stopVersion;
 
@@ -58,6 +77,11 @@ namespace Zink.Services
         }
 
         public void Start()
+        {
+            Start(CallSoundKind.Incoming);
+        }
+
+        private void Start(CallSoundKind soundKind)
         {
             lock (_syncRoot)
             {
@@ -70,15 +94,20 @@ namespace Zink.Services
                     {
                         try
                         {
-                            var output = new WaveOutEvent
+                            IDisposable? disposableSource = null;
+                            var output = new WaveOut
                             {
                                 DeviceNumber = deviceNumber,
-                                DesiredLatency = 80
+                                BufferMilliseconds = 80
                             };
 
-                            output.Init(new RingtoneWaveProvider());
+                            var source = CreateCallSoundProvider(soundKind);
+                            disposableSource = source as IDisposable;
+                            output.Init(source);
                             output.Play();
                             _outputs.Add(output);
+                            if (disposableSource != null)
+                                _sources.Add(disposableSource);
 
                             Debug.WriteLine($"[IncomingCallSound] Ringtone started on device {deviceNumber} ({GetDeviceName(deviceNumber)}).");
                         }
@@ -161,6 +190,17 @@ namespace Zink.Services
                     {
                     }
                 }
+
+                foreach (var source in _sources)
+                {
+                    try
+                    {
+                        source.Dispose();
+                    }
+                    catch
+                    {
+                    }
+                }
             }
             catch
             {
@@ -168,7 +208,32 @@ namespace Zink.Services
             finally
             {
                 _outputs.Clear();
+                _sources.Clear();
             }
+        }
+
+        private static IWaveProvider CreateCallSoundProvider(CallSoundKind soundKind)
+        {
+            var ringtonePath = Path.Combine(
+                AppContext.BaseDirectory,
+                "Assets",
+                "Sounds",
+                "zink-call-ring.wav");
+
+            if (File.Exists(ringtonePath))
+            {
+                try
+                {
+                    return new LoopingWaveFileProvider(ringtonePath);
+                }
+                catch (Exception ex)
+                {
+                    Debug.WriteLine($"[CallSound] Failed to load packaged ringtone '{ringtonePath}': {ex.Message}");
+                }
+            }
+
+            Debug.WriteLine($"[CallSound] Packaged ringtone was unavailable; using synthesized fallback.");
+            return new PopCallWaveProvider(soundKind);
         }
 
         public void Dispose()
@@ -187,7 +252,7 @@ namespace Zink.Services
             if (seen.Add(-1))
                 yield return -1;
 
-            for (var deviceNumber = 0; deviceNumber < WaveInterop.waveOutGetNumDevs(); deviceNumber++)
+            for (var deviceNumber = 0; deviceNumber < WaveOut.DeviceCount; deviceNumber++)
             {
                 if (seen.Add(deviceNumber))
                     yield return deviceNumber;
@@ -201,8 +266,7 @@ namespace Zink.Services
 
             try
             {
-                var capabilities = new WaveOutCapabilities();
-                WaveInterop.waveOutGetDevCaps((IntPtr)deviceNumber, out capabilities, Marshal.SizeOf<WaveOutCapabilities>());
+                var capabilities = WaveOut.GetCapabilities(deviceNumber);
                 return capabilities.ProductName;
             }
             catch
@@ -211,51 +275,88 @@ namespace Zink.Services
             }
         }
 
-        private sealed class RingtoneWaveProvider : IWaveProvider
+        private enum CallSoundKind
+        {
+            Incoming,
+            Outgoing
+        }
+
+        private sealed class LoopingWaveFileProvider : IWaveProvider, IDisposable
+        {
+            private readonly WaveFileReader _reader;
+
+            public LoopingWaveFileProvider(string path)
+            {
+                _reader = new WaveFileReader(path);
+            }
+
+            public WaveFormat WaveFormat => _reader.WaveFormat;
+
+            public int Read(byte[] buffer, int offset, int count)
+            {
+                return Read(buffer.AsSpan(offset, count));
+            }
+
+            public int Read(Span<byte> buffer)
+            {
+                var totalRead = 0;
+                while (totalRead < buffer.Length)
+                {
+                    var read = _reader.Read(buffer[totalRead..]);
+                    if (read == 0)
+                    {
+                        _reader.Position = 0;
+                        continue;
+                    }
+
+                    totalRead += read;
+                }
+
+                return totalRead;
+            }
+
+            public void Dispose()
+            {
+                _reader.Dispose();
+            }
+        }
+
+        private sealed class PopCallWaveProvider : IWaveProvider
         {
             private const int SampleRate = 44100;
             private const int Channels = 2;
-            private static readonly RingtoneNote[] Pattern =
-            {
-                new(659.25, 0.13),
-                new(783.99, 0.13),
-                new(987.77, 0.18),
-                new(0.0, 0.08),
-                new(783.99, 0.12),
-                new(987.77, 0.12),
-                new(1174.66, 0.24),
-                new(0.0, 0.78)
-            };
 
+            private readonly CallSoundKind _soundKind;
             private long _sampleIndex;
 
-            public RingtoneWaveProvider()
+            public PopCallWaveProvider(CallSoundKind soundKind)
             {
+                _soundKind = soundKind;
             }
 
             public WaveFormat WaveFormat { get; } = new WaveFormat(SampleRate, 16, Channels);
 
             public int Read(byte[] buffer, int offset, int count)
             {
+                return Read(buffer.AsSpan(offset, count));
+            }
+
+            public int Read(Span<byte> buffer)
+            {
                 var frameSize = Channels * 2;
-                var frames = count / frameSize;
+                var frames = buffer.Length / frameSize;
 
                 for (var frame = 0; frame < frames; frame++)
                 {
                     var time = _sampleIndex / (double)SampleRate;
-                    var note = GetNote(time, out var noteTime);
-                    var amplitude = 0.0;
+                    var amplitude = _soundKind == CallSoundKind.Incoming
+                        ? RenderPop(time % 1.65, 0.0, 1.0) + RenderPop(time % 1.65, 0.19, 0.78)
+                        : RenderPop(time % 1.30, 0.0, 0.58);
 
-                    if (note.Frequency > 0.0)
-                    {
-                        var envelope = GetEnvelope(noteTime, note.DurationSeconds);
-                        var sparkle = Math.Sin(2 * Math.PI * note.Frequency * time);
-                        var chime = Math.Sin(2 * Math.PI * note.Frequency * 2.0 * time) * 0.18;
-                        amplitude = (sparkle + chime) * envelope * 0.42;
-                    }
+                    amplitude = Math.Clamp(amplitude, -0.82, 0.82);
 
                     var sample = (short)(amplitude * short.MaxValue);
-                    var writeOffset = offset + frame * frameSize;
+                    var writeOffset = frame * frameSize;
 
                     buffer[writeOffset] = (byte)(sample & 0xff);
                     buffer[writeOffset + 1] = (byte)((sample >> 8) & 0xff);
@@ -268,41 +369,25 @@ namespace Zink.Services
                 return frames * frameSize;
             }
 
-            private static RingtoneNote GetNote(double time, out double noteTime)
+            private static double RenderPop(double cycleTime, double startTime, double volume)
             {
-                var patternDuration = 0.0;
-                foreach (var note in Pattern)
-                    patternDuration += note.DurationSeconds;
+                var popTime = cycleTime - startTime;
+                if (popTime < 0.0 || popTime >= 0.22)
+                    return 0.0;
 
-                var cycleTime = time % patternDuration;
-                var elapsed = 0.0;
+                // A short pitch drop gives the cue its rounded "bubble pop" shape.
+                var pitchPhase = 2.0 * Math.PI * (980.0 * popTime - 1550.0 * popTime * popTime);
+                var bodyEnvelope = (1.0 - Math.Exp(-popTime * 240.0)) * Math.Exp(-popTime * 25.0);
+                var body = Math.Sin(pitchPhase) * bodyEnvelope;
 
-                foreach (var note in Pattern)
-                {
-                    if (cycleTime < elapsed + note.DurationSeconds)
-                    {
-                        noteTime = cycleTime - elapsed;
-                        return note;
-                    }
+                // A tiny high-frequency transient adds definition without sounding harsh.
+                var clickEnvelope = Math.Exp(-popTime * 115.0);
+                var click = Math.Sin(2.0 * Math.PI * 3100.0 * popTime) * clickEnvelope * 0.16;
 
-                    elapsed += note.DurationSeconds;
-                }
-
-                noteTime = 0.0;
-                return Pattern[^1];
+                // A quiet octave layer makes the pop feel fuller on laptop speakers.
+                var warmth = Math.Sin(pitchPhase * 0.5) * bodyEnvelope * 0.22;
+                return (body + click + warmth) * volume * 0.48;
             }
-
-            private static double GetEnvelope(double noteTime, double duration)
-            {
-                const double attack = 0.018;
-                const double release = 0.055;
-
-                var fadeIn = Math.Min(1.0, noteTime / attack);
-                var fadeOut = Math.Min(1.0, Math.Max(0.0, duration - noteTime) / release);
-                return Math.Min(fadeIn, fadeOut);
-            }
-
-            private readonly record struct RingtoneNote(double Frequency, double DurationSeconds);
         }
     }
 }

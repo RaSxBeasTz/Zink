@@ -1,12 +1,15 @@
-﻿using System;
+using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
 using System.Runtime.InteropServices;
+using System.Threading;
+using System.Threading.Tasks;
 using ConcentusDecoder = Concentus.Structs.OpusDecoder;
 using NAudio.Wave;
 
-namespace Zink.Services.NativeCalling
+namespace Zink.Services.NativeCalling.Quality1080p
 {
     public sealed class AudioPlaybackService
     {
@@ -18,16 +21,17 @@ namespace Zink.Services.NativeCalling
             public override string ToString() => Name;
         }
 
-        public static AudioPlaybackService Instance { get; } = new AudioPlaybackService();
+        public static AudioPlaybackService Instance => ScreenShareServiceSelector.Active.AudioPlayback;
 
         private readonly object _gate = new();
         private readonly Queue<byte[]> _packetQueue = new();
         private readonly Queue<byte[]> _mediaPacketQueue = new();
+        private readonly ConcurrentQueue<QueuedAudioPacket> _queuedPlaybackPackets = new();
 
         private BufferedWaveProvider? _buffer;
         private BufferedWaveProvider? _mediaBuffer;
-        private WaveOutEvent? _output;
-        private WaveOutEvent? _mediaOutput;
+        private WaveOut? _output;
+        private WaveOut? _mediaOutput;
         private readonly ConcentusDecoder _decoder;
         private readonly ConcentusDecoder _mediaDecoder;
 
@@ -37,15 +41,24 @@ namespace Zink.Services.NativeCalling
         private const int MediaSampleRate = 48000;
         private const int MediaChannels = 2;
         private const int MediaFrameSize = 960;
-        private const int MaxBufferedPackets = 12;
-        private const int MaxBufferedMediaPackets = 42;
+        private const int MaxBufferedPackets = 8;
+        // A 20 ms Opus packet can arrive in short scheduler/network bursts. Keep
+        // enough compressed reserve to absorb a 400 ms burst instead of dropping
+        // audio while WaveOut is between refill callbacks.
         private const int StartPlaybackPacketThreshold = 2;
-        private const int MediaStartPlaybackPacketThreshold = 8;
-        private const int MediaDesiredLatencyMs = 120;
-        private const int MediaTargetBufferedMs = 240;
-        private const int MediaHardTrimBufferedMs = 640;
+        private const int VoiceTargetBufferedMs = 120;
+        private const int VoiceHardTrimBufferedMs = 360;
+        // Keep enough decoded PCM ready for normal network jitter without also
+        // accumulating a second, much larger queue of compressed Opus packets.
+        // Keep the decoded buffer close to the actual output latency.  The old
+        // 140 ms target stayed full, so incoming Opus accumulated in the
+        // compressed queue and was periodically discarded during small receive
+        // bursts.  Those drops became audible after a few minutes of sharing.
+        private readonly ScreenShareAudioPlaybackSettings _screenShareSettings;
         private const float VoicePlaybackGain = 1.8f;
-        private const float MediaPlaybackGain = 1.6f;
+        // Screen-share audio is already full-scale media. Extra gain clipped
+        // transients and made packet-boundary disturbances sound like crackles.
+        private const float MediaPlaybackGain = 1.0f;
         private static readonly byte[] ScreenShareAudioHeader = { (byte)'Z', (byte)'S', (byte)'A', (byte)'1' };
 
         private int _selectedOutputDeviceNumber = -1;
@@ -54,7 +67,13 @@ namespace Zink.Services.NativeCalling
         private long _mediaPacketsReceived;
         private long _mediaPacketsDropped;
         private long _mediaPacketsDecoded;
+        private bool _mediaDiscontinuityPending;
+        private bool _hasLastMediaSamples;
+        private short _lastMediaSampleLeft;
+        private short _lastMediaSampleRight;
         private DateTimeOffset _lastMediaPlaybackLogUtc = DateTimeOffset.MinValue;
+        private long _queuedPlaybackGeneration;
+        private int _queuedPlaybackPumpRunning;
 
         public int SelectedOutputDeviceNumber
         {
@@ -67,8 +86,9 @@ namespace Zink.Services.NativeCalling
             }
         }
 
-        private AudioPlaybackService()
+        internal AudioPlaybackService(ScreenShareAudioPlaybackSettings screenShareSettings)
         {
+            _screenShareSettings = screenShareSettings;
             _decoder = new ConcentusDecoder(SampleRate, Channels);
             _mediaDecoder = new ConcentusDecoder(MediaSampleRate, MediaChannels);
         }
@@ -84,10 +104,9 @@ namespace Zink.Services.NativeCalling
                 }
             };
 
-            for (int i = 0; i < WaveInterop.waveOutGetNumDevs(); i++)
+            for (int i = 0; i < WaveOut.DeviceCount; i++)
             {
-                var capabilities = new WaveOutCapabilities();
-                WaveInterop.waveOutGetDevCaps((IntPtr)i, out capabilities, Marshal.SizeOf<WaveOutCapabilities>());
+                var capabilities = WaveOut.GetCapabilities(i);
 
                 devices.Add(new OutputDeviceInfo
                 {
@@ -103,7 +122,7 @@ namespace Zink.Services.NativeCalling
         {
             lock (_gate)
             {
-                if (deviceNumber < -1 || deviceNumber >= WaveInterop.waveOutGetNumDevs())
+                if (deviceNumber < -1 || deviceNumber >= WaveOut.DeviceCount)
                     return false;
 
                 bool wasRunning = _output != null || _mediaOutput != null;
@@ -140,9 +159,73 @@ namespace Zink.Services.NativeCalling
 
         public void Stop()
         {
+            Interlocked.Increment(ref _queuedPlaybackGeneration);
+            while (_queuedPlaybackPackets.TryDequeue(out _))
+            {
+            }
+
             lock (_gate)
             {
                 StopPlaybackLocked();
+            }
+        }
+
+        /// <summary>
+        /// Preserves packet order while keeping device startup and Opus decoding off
+        /// the realtime receive callback (which may also be presenting video).
+        /// </summary>
+        public void QueuePlayback(byte[] data)
+        {
+            if (data == null || data.Length == 0)
+                return;
+
+            _queuedPlaybackPackets.Enqueue(new QueuedAudioPacket(
+                Volatile.Read(ref _queuedPlaybackGeneration),
+                data));
+            StartQueuedPlaybackPump();
+        }
+
+        private void StartQueuedPlaybackPump()
+        {
+            if (Interlocked.CompareExchange(ref _queuedPlaybackPumpRunning, 1, 0) != 0)
+                return;
+
+            _ = Task.Run(ProcessQueuedPlayback);
+        }
+
+        private void ProcessQueuedPlayback()
+        {
+            try
+            {
+                while (_queuedPlaybackPackets.TryDequeue(out var queuedPacket))
+                {
+                    try
+                    {
+                        lock (_gate)
+                        {
+                            if (queuedPacket.Generation != Volatile.Read(ref _queuedPlaybackGeneration))
+                                continue;
+
+                            if (_output == null)
+                                StartPlaybackLocked();
+
+                            // Monitor locks are re-entrant; keeping the generation
+                            // check and playback under this lock prevents Stop() from
+                            // racing a stale packet into restarting the audio device.
+                            Play(queuedPacket.Data);
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        Debug.WriteLine($"[AudioPlayback] Queued playback failed: {ex.Message}");
+                    }
+                }
+            }
+            finally
+            {
+                Interlocked.Exchange(ref _queuedPlaybackPumpRunning, 0);
+                if (!_queuedPlaybackPackets.IsEmpty)
+                    StartQueuedPlaybackPump();
             }
         }
 
@@ -150,30 +233,32 @@ namespace Zink.Services.NativeCalling
         {
             var format = new WaveFormat(SampleRate, 16, Channels);
 
-            _buffer = new BufferedWaveProvider(format)
+            _buffer = new BufferedWaveProvider(format, TimeSpan.FromMilliseconds(450))
             {
                 DiscardOnBufferOverflow = true,
-                BufferDuration = TimeSpan.FromMilliseconds(450)
+                ReadFully = true
             };
 
-            _output = new WaveOutEvent
+            _output = new WaveOut
             {
-                DesiredLatency = 80,
+                BufferMilliseconds = 40,
                 DeviceNumber = _selectedOutputDeviceNumber
             };
 
             _output.Init(_buffer);
             _output.Play();
 
-            _mediaBuffer = new BufferedWaveProvider(new WaveFormat(MediaSampleRate, 16, MediaChannels))
+            _mediaBuffer = new BufferedWaveProvider(
+                new WaveFormat(MediaSampleRate, 16, MediaChannels),
+                TimeSpan.FromMilliseconds(420))
             {
                 DiscardOnBufferOverflow = true,
-                BufferDuration = TimeSpan.FromMilliseconds(420)
+                ReadFully = true
             };
 
-            _mediaOutput = new WaveOutEvent
+            _mediaOutput = new WaveOut
             {
-                DesiredLatency = MediaDesiredLatencyMs,
+                BufferMilliseconds = _screenShareSettings.DesiredLatencyMs,
                 DeviceNumber = _selectedOutputDeviceNumber
             };
 
@@ -187,6 +272,8 @@ namespace Zink.Services.NativeCalling
             _mediaPacketsReceived = 0;
             _mediaPacketsDropped = 0;
             _mediaPacketsDecoded = 0;
+            _mediaDiscontinuityPending = false;
+            _hasLastMediaSamples = false;
             _lastMediaPlaybackLogUtc = DateTimeOffset.MinValue;
         }
 
@@ -207,6 +294,8 @@ namespace Zink.Services.NativeCalling
                 _mediaPacketQueue.Clear();
                 _isPrimed = false;
                 _isMediaPrimed = false;
+                _mediaDiscontinuityPending = false;
+                _hasLastMediaSamples = false;
                 _lastMediaPlaybackLogUtc = DateTimeOffset.MinValue;
             }
             finally
@@ -253,7 +342,7 @@ namespace Zink.Services.NativeCalling
                     _isPrimed = true;
                 }
 
-                if (_buffer.BufferedDuration.TotalMilliseconds > 900)
+                if (_buffer.BufferedDuration.TotalMilliseconds > VoiceHardTrimBufferedMs)
                 {
                     _buffer.ClearBuffer();
 
@@ -261,7 +350,7 @@ namespace Zink.Services.NativeCalling
                         _packetQueue.Dequeue();
                 }
 
-                while (_packetQueue.Count > 0 && _buffer.BufferedDuration.TotalMilliseconds < 220)
+                while (_packetQueue.Count > 0 && _buffer.BufferedDuration.TotalMilliseconds < VoiceTargetBufferedMs)
                 {
                     var packet = _packetQueue.Dequeue();
                     DecodeAndQueuePacket(packet);
@@ -293,33 +382,35 @@ namespace Zink.Services.NativeCalling
 
             _mediaPacketsReceived++;
             _mediaPacketQueue.Enqueue(data);
-            while (_mediaPacketQueue.Count > MaxBufferedMediaPackets)
+            while (_mediaPacketQueue.Count > _screenShareSettings.MaxBufferedMediaPackets)
             {
                 _mediaPacketQueue.Dequeue();
                 _mediaPacketsDropped++;
+                _mediaDiscontinuityPending = true;
             }
 
             if (!_isMediaPrimed)
             {
-                if (_mediaPacketQueue.Count < MediaStartPlaybackPacketThreshold)
+                if (_mediaPacketQueue.Count < _screenShareSettings.StartPlaybackPacketThreshold)
                     return;
 
                 _isMediaPrimed = true;
             }
 
-            if (_mediaBuffer.BufferedDuration.TotalMilliseconds > MediaHardTrimBufferedMs)
+            if (_mediaBuffer.BufferedDuration.TotalMilliseconds > _screenShareSettings.HardTrimBufferedMs)
             {
                 _mediaBuffer.ClearBuffer();
-                while (_mediaPacketQueue.Count > MediaStartPlaybackPacketThreshold)
+                while (_mediaPacketQueue.Count > _screenShareSettings.StartPlaybackPacketThreshold)
                 {
                     _mediaPacketQueue.Dequeue();
                     _mediaPacketsDropped++;
+                    _mediaDiscontinuityPending = true;
                 }
 
-                _isMediaPrimed = _mediaPacketQueue.Count >= MediaStartPlaybackPacketThreshold;
+                _isMediaPrimed = _mediaPacketQueue.Count >= _screenShareSettings.StartPlaybackPacketThreshold;
             }
 
-            while (_mediaPacketQueue.Count > 0 && _mediaBuffer.BufferedDuration.TotalMilliseconds < MediaTargetBufferedMs)
+            while (_mediaPacketQueue.Count > 0 && _mediaBuffer.BufferedDuration.TotalMilliseconds < _screenShareSettings.TargetBufferedMs)
             {
                 DecodeAndQueueMediaPacket(_mediaPacketQueue.Dequeue());
             }
@@ -329,7 +420,7 @@ namespace Zink.Services.NativeCalling
             {
                 _lastMediaPlaybackLogUtc = now;
                 Debug.WriteLine(
-                    $"[ScreenShare:AudioPlayback] media received={_mediaPacketsReceived}; decoded={_mediaPacketsDecoded}; dropped={_mediaPacketsDropped}; packetQueue={_mediaPacketQueue.Count}; bufferedMs={_mediaBuffer.BufferedDuration.TotalMilliseconds:0}; desiredLatencyMs={_mediaOutput?.DesiredLatency ?? 0}.");
+                    $"[ScreenShare:AudioPlayback] media received={_mediaPacketsReceived}; decoded={_mediaPacketsDecoded}; dropped={_mediaPacketsDropped}; packetQueue={_mediaPacketQueue.Count}; bufferedMs={_mediaBuffer.BufferedDuration.TotalMilliseconds:0}; desiredLatencyMs={_mediaOutput?.BufferMilliseconds ?? 0}.");
             }
         }
 
@@ -415,6 +506,7 @@ namespace Zink.Services.NativeCalling
 
             var sampleCount = decodedSamples * MediaChannels;
             ApplyPcmGain(pcm, sampleCount, MediaPlaybackGain);
+            SmoothMediaDiscontinuity(pcm, decodedSamples);
 
             byte[] pcmBytes = new byte[sampleCount * sizeof(short)];
             Buffer.BlockCopy(pcm, 0, pcmBytes, 0, pcmBytes.Length);
@@ -428,6 +520,40 @@ namespace Zink.Services.NativeCalling
             level /= sampleCount;
             level /= short.MaxValue;
             AudioActivityService.Instance.UpdateRemoteLevel(level);
+        }
+
+        private void SmoothMediaDiscontinuity(short[] pcm, int decodedFrames)
+        {
+            if (decodedFrames <= 0 || pcm.Length < MediaChannels)
+                return;
+
+            if (_mediaDiscontinuityPending && _hasLastMediaSamples)
+            {
+                // Dropping compressed media frames is sometimes required to keep
+                // realtime latency bounded. Interpolate across the first 5 ms of
+                // the next decoded packet so the skipped boundary cannot become
+                // an audible full-scale click/pop.
+                var fadeFrames = Math.Min(decodedFrames, MediaSampleRate / 200);
+                for (var frame = 0; frame < fadeFrames; frame++)
+                {
+                    var amount = (frame + 1f) / fadeFrames;
+                    var index = frame * MediaChannels;
+                    pcm[index] = (short)Math.Clamp(
+                        (int)MathF.Round(_lastMediaSampleLeft + ((pcm[index] - _lastMediaSampleLeft) * amount)),
+                        short.MinValue,
+                        short.MaxValue);
+                    pcm[index + 1] = (short)Math.Clamp(
+                        (int)MathF.Round(_lastMediaSampleRight + ((pcm[index + 1] - _lastMediaSampleRight) * amount)),
+                        short.MinValue,
+                        short.MaxValue);
+                }
+            }
+
+            var lastIndex = (decodedFrames - 1) * MediaChannels;
+            _lastMediaSampleLeft = pcm[lastIndex];
+            _lastMediaSampleRight = pcm[lastIndex + 1];
+            _hasLastMediaSamples = true;
+            _mediaDiscontinuityPending = false;
         }
 
         private static void ApplyPcmGain(short[] samples, int sampleCount, float gain)
@@ -452,6 +578,18 @@ namespace Zink.Services.NativeCalling
             opusPacket = new byte[data.Length - ScreenShareAudioHeader.Length];
             Buffer.BlockCopy(data, ScreenShareAudioHeader.Length, opusPacket, 0, opusPacket.Length);
             return true;
+        }
+
+        private sealed class QueuedAudioPacket
+        {
+            public QueuedAudioPacket(long generation, byte[] data)
+            {
+                Generation = generation;
+                Data = data;
+            }
+
+            public long Generation { get; }
+            public byte[] Data { get; }
         }
     }
 }

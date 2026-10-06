@@ -61,9 +61,16 @@ namespace Zink
     public sealed partial class VideoPlayerPage : Page
     {
         private bool isFullScreen;
+        private bool _isFullScreenTransitionInProgress;
+        private bool _isPointerOverControlPanel;
+        private GridLength _sidebarWidthBeforeFullScreen;
+        private bool _sidebarWidthSavedForFullScreen;
+        private double? _selectedAspectRatio;
+        private bool _fillVideoSurface;
         private DispatcherTimer hideControlsTimer;
         private DispatcherTimer _videoBadgeHideTimer;
         private DispatcherTimer _nvidiaOverlaySuppressTimer;
+        private UIElement _keyboardEventRoot;
 
         private WStorage.StorageFile _currentFile;
 
@@ -229,13 +236,18 @@ namespace Zink
             public string ChromaSubsampling { get; set; }
             public string DynamicRange { get; set; }
             public string Badge { get; set; }
+            public int Width { get; set; }
+            public int Height { get; set; }
+            public int CodedWidth { get; set; }
+            public int CodedHeight { get; set; }
+            public string ResolutionBadge { get; set; }
             public bool IsHdr10 { get; set; }
             public bool IsHdr10Plus { get; set; }
             public bool IsDolbyVision { get; set; }
             public bool IsHlg { get; set; }
             public string DolbyVisionProfile { get; set; }
-            public bool WindowsHdrEnabled { get; set; }
-            public bool DisplayHdrSupported { get; set; }
+            public bool? WindowsHdrEnabled { get; set; }
+            public bool? DisplayHdrSupported { get; set; }
             public string DisplayAdvancedColorKind { get; set; }
             public bool HevcExtensionInstalled { get; set; }
             public bool DolbyAccessInstalled { get; set; }
@@ -268,9 +280,12 @@ namespace Zink
             InitializeSoundFlyout();
             _volumeUiReady = true;
 
-            hideControlsTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(3) };
+            hideControlsTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(2) };
             hideControlsTimer.Tick += (_, _) =>
             {
+                if (_isFullScreenTransitionInProgress)
+                    return;
+
                 ControlPanel.Visibility = Visibility.Collapsed;
                 hideControlsTimer.Stop();
             };
@@ -282,6 +297,7 @@ namespace Zink
                 try
                 {
                     VideoFormatBadge.Visibility = Visibility.Collapsed;
+                    VideoResolutionBadge.Visibility = Visibility.Collapsed;
                     _videoBadgeHideTimer.Stop();
                 }
                 catch { }
@@ -685,7 +701,54 @@ namespace Zink
         {
             ControlPanel.Visibility = Visibility.Visible;
             hideControlsTimer.Stop();
-            hideControlsTimer.Start();
+
+            if (!_isPointerOverControlPanel && !_isFullScreenTransitionInProgress)
+                hideControlsTimer.Start();
+        }
+
+        private void ControlPanel_PointerEntered(object sender, PointerRoutedEventArgs e)
+        {
+            _isPointerOverControlPanel = true;
+            ControlPanel.Visibility = Visibility.Visible;
+            hideControlsTimer?.Stop();
+        }
+
+        private void ControlPanel_PointerExited(object sender, PointerRoutedEventArgs e)
+        {
+            _isPointerOverControlPanel = false;
+
+            if (!_isFullScreenTransitionInProgress)
+            {
+                hideControlsTimer?.Stop();
+                hideControlsTimer?.Start();
+            }
+        }
+
+        private void Window_PreviewKeyDown(object sender, KeyRoutedEventArgs e)
+        {
+            if (e.KeyStatus.WasKeyDown)
+                return;
+
+            if (e.Key == WSystem.VirtualKey.Escape && isFullScreen)
+            {
+                e.Handled = true;
+                FullScreenButton_Click(FullScreenButton, e);
+                return;
+            }
+
+            if (e.Key != WSystem.VirtualKey.Space)
+                return;
+
+            e.Handled = true;
+
+            var isPlaying = _useCompatibilityPlaybackEngine
+                ? (_vlcMediaPlayer?.IsPlaying ?? false)
+                : mediaPlayerElement?.MediaPlayer?.PlaybackSession?.PlaybackState == MediaPlaybackState.Playing;
+
+            if (isPlaying)
+                Pause_Click(sender, e);
+            else
+                Play_Click(sender, e);
         }
 
         private void Play_Click(object s, RoutedEventArgs e)
@@ -823,6 +886,7 @@ namespace Zink
 
         private async System.Threading.Tasks.Task LoadAndPlayAsync(WStorage.StorageFile file)
         {
+            App.MainWindow?.CollapseSidebar();
             DiagnosticLogService.EnsureLogFile("Video playback diagnostics requested.");
             _currentFile = file;
             _codecPromptAlreadyShownForCurrentFile = false;
@@ -838,23 +902,13 @@ namespace Zink
             _lastLoggedPlaybackState = null;
             _effectivePlaybackFile = file;
             _usingAudioFallbackFile = false;
+            UseNativePlaybackSurface();
             UpdateVideoMetadataUI(_detectedVideoMetadata, showBadge: false);
             ResetDiscordPlaybackClock();
             WriteVideoAudioDiagnostics("Load requested for " + FormatVideoFileForLog(file));
 
-            if (_suppressCodecPromptOnce)
-            {
-                _suppressCodecPromptOnce = false;
-            }
-            else
-            {
-                await PromptForMissingCodecIfNeededAsync(file);
-            }
-
-            await DetectAndPrepareAudioInfoAsync(file);
-            await DetectAndPrepareVideoMetadataAsync(file);
-            WriteVideoAudioDiagnostics("Probe complete.\n" + BuildAudioDiagnosticsSnapshot());
-            await ConfigureDirectAudioSupportForCurrentFileAsync(file);
+            var audioInfoTask = DetectAndPrepareAudioInfoAsync(file);
+            var videoMetadataTask = DetectAndPrepareVideoMetadataAsync(file);
 
             if (_forceStartFromBeginningOnNextLoad)
             {
@@ -877,9 +931,10 @@ namespace Zink
             _ignoreSliderChange = false;
             CurrentTimeText.Text = "00:00";
             TotalTimeText.Text = "00:00";
-            await LoadSidecarSubtitlesForCurrentVideoAsync(file);
+            var sidecarSubtitle = await FindSidecarSubtitleAsync(file, exactNameOnly: true);
+            await LoadSidecarSubtitlesForCurrentVideoAsync(sidecarSubtitle);
 
-            _currentPlaybackItem = await BuildPlaybackItemWithNativeSubtitlesAsync(_currentFile);
+            _currentPlaybackItem = await BuildPlaybackItemWithNativeSubtitlesAsync(_currentFile, sidecarSubtitle);
             mediaPlayerElement.Source = _currentPlaybackItem;
             LogVideoPlaybackPath("MediaPlaybackItem assigned to WinUI MediaPlayerElement / Windows Media Foundation path.");
             WriteVideoAudioDiagnostics("Playback item assigned.\n" + BuildAudioDiagnosticsSnapshot());
@@ -894,14 +949,27 @@ namespace Zink
             }
             catch { }
 
-            if (_useCompatibilityPlaybackEngine)
-                mediaPlayerElement.MediaPlayer.Volume = 0;
-
             mediaPlayerElement.MediaPlayer.Play();
             WriteVideoAudioDiagnostics("Play invoked.\n" + BuildPlaybackSettingsSnapshot(mediaPlayerElement.MediaPlayer));
 
+            if (sidecarSubtitle == null)
+                _ = LoadLanguageVariantSidecarAfterPlaybackStartsAsync(file);
+
+            await System.Threading.Tasks.Task.WhenAll(audioInfoTask, videoMetadataTask);
+            WriteVideoAudioDiagnostics("Probe complete.\n" + BuildAudioDiagnosticsSnapshot());
+            await ConfigureDirectAudioSupportForCurrentFileAsync(file);
+
             if (_useCompatibilityPlaybackEngine)
                 await LoadAndPlayWithCompatibilityEngineAsync(file);
+
+            if (_suppressCodecPromptOnce)
+            {
+                _suppressCodecPromptOnce = false;
+            }
+            else
+            {
+                await PromptForMissingCodecIfNeededAsync(file);
+            }
 
             SyncDiscordPlaybackClockFromSession(force: true);
 
@@ -1371,6 +1439,14 @@ namespace Zink
                 return info;
             }
 
+            if (await TryApplyNativeWindowsVideoMetadataAsync(info, file))
+            {
+                info.DetectionSource = "Windows Media Foundation + Windows display APIs";
+                ChooseVideoBadge(info);
+                ChoosePlaybackPath(info);
+                return info;
+            }
+
             var ffprobePath = await GetBundledFfprobePathAsync();
             if (string.IsNullOrWhiteSpace(ffprobePath) || !File.Exists(ffprobePath))
             {
@@ -1393,20 +1469,94 @@ namespace Zink
             if (document.RootElement.TryGetProperty("streams", out var streams) &&
                 streams.ValueKind == JsonValueKind.Array)
             {
+                JsonElement? selectedVideoStream = null;
+
                 foreach (var stream in streams.EnumerateArray())
                 {
                     string type = TryGetJsonString(stream, "codec_type");
                     if (!string.Equals(type, "video", StringComparison.OrdinalIgnoreCase))
                         continue;
 
-                    ApplyVideoStreamMetadata(info, stream);
-                    break;
+                    bool isAttachedPicture =
+                        stream.TryGetProperty("disposition", out var disposition) &&
+                        TryGetJsonInt(disposition, "attached_pic") == 1;
+
+                    if (!isAttachedPicture)
+                    {
+                        selectedVideoStream = stream;
+                        break;
+                    }
+
+                    selectedVideoStream ??= stream;
                 }
+
+                if (selectedVideoStream.HasValue)
+                    ApplyVideoStreamMetadata(info, selectedVideoStream.Value);
             }
 
             ChooseVideoBadge(info);
             ChoosePlaybackPath(info);
             return info;
+        }
+
+        private static async System.Threading.Tasks.Task<bool> TryApplyNativeWindowsVideoMetadataAsync(
+            VideoMetadataInfo info,
+            WStorage.StorageFile file)
+        {
+            try
+            {
+                var properties = await file.Properties.GetVideoPropertiesAsync();
+                info.Width = checked((int)properties.Width);
+                info.Height = checked((int)properties.Height);
+                info.CodedWidth = info.Width;
+                info.CodedHeight = info.Height;
+
+                using var reader = new SharpDX.MediaFoundation.SourceReader(file.Path, null);
+                using var mediaType = reader.GetNativeMediaType(
+                    SharpDX.MediaFoundation.SourceReaderIndex.FirstVideoStream, 0);
+                Guid subtype = mediaType.Get(SharpDX.MediaFoundation.MediaTypeAttributeKeys.Subtype);
+                int primaries = TryGetNativeMediaTypeInt(
+                    mediaType, SharpDX.MediaFoundation.MediaTypeAttributeKeys.VideoPrimaries);
+                int transfer = TryGetNativeMediaTypeInt(
+                    mediaType, SharpDX.MediaFoundation.MediaTypeAttributeKeys.TransferFunction);
+                int matrix = TryGetNativeMediaTypeInt(
+                    mediaType, SharpDX.MediaFoundation.MediaTypeAttributeKeys.YuvMatrix);
+
+                info.IsHevc = subtype == SharpDX.MediaFoundation.VideoFormatGuids.Hevc;
+                info.IsAvc = subtype == SharpDX.MediaFoundation.VideoFormatGuids.H264;
+                info.Codec = info.IsHevc ? "hevc" : info.IsAvc ? "h264" : subtype.ToString();
+                info.CodecLongName = info.IsHevc ? "H.265 / HEVC" : info.IsAvc ? "H.264 / AVC" : "Windows native video";
+                info.Profile = info.IsHevc ? "Main 10" : "";
+                info.BitDepth = info.IsHevc && transfer == 15 ? 10 : 8;
+                info.PixelFormat = info.BitDepth >= 10 ? "p010" : "nv12";
+                info.ColorPrimaries = primaries == 9 ? "bt2020" : primaries == 2 ? "bt709" : primaries.ToString();
+                info.ColorTransfer = transfer == 15 ? "smpte2084" : transfer == 18 ? "arib-std-b67" : transfer.ToString();
+                info.ColorSpace = matrix == 4 ? "bt2020nc" : matrix == 1 ? "bt709" : matrix.ToString();
+                info.IsHdr10 = info.IsHevc && info.BitDepth >= 10 && primaries == 9 && transfer == 15;
+                info.IsHlg = transfer == 18;
+                info.NativeCodecPath = info.IsHevc
+                    ? "H.265/HEVC through Windows Media Foundation"
+                    : info.IsAvc
+                        ? "H.264/AVC through Windows Media Foundation"
+                        : "Windows Media Foundation native playback";
+                info.ResolutionBadge = ChooseResolutionBadge(
+                    info.Width, info.Height, info.CodedWidth, info.CodedHeight, info.FileName);
+
+                return info.Width > 0 && info.Height > 0;
+            }
+            catch (Exception ex)
+            {
+                DiagnosticLogService.WriteLine("Native Windows video metadata detection failed: " + ex.Message);
+                return false;
+            }
+        }
+
+        private static int TryGetNativeMediaTypeInt(
+            SharpDX.MediaFoundation.MediaType mediaType,
+            SharpDX.MediaFoundation.MediaAttributeKey<int> key)
+        {
+            try { return mediaType.Get(key); }
+            catch { return 0; }
         }
 
         private static async System.Threading.Tasks.Task<string> RunFfprobeForVideoJsonAsync(string ffprobePath, string videoPath)
@@ -1468,6 +1618,16 @@ namespace Zink
             info.ColorSpace = TryGetJsonString(stream, "color_space");
             info.ColorTransfer = TryGetJsonString(stream, "color_transfer");
             info.ColorPrimaries = TryGetJsonString(stream, "color_primaries");
+            info.Width = TryGetJsonInt(stream, "width");
+            info.Height = TryGetJsonInt(stream, "height");
+            info.CodedWidth = TryGetJsonInt(stream, "coded_width");
+            info.CodedHeight = TryGetJsonInt(stream, "coded_height");
+            info.ResolutionBadge = ChooseResolutionBadge(
+                info.Width,
+                info.Height,
+                info.CodedWidth,
+                info.CodedHeight,
+                info.FileName);
             info.BitDepth = DetectBitDepth(stream, info.PixelFormat, info.Profile);
             info.ChromaSubsampling = DetectChromaSubsampling(info.PixelFormat);
 
@@ -1532,6 +1692,31 @@ namespace Zink
             }
 
             ChooseVideoBadge(info);
+        }
+
+        private static string ChooseResolutionBadge(
+            int width,
+            int height,
+            int codedWidth,
+            int codedHeight,
+            string fileName)
+        {
+            int longEdge = Math.Max(Math.Max(width, height), Math.Max(codedWidth, codedHeight));
+            int shortEdge = Math.Max(Math.Min(width, height), Math.Min(codedWidth, codedHeight));
+            string name = fileName ?? "";
+
+            if (longEdge >= 3800 ||
+                shortEdge >= 2160 ||
+                Regex.IsMatch(name, @"(?:^|[.\s_\-\[(])(?:2160p|4k)(?:$|[.\s_\-\])])", RegexOptions.IgnoreCase))
+                return "4K";
+            if (longEdge >= 2880)
+                return "3K";
+            if (longEdge >= 2048)
+                return "2K";
+            if (longEdge >= 1280)
+                return "HD";
+
+            return null;
         }
 
         private static int DetectBitDepth(JsonElement stream, string pixelFormat, string profile)
@@ -1602,17 +1787,25 @@ namespace Zink
         {
             try
             {
-                var displayInfo = global::Windows.Graphics.Display.DisplayInformation.GetForCurrentView();
+                if (App.MainWindow == null)
+                    throw new InvalidOperationException("The main window is not available.");
+
+                IntPtr hwnd = WindowNative.GetWindowHandle(App.MainWindow);
+                if (hwnd == IntPtr.Zero)
+                    throw new InvalidOperationException("The main window handle is not available.");
+
+                var windowId = Microsoft.UI.Win32Interop.GetWindowIdFromWindow(hwnd);
+                using var displayInfo = Microsoft.Graphics.Display.DisplayInformation.CreateForWindowId(windowId);
                 var advanced = displayInfo.GetAdvancedColorInfo();
                 info.DisplayAdvancedColorKind = advanced.CurrentAdvancedColorKind.ToString();
-                info.WindowsHdrEnabled = advanced.CurrentAdvancedColorKind == global::Windows.Graphics.Display.AdvancedColorKind.HighDynamicRange;
-                info.DisplayHdrSupported = advanced.IsAdvancedColorKindAvailable(global::Windows.Graphics.Display.AdvancedColorKind.HighDynamicRange);
+                info.WindowsHdrEnabled = advanced.CurrentAdvancedColorKind == Microsoft.Graphics.Display.DisplayAdvancedColorKind.HighDynamicRange;
+                info.DisplayHdrSupported = advanced.IsAdvancedColorKindAvailable(Microsoft.Graphics.Display.DisplayAdvancedColorKind.HighDynamicRange);
             }
             catch (Exception ex)
             {
                 info.DisplayAdvancedColorKind = "Unavailable";
-                info.WindowsHdrEnabled = false;
-                info.DisplayHdrSupported = false;
+                info.WindowsHdrEnabled = null;
+                info.DisplayHdrSupported = null;
                 info.Notes = "Windows HDR/display capability check unavailable: " + ex.Message;
             }
         }
@@ -1630,7 +1823,7 @@ namespace Zink
                 return;
             }
 
-            if (info.WindowsHdrEnabled && info.DisplayHdrSupported)
+            if (info.WindowsHdrEnabled == true && info.DisplayHdrSupported == true)
             {
                 info.PlaybackPath = $"{info.Badge} video detected. Windows HDR is enabled and the display reports HDR support; using {GetNativeCodecPath(info)}.";
                 return;
@@ -1683,11 +1876,8 @@ namespace Zink
                         MicrosoftHevcDeviceExtensionPrefix);
                 }
 
-                if (info.IsDolbyVision)
-                {
-                    info.DolbyAccessInstalled = await IsCodecExtensionInstalledAsync(DolbyAccessPrefix);
-                    info.DolbyVisionAccessInstalled = await IsCodecExtensionInstalledAsync(DolbyVisionAccessPrefix);
-                }
+                info.DolbyAccessInstalled = await IsCodecExtensionInstalledAsync(DolbyAccessPrefix);
+                info.DolbyVisionAccessInstalled = await IsCodecExtensionInstalledAsync(DolbyVisionAccessPrefix);
 
                 ChoosePlaybackPath(info);
 
@@ -1813,9 +2003,18 @@ namespace Zink
                 if (VideoFormatBadgeText != null)
                     VideoFormatBadgeText.Text = string.IsNullOrWhiteSpace(info.Badge) ? "SDR" : info.Badge;
 
+                if (VideoResolutionBadgeText != null && !string.IsNullOrWhiteSpace(info.ResolutionBadge))
+                    VideoResolutionBadgeText.Text = info.ResolutionBadge;
+
                 if (VideoFormatBadge != null && showBadge)
                 {
                     VideoFormatBadge.Visibility = Visibility.Visible;
+                    if (VideoResolutionBadge != null)
+                    {
+                        VideoResolutionBadge.Visibility = string.IsNullOrWhiteSpace(info.ResolutionBadge)
+                            ? Visibility.Collapsed
+                            : Visibility.Visible;
+                    }
                     _videoBadgeHideTimer?.Stop();
                     _videoBadgeHideTimer?.Start();
                 }
@@ -1834,6 +2033,8 @@ namespace Zink
             var builder = new StringBuilder();
             AppendInfoLine(builder, "File", info.FileName);
             AppendInfoLine(builder, "Badge", info.Badge);
+            AppendInfoLine(builder, "Resolution", info.Width > 0 && info.Height > 0 ? $"{info.Width} x {info.Height}" : null);
+            AppendInfoLine(builder, "Resolution badge", info.ResolutionBadge);
             AppendInfoLine(builder, "Dynamic range", info.DynamicRange);
             AppendInfoLine(builder, "Codec", FormatVideoCodec(info));
             AppendInfoLine(builder, "H.264/AVC", info.IsAvc ? "Yes" : "No");
@@ -1849,8 +2050,8 @@ namespace Zink
             AppendInfoLine(builder, "HDR10", info.IsHdr10 ? "Yes" : "No");
             AppendInfoLine(builder, "HDR10+", info.IsHdr10Plus ? "Yes" : "No");
             AppendInfoLine(builder, "HLG", info.IsHlg ? "Yes" : "No");
-            AppendInfoLine(builder, "Windows HDR enabled", info.WindowsHdrEnabled ? "Yes" : "No");
-            AppendInfoLine(builder, "Display HDR support", info.DisplayHdrSupported ? "Yes" : "No");
+            AppendInfoLine(builder, "Windows HDR enabled", FormatAvailability(info.WindowsHdrEnabled));
+            AppendInfoLine(builder, "Display HDR support", FormatAvailability(info.DisplayHdrSupported));
             AppendInfoLine(builder, "Display advanced colour", info.DisplayAdvancedColorKind);
             AppendInfoLine(builder, "HEVC extension installed", info.HevcExtensionInstalled ? "Yes" : "No");
             AppendInfoLine(builder, "Dolby Access installed", info.DolbyAccessInstalled ? "Yes" : "No");
@@ -1859,6 +2060,11 @@ namespace Zink
             AppendInfoLine(builder, "Detection source", info.DetectionSource);
             AppendInfoLine(builder, "Notes", info.Notes);
             return builder.ToString().Trim();
+        }
+
+        private static string FormatAvailability(bool? value)
+        {
+            return value.HasValue ? (value.Value ? "Yes" : "No") : "Unknown";
         }
 
         private static string FormatVideoCodec(VideoMetadataInfo info)
@@ -2562,13 +2768,15 @@ namespace Zink
         {
             try
             {
-                if (mediaPlayerElement?.MediaPlayer != null)
-                    mediaPlayerElement.MediaPlayer.IsMuted = false;
-
                 var selected = _selectedAudioStream;
                 if (selected != null && NeedsNonNativeAudioEngine(selected))
                 {
                     UseCompatibilityPlaybackSurface();
+                    if (mediaPlayerElement?.MediaPlayer != null)
+                    {
+                        mediaPlayerElement.MediaPlayer.Volume = 0;
+                        mediaPlayerElement.MediaPlayer.IsMuted = true;
+                    }
                     WriteVideoAudioDiagnostics(
                         "Compatibility playback engine enabled for " +
                         FormatAudioStreamSummary(selected) +
@@ -2577,6 +2785,8 @@ namespace Zink
                 }
 
                 UseNativePlaybackSurface();
+                if (mediaPlayerElement?.MediaPlayer != null)
+                    mediaPlayerElement.MediaPlayer.IsMuted = false;
                 WriteVideoAudioDiagnostics("Native Windows audio renderer enabled for " + (selected == null ? "no selected stream" : FormatAudioStreamSummary(selected)));
             }
             catch (Exception ex)
@@ -2588,6 +2798,9 @@ namespace Zink
         private static bool NeedsNonNativeAudioEngine(AudioStreamInfo stream)
         {
             if (stream == null)
+                return false;
+
+            if (IsReliableWindowsAudioStream(stream))
                 return false;
 
             if (!IsReliableWindowsAudioStream(stream))
@@ -2625,6 +2838,7 @@ namespace Zink
                 if (_vlcMediaPlayer == null || _libVLC == null)
                 {
                     WriteVideoAudioDiagnostics("Compatibility audio engine was requested but unavailable; continuing with native Windows playback.");
+                    RestoreNativeAudioPlayback();
                     return;
                 }
 
@@ -2651,6 +2865,22 @@ namespace Zink
             catch (Exception ex)
             {
                 WriteVideoAudioDiagnostics("Compatibility audio engine playback failed: " + ex.Message);
+                RestoreNativeAudioPlayback();
+            }
+        }
+
+        private void RestoreNativeAudioPlayback()
+        {
+            try
+            {
+                UseNativePlaybackSurface();
+                ApplySavedVolume();
+                mediaPlayerElement?.MediaPlayer?.Play();
+                WriteVideoAudioDiagnostics("Native Windows audio playback restored after compatibility audio was unavailable.");
+            }
+            catch (Exception ex)
+            {
+                WriteVideoAudioDiagnostics("Native Windows audio restore failed: " + ex.Message);
             }
         }
 
@@ -3261,13 +3491,14 @@ namespace Zink
             catch { }
         }
 
-        private async System.Threading.Tasks.Task<MediaPlaybackItem> BuildPlaybackItemWithNativeSubtitlesAsync(WStorage.StorageFile videoFile)
+        private System.Threading.Tasks.Task<MediaPlaybackItem> BuildPlaybackItemWithNativeSubtitlesAsync(
+            WStorage.StorageFile videoFile,
+            WStorage.StorageFile sidecar)
         {
             var mediaSource = MediaSource.CreateFromStorageFile(videoFile);
 
             try
             {
-                var sidecar = await FindSidecarSubtitleAsync(videoFile);
                 if (sidecar != null && ShouldAttachSidecarToNativeRenderer(sidecar))
                 {
                     var uri = new Uri(sidecar.Path);
@@ -3293,7 +3524,7 @@ namespace Zink
                 catch { }
             };
 
-            return item;
+            return System.Threading.Tasks.Task.FromResult(item);
         }
 
         private bool ShouldAttachSidecarToNativeRenderer(WStorage.StorageFile sidecar)
@@ -3355,7 +3586,9 @@ namespace Zink
             }
         }
 
-        private async System.Threading.Tasks.Task<WStorage.StorageFile> FindSidecarSubtitleAsync(WStorage.StorageFile videoFile)
+        private async System.Threading.Tasks.Task<WStorage.StorageFile> FindSidecarSubtitleAsync(
+            WStorage.StorageFile videoFile,
+            bool exactNameOnly = false)
         {
             try
             {
@@ -3371,6 +3604,9 @@ namespace Zink
                     var item = await folder.TryGetItemAsync(candidateName);
                     if (item is WStorage.StorageFile sf) return sf;
                 }
+
+                if (exactNameOnly)
+                    return null;
 
                 var files = await folder.GetFilesAsync();
                 foreach (var file in files)
@@ -3397,16 +3633,29 @@ namespace Zink
             }
         }
 
-        private async System.Threading.Tasks.Task LoadSidecarSubtitlesForCurrentVideoAsync(WStorage.StorageFile videoFile)
+        private async System.Threading.Tasks.Task LoadSidecarSubtitlesForCurrentVideoAsync(WStorage.StorageFile sidecar)
         {
             _currentSubtitleFile = null;
             _subtitleCues.Clear();
 
             try
             {
-                var sidecar = await FindSidecarSubtitleAsync(videoFile);
                 if (sidecar != null)
                     await LoadSubtitleFileAsync(sidecar);
+            }
+            catch { }
+        }
+
+        private async System.Threading.Tasks.Task LoadLanguageVariantSidecarAfterPlaybackStartsAsync(WStorage.StorageFile videoFile)
+        {
+            try
+            {
+                var sidecar = await FindSidecarSubtitleAsync(videoFile);
+                if (sidecar == null || !ReferenceEquals(_currentFile, videoFile))
+                    return;
+
+                await LoadSubtitleFileAsync(sidecar);
+                UpdateSubtitlesButtonState();
             }
             catch { }
         }
@@ -4929,27 +5178,97 @@ namespace Zink
         private static string FormatTime(TimeSpan t)
             => t.TotalHours >= 1 ? t.ToString(@"hh\:mm\:ss") : t.ToString(@"mm\:ss");
 
+        private void AspectRatioMenuItem_Click(object sender, RoutedEventArgs e)
+        {
+            if (sender is not MenuFlyoutItem item)
+                return;
+
+            string selection = item.Tag?.ToString() ?? "Original";
+            _fillVideoSurface = selection == "Fill";
+            _selectedAspectRatio = selection switch
+            {
+                "16:9" => 16.0 / 9.0,
+                "4:3" => 4.0 / 3.0,
+                "21:9" => 21.0 / 9.0,
+                _ => null
+            };
+
+            AspectRatioButtonLabel.Text = selection switch
+            {
+                "Fill" => "Aspect ratio: Fill",
+                "Original" => "Aspect ratio",
+                _ => $"Aspect ratio: {selection}"
+            };
+
+            ApplySelectedAspectRatio();
+        }
+
+        private void VideoRoot_SizeChanged(object sender, SizeChangedEventArgs e)
+        {
+            ApplySelectedAspectRatio();
+        }
+
+        private void ApplySelectedAspectRatio()
+        {
+            if (mediaPlayerElement == null || VideoRoot == null)
+                return;
+
+            if (_selectedAspectRatio == null)
+            {
+                mediaPlayerElement.Width = double.NaN;
+                mediaPlayerElement.Height = double.NaN;
+                mediaPlayerElement.HorizontalAlignment = HorizontalAlignment.Stretch;
+                mediaPlayerElement.VerticalAlignment = VerticalAlignment.Stretch;
+                mediaPlayerElement.Stretch = _fillVideoSurface ? Stretch.Fill : Stretch.Uniform;
+                return;
+            }
+
+            double availableWidth = VideoRoot.ActualWidth;
+            double availableHeight = VideoRoot.ActualHeight;
+            if (availableWidth <= 0 || availableHeight <= 0)
+                return;
+
+            double ratio = _selectedAspectRatio.Value;
+            if (availableWidth / availableHeight > ratio)
+            {
+                mediaPlayerElement.Height = availableHeight;
+                mediaPlayerElement.Width = availableHeight * ratio;
+            }
+            else
+            {
+                mediaPlayerElement.Width = availableWidth;
+                mediaPlayerElement.Height = availableWidth / ratio;
+            }
+
+            mediaPlayerElement.HorizontalAlignment = HorizontalAlignment.Center;
+            mediaPlayerElement.VerticalAlignment = VerticalAlignment.Center;
+            mediaPlayerElement.Stretch = Stretch.Fill;
+        }
+
         private async void FullScreenButton_Click(object sender, RoutedEventArgs e)
         {
+            if (_isFullScreenTransitionInProgress)
+                return;
+
             var hwnd = WindowNative.GetWindowHandle(App.MainWindow);
             var windowId = Microsoft.UI.Win32Interop.GetWindowIdFromWindow(hwnd);
             var appWindow = AppWindow.GetFromWindowId(windowId);
 
             var mainWindow = App.MainWindow as MainWindow;
-            var sidebarColumnDef = mainWindow?.SidebarColumnReference;
+            _isFullScreenTransitionInProgress = true;
+            hideControlsTimer?.Stop();
+            ControlPanel.Visibility = Visibility.Visible;
+            ControlPanel.IsHitTestVisible = true;
 
             if (!isFullScreen)
             {
-                FullScreenButton.IsEnabled = false;
                 try
                 {
                     await PlayFullScreenTransitionAsync(true);
 
                     StartNvidiaOverlaySuppression();
+                    HideSidebarColumnForFullScreen(mainWindow);
                     appWindow.SetPresenter(AppWindowPresenterKind.FullScreen);
-
-                    if (sidebarColumnDef != null)
-                        sidebarColumnDef.Width = new GridLength(0);
 
                     isFullScreen = true;
                     FullScreenLabel.Text = "Exit Fullscreen";
@@ -4958,12 +5277,13 @@ namespace Zink
                 finally
                 {
                     ResetFullScreenTransitionVisuals();
-                    FullScreenButton.IsEnabled = true;
+                    _isFullScreenTransitionInProgress = false;
+                    if (!_isPointerOverControlPanel)
+                        hideControlsTimer?.Start();
                 }
             }
             else
             {
-                FullScreenButton.IsEnabled = false;
                 try
                 {
                     await PlayFullScreenTransitionAsync(false);
@@ -4971,8 +5291,7 @@ namespace Zink
                     appWindow.SetPresenter(AppWindowPresenterKind.Overlapped);
                     StopNvidiaOverlaySuppression();
 
-                    if (sidebarColumnDef != null)
-                        sidebarColumnDef.Width = new GridLength(250);
+                    RestoreSidebarColumnAfterFullScreen(mainWindow);
 
                     isFullScreen = false;
                     FullScreenLabel.Text = "Fullscreen";
@@ -4981,7 +5300,9 @@ namespace Zink
                 finally
                 {
                     ResetFullScreenTransitionVisuals();
-                    FullScreenButton.IsEnabled = true;
+                    _isFullScreenTransitionInProgress = false;
+                    if (!_isPointerOverControlPanel)
+                        hideControlsTimer?.Start();
                 }
             }
         }
@@ -5081,17 +5402,48 @@ namespace Zink
         private System.Threading.Tasks.Task BeginStoryboardAsync(Storyboard storyboard)
         {
             var completionSource = new System.Threading.Tasks.TaskCompletionSource<bool>();
-
-            void StoryboardCompleted(object sender, object args)
+            var timeoutTimer = new DispatcherTimer
             {
+                Interval = TimeSpan.FromSeconds(1)
+            };
+
+            void CompleteTransition()
+            {
+                timeoutTimer.Stop();
                 storyboard.Completed -= StoryboardCompleted;
                 completionSource.TrySetResult(true);
             }
 
+            void StoryboardCompleted(object sender, object args)
+            {
+                CompleteTransition();
+            }
+
+            timeoutTimer.Tick += (_, _) => CompleteTransition();
             storyboard.Completed += StoryboardCompleted;
             storyboard.Begin();
+            timeoutTimer.Start();
 
             return completionSource.Task;
+        }
+
+        private void HideSidebarColumnForFullScreen(MainWindow mainWindow)
+        {
+            if (mainWindow?.SidebarColumnReference == null || _sidebarWidthSavedForFullScreen)
+                return;
+
+            _sidebarWidthBeforeFullScreen = mainWindow.SidebarColumnReference.Width;
+            _sidebarWidthSavedForFullScreen = true;
+            mainWindow.SidebarColumnReference.Width = new GridLength(0);
+        }
+
+        private void RestoreSidebarColumnAfterFullScreen(MainWindow mainWindow)
+        {
+            if (!_sidebarWidthSavedForFullScreen || mainWindow?.SidebarColumnReference == null)
+                return;
+
+            mainWindow.SidebarColumnReference.Width = _sidebarWidthBeforeFullScreen;
+            _sidebarWidthSavedForFullScreen = false;
         }
 
         private void ResetFullScreenTransitionVisuals()
@@ -5105,6 +5457,8 @@ namespace Zink
                 VideoSurfaceTransform.ScaleX = 1;
                 VideoSurfaceTransform.ScaleY = 1;
                 ControlPanel.Opacity = 1;
+                ControlPanel.Visibility = Visibility.Visible;
+                ControlPanel.IsHitTestVisible = true;
             }
             catch { }
         }
@@ -5113,9 +5467,8 @@ namespace Zink
         {
             try
             {
-                SuppressNvidiaOverlayWindows();
                 _nvidiaOverlaySuppressTimer?.Stop();
-                _nvidiaOverlaySuppressTimer?.Start();
+                _ = System.Threading.Tasks.Task.Run(SuppressNvidiaOverlayWindows);
             }
             catch { }
         }
@@ -5345,14 +5698,22 @@ namespace Zink
                 if (savedVolume > 0)
                     _lastNonZeroVolume = savedVolume;
 
-                if (mediaPlayerElement?.MediaPlayer != null)
+                if (_useCompatibilityPlaybackEngine)
+                {
+                    if (mediaPlayerElement?.MediaPlayer != null)
+                    {
+                        mediaPlayerElement.MediaPlayer.Volume = 0;
+                        mediaPlayerElement.MediaPlayer.IsMuted = true;
+                    }
+
+                    if (_vlcMediaPlayer != null)
+                        _vlcMediaPlayer.Volume = (int)Math.Round(savedVolume * 100.0);
+                }
+                else if (mediaPlayerElement?.MediaPlayer != null)
                 {
                     mediaPlayerElement.MediaPlayer.Volume = savedVolume;
                     mediaPlayerElement.MediaPlayer.IsMuted = false;
                 }
-
-                if (_vlcMediaPlayer != null)
-                    _vlcMediaPlayer.Volume = (int)Math.Round(savedVolume * 100.0);
 
                 if (_flyoutVolumeSlider != null)
                     _flyoutVolumeSlider.Value = savedVolume * 100.0;
@@ -5618,6 +5979,12 @@ namespace Zink
 
             try
             {
+                if (App.MainWindow?.Content is UIElement keyboardEventRoot)
+                {
+                    _keyboardEventRoot = keyboardEventRoot;
+                    _keyboardEventRoot.PreviewKeyDown += Window_PreviewKeyDown;
+                }
+
                 try
                 {
                     if (mediaPlayerElement?.MediaPlayer != null)
@@ -5668,6 +6035,12 @@ namespace Zink
         {
             try
             {
+                if (_keyboardEventRoot != null)
+                {
+                    _keyboardEventRoot.PreviewKeyDown -= Window_PreviewKeyDown;
+                    _keyboardEventRoot = null;
+                }
+
                 if (isFullScreen)
                 {
                     var hwnd = WindowNative.GetWindowHandle(App.MainWindow);
@@ -5677,8 +6050,7 @@ namespace Zink
                     StopNvidiaOverlaySuppression();
 
                     var mainWindow = App.MainWindow as MainWindow;
-                    if (mainWindow?.SidebarColumnReference != null)
-                        mainWindow.SidebarColumnReference.Width = new GridLength(250);
+                    RestoreSidebarColumnAfterFullScreen(mainWindow);
 
                     isFullScreen = false;
                 }
@@ -5713,7 +6085,12 @@ namespace Zink
                 _useCompatibilityPlaybackEngine = false;
                 _vlcReadyForSeek = false;
                 _vlcPlaybackEnded = false;
-                try { VideoFormatBadge.Visibility = Visibility.Collapsed; } catch { }
+                try
+                {
+                    VideoFormatBadge.Visibility = Visibility.Collapsed;
+                    VideoResolutionBadge.Visibility = Visibility.Collapsed;
+                }
+                catch { }
                 _mediaReadyForSeek = false;
                 _codecPromptAlreadyShownForCurrentFile = false;
                 _lastCodecPromptedPath = null;
@@ -5729,6 +6106,31 @@ namespace Zink
             catch { }
 
             base.OnNavigatedFrom(e);
+        }
+
+        internal void StopPlaybackForAppClose()
+        {
+            ForceSaveResumePositionNow_Video();
+
+            try { _positionTimer?.Stop(); } catch { }
+            try { _discordPresenceTimer?.Stop(); } catch { }
+
+            var mp = mediaPlayerElement?.MediaPlayer;
+            if (mp != null)
+            {
+                try { mp.Pause(); } catch { }
+                try { mp.Source = null; } catch { }
+            }
+
+            if (_vlcMediaPlayer != null)
+            {
+                try { _vlcMediaPlayer.Stop(); } catch { }
+                try { _vlcAudioMedia?.Dispose(); _vlcAudioMedia = null; } catch { }
+            }
+
+            try { mediaPlayerElement.Source = null; } catch { }
+            try { AppPlaybackService.Instance.ClearIfKind(AppPlaybackService.MediaKind.Video); } catch { }
+            ClearDiscordVideoPresence();
         }
 
         private static string MakeKey(string path)

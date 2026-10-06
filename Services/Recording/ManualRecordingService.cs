@@ -15,7 +15,7 @@ namespace Zink.Services.Recording
 
         private readonly object _gate = new();
 
-        private readonly TimeSpan _replayBufferDuration = TimeSpan.FromSeconds(45);
+        private TimeSpan _replayBufferDuration = TimeSpan.FromSeconds(45);
 
         // Keep active raw segment short so high-resolution replay stays off the managed heap.
         private readonly TimeSpan _segmentDuration = TimeSpan.FromMilliseconds(250);
@@ -27,6 +27,7 @@ namespace Zink.Services.Recording
         private RollingClipBuffer? _activeVideoBuffer;
         private RollingAudioBuffer? _activeSystemAudioBuffer;
         private RollingAudioBuffer? _activeMicrophoneBuffer;
+        private HardwareReplayBuffer? _hardwareReplayBuffer;
 
         private string? _currentOutputPath;
         private GraphicsCaptureItem? _captureItem;
@@ -87,6 +88,9 @@ namespace Zink.Services.Recording
                 if (!IsReplayMode || !IsRecording)
                     return TimeSpan.Zero;
 
+                if (_hardwareReplayBuffer != null)
+                    return _hardwareReplayBuffer.BufferedDuration;
+
                 double finalizedSeconds = _segmentPaths.Count * _segmentDuration.TotalSeconds;
                 double activeSeconds = 0;
 
@@ -131,6 +135,7 @@ namespace Zink.Services.Recording
 
         public async Task<string> StartReplayAsync(GraphicsCaptureItem item, RecordingOptions options)
         {
+            options = ApplyReplayPreferences(options);
             SetCaptureItem(item, options);
 
             lock (_gate)
@@ -144,6 +149,7 @@ namespace Zink.Services.Recording
 
         public async Task<string> StartReplayAsync(RecordingOptions options)
         {
+            options = ApplyReplayPreferences(options);
             _captureItem = null;
             _options = options.Clone();
 
@@ -177,6 +183,13 @@ namespace Zink.Services.Recording
 
             try
             {
+                if (replayMode)
+                {
+                    _replayBufferDuration = TimeSpan.FromSeconds(_options.RetrospectiveSeconds);
+                    await GameReplayLog.WriteAsync(nameof(ManualRecordingService),
+                        $"Replay start requested. Buffer={_replayBufferDuration}, RequestedSize={_options.OutputWidth}x{_options.OutputHeight}, RequestedFps={_options.FrameRate}, SystemAudio={_options.IncludeSystemAudio}, Microphone={_options.IncludeMicrophone}");
+                }
+
                 _currentOutputPath = replayMode
                     ? null
                     : await RecordingOutputService.CreateNewOutputPathAsync("Zink Recording");
@@ -189,14 +202,32 @@ namespace Zink.Services.Recording
                     ResetDirectManualWriterStateNoLock();
                 }
 
-                if (replayMode || !_useDirectManualWriter)
+                if (replayMode)
+                {
+                    _hardwareReplayBuffer = new HardwareReplayBuffer(_replayBufferDuration, _options);
+                    _activeSystemAudioBuffer = _options.IncludeSystemAudio
+                        ? new RollingAudioBuffer(_replayBufferDuration)
+                        : null;
+                    _activeMicrophoneBuffer = _options.IncludeMicrophone
+                        ? new RollingAudioBuffer(_replayBufferDuration)
+                        : null;
+                }
+                else if (!_useDirectManualWriter)
                 {
                     InitializeActiveSegmentBuffers();
                 }
 
-                _captureEngine = new CaptureEngine();
-                _captureEngine.VideoFrameArrived += CaptureEngine_VideoFrameArrived;
-                await _captureEngine.StartAsync(_captureItem, _options);
+                // Direct NVENC replay owns the desktop-duplication session. Starting
+                // CaptureEngine as well can exceed DXGI's duplication-session limit.
+                if (!replayMode || _hardwareReplayBuffer?.UsesDirectCapture != true)
+                {
+                    _captureEngine = new CaptureEngine();
+                    if (replayMode)
+                        _captureEngine.GpuFrameArrived += CaptureEngine_GpuFrameArrived;
+                    else
+                        _captureEngine.VideoFrameArrived += CaptureEngine_VideoFrameArrived;
+                    await _captureEngine.StartAsync(_captureItem, _options);
+                }
 
                 if (_options.IncludeSystemAudio)
                 {
@@ -212,8 +243,14 @@ namespace Zink.Services.Recording
                     await _microphoneCapture.StartAsync(_options.SelectedMicDeviceId);
                 }
 
+                if (replayMode)
+                    _hardwareReplayBuffer?.SynchronizeDirectCaptureClock();
+
                 await RecorderLog.InfoAsync(nameof(ManualRecordingService),
                     $"Recording started. ReplayMode={replayMode}, DirectManualWriter={_useDirectManualWriter}, SystemAudio={_options.IncludeSystemAudio}, Mic={_options.IncludeMicrophone}, SegmentDuration={_segmentDuration}");
+                if (replayMode)
+                    await GameReplayLog.WriteAsync(nameof(ManualRecordingService),
+                        "Replay capture and requested audio services started successfully.");
 
                 StatusChanged?.Invoke(this,
                     replayMode
@@ -225,6 +262,8 @@ namespace Zink.Services.Recording
             catch (Exception ex)
             {
                 await RecorderLog.ErrorAsync(nameof(ManualRecordingService), ex, "StartCoreAsync failed");
+                if (replayMode)
+                    await GameReplayLog.WriteAsync(nameof(ManualRecordingService), $"Replay start failed: {ex}");
 
                 lock (_gate)
                 {
@@ -240,9 +279,17 @@ namespace Zink.Services.Recording
 
         private void CaptureEngine_VideoFrameArrived(object? sender, VideoFramePacket packet)
         {
+            HardwareReplayBuffer? replayBuffer;
             lock (_gate)
             {
                 _lastObservedVideoTimestamp = packet.Timestamp;
+                replayBuffer = IsReplayMode ? _hardwareReplayBuffer : null;
+            }
+
+            if (replayBuffer != null)
+            {
+                replayBuffer.Add(packet);
+                return;
             }
 
             if (TryWriteDirectManualVideo(packet))
@@ -301,6 +348,18 @@ namespace Zink.Services.Recording
             }
         }
 
+        private void CaptureEngine_GpuFrameArrived(object? sender, GpuVideoFramePacket packet)
+        {
+            HardwareReplayBuffer? replayBuffer;
+            lock (_gate)
+            {
+                _lastObservedVideoTimestamp = packet.Timestamp;
+                replayBuffer = IsReplayMode ? _hardwareReplayBuffer : null;
+            }
+
+            replayBuffer?.Add(packet);
+        }
+
         private void SystemAudioCapture_AudioPacketArrived(object? sender, AudioPacket packet)
         {
             if (TryWriteDirectManualAudio(packet))
@@ -340,6 +399,136 @@ namespace Zink.Services.Recording
 
             try
             {
+                await GameReplayLog.WriteAsync(nameof(ManualRecordingService),
+                    $"Replay save requested. Duration={requestedDuration}, BufferedDuration={GetReplayBufferedDuration()}");
+                HardwareReplayBuffer? hardwareReplay;
+                List<AudioPacket>? replaySystemAudio;
+                List<AudioPacket>? replayMicAudio;
+                lock (_gate)
+                {
+                    hardwareReplay = _hardwareReplayBuffer;
+                    replaySystemAudio = CloneAudioPackets(_activeSystemAudioBuffer?.Snapshot());
+                    replayMicAudio = CloneAudioPackets(_activeMicrophoneBuffer?.Snapshot());
+                }
+
+                if (hardwareReplay != null)
+                {
+                    string hardwareOutputPath = await RecordingOutputService.CreateNewOutputPathAsync("Zink Replay", ".mp4");
+                    string replayExportFolder = Path.Combine(
+                        ReplayTemporaryFileCleanup.FolderPath,
+                        "Exports",
+                        Guid.NewGuid().ToString("N"));
+                    Directory.CreateDirectory(replayExportFolder);
+                    string tempH264 = Path.Combine(replayExportFolder, "video.h264");
+                    string tempWave = Path.Combine(replayExportFolder, "combined.wav");
+                    string tempDesktopWave = Path.Combine(replayExportFolder, "desktop.wav");
+                    string tempMicrophoneWave = Path.Combine(replayExportFolder, "microphone.wav");
+                    string tempMuxOutput = Path.Combine(replayExportFolder, "finished.mp4");
+                    try
+                    {
+                        // The in-process mux consumes the encoded replay snapshot directly.
+                        // Do not write a second multi-gigabyte elementary stream to disk.
+                        await hardwareReplay.WriteVideoAsync(
+                            tempH264,
+                            requestedDuration,
+                            writeElementaryStream: false);
+                        TimeSpan exportDuration = hardwareReplay.ExportDuration > TimeSpan.Zero
+                            ? hardwareReplay.ExportDuration
+                            : requestedDuration;
+                        PrepareReplayAudio(
+                            replaySystemAudio,
+                            replayMicAudio,
+                            exportDuration,
+                            hardwareReplay.ExportStartTimestamp,
+                            out var shiftedSystemAudio,
+                            out var shiftedMicAudio);
+                        bool includeSystemAudio = RecordingPreferences.IsBackgroundReplaySystemAudioEnabled;
+                        bool includeMicrophone = RecordingPreferences.IsBackgroundReplayMicrophoneEnabled;
+                        bool separateTracks = RecordingPreferences.IsBackgroundReplaySeparateTracksEnabled;
+                        string? combinedWavePath = null;
+                        string? desktopWavePath = null;
+                        string? microphoneWavePath = null;
+
+                        if (includeSystemAudio || includeMicrophone)
+                        {
+                            var mixedAudio = AudioMixHelpers.MixPcm16(
+                                includeSystemAudio ? shiftedSystemAudio : null,
+                                includeMicrophone ? shiftedMicAudio : null);
+                            WaveFileWriter.WritePcm16Wave(
+                                tempWave,
+                                BuildExactReplayAudioTrack(mixedAudio, exportDuration));
+                            combinedWavePath = tempWave;
+                        }
+
+                        if (separateTracks &&
+                            includeSystemAudio &&
+                            RecordingPreferences.IsBackgroundReplaySeparateDesktopTrackEnabled)
+                        {
+                            var desktopAudio = AudioMixHelpers.MixPcm16(shiftedSystemAudio, null);
+                            WaveFileWriter.WritePcm16Wave(
+                                tempDesktopWave,
+                                BuildExactReplayAudioTrack(desktopAudio, exportDuration));
+                            desktopWavePath = tempDesktopWave;
+                        }
+
+                        if (separateTracks &&
+                            includeMicrophone &&
+                            RecordingPreferences.IsBackgroundReplaySeparateMicrophoneTrackEnabled)
+                        {
+                            var microphoneAudio = AudioMixHelpers.MixPcm16(null, shiftedMicAudio);
+                            WaveFileWriter.WritePcm16Wave(
+                                tempMicrophoneWave,
+                                BuildExactReplayAudioTrack(microphoneAudio, exportDuration));
+                            microphoneWavePath = tempMicrophoneWave;
+                        }
+
+                        await hardwareReplay.MuxAsync(
+                            tempH264,
+                            combinedWavePath,
+                            desktopWavePath,
+                            microphoneWavePath,
+                            tempMuxOutput,
+                            exportDuration,
+                            RecordingPreferences.BackgroundReplayAudioBitrateKbps);
+                        string? finalOutputDirectory = Path.GetDirectoryName(hardwareOutputPath);
+                        if (string.IsNullOrWhiteSpace(finalOutputDirectory))
+                            throw new InvalidOperationException("The replay output folder path is invalid.");
+                        Directory.CreateDirectory(finalOutputDirectory);
+                        try
+                        {
+                            File.Move(tempMuxOutput, hardwareOutputPath, overwrite: false);
+                        }
+                        catch (Exception ex) when (
+                            ex is UnauthorizedAccessException ||
+                            ex is IOException)
+                        {
+                            hardwareOutputPath =
+                                RecordingOutputService.CreateFallbackOutputPath("Zink Replay", ".mp4");
+                            File.Move(tempMuxOutput, hardwareOutputPath, overwrite: false);
+                        }
+                        StatusChanged?.Invoke(this, $"Replay clip saved: {hardwareOutputPath}");
+                        await GameReplayLog.WriteAsync(nameof(ManualRecordingService),
+                            $"Replay save completed. Output={hardwareOutputPath}, Exists={File.Exists(hardwareOutputPath)}, Bytes={(File.Exists(hardwareOutputPath) ? new FileInfo(hardwareOutputPath).Length : 0)}");
+                        return hardwareOutputPath;
+                    }
+                    finally
+                    {
+                        TryDeleteFile(tempH264);
+                        TryDeleteFile(tempWave);
+                        TryDeleteFile(tempDesktopWave);
+                        TryDeleteFile(tempMicrophoneWave);
+                        TryDeleteFile(tempMuxOutput);
+                        try
+                        {
+                            if (Directory.Exists(replayExportFolder))
+                                Directory.Delete(replayExportFolder, recursive: true);
+                        }
+                        catch
+                        {
+                        }
+                    }
+                }
+
                 await AwaitCurrentSegmentWriteAsync();
 
                 SegmentBatch? finalBatch;
@@ -392,6 +581,7 @@ namespace Zink.Services.Recording
             catch (Exception ex)
             {
                 await RecorderLog.ErrorAsync(nameof(ManualRecordingService), ex, "SaveReplayAsync failed");
+                await GameReplayLog.WriteAsync(nameof(ManualRecordingService), $"Replay save failed: {ex}");
                 StatusChanged?.Invoke(this, $"Replay save failed: {ex.Message}");
                 throw;
             }
@@ -453,6 +643,7 @@ namespace Zink.Services.Recording
                 if (localEngine is not null)
                 {
                     localEngine.VideoFrameArrived -= CaptureEngine_VideoFrameArrived;
+                    localEngine.GpuFrameArrived -= CaptureEngine_GpuFrameArrived;
                     await localEngine.StopAsync();
                     await localEngine.DisposeAsync();
                 }
@@ -524,6 +715,12 @@ namespace Zink.Services.Recording
 
                 if (localReplayMode)
                 {
+                    _hardwareReplayBuffer?.Dispose();
+                    _hardwareReplayBuffer = null;
+                    _activeSystemAudioBuffer?.Clear();
+                    _activeSystemAudioBuffer = null;
+                    _activeMicrophoneBuffer?.Clear();
+                    _activeMicrophoneBuffer = null;
                     await CleanupSessionFolderAsync();
 
                     await RecorderLog.InfoAsync(nameof(ManualRecordingService), "Replay buffering stopped.");
@@ -634,6 +831,7 @@ namespace Zink.Services.Recording
             if (localEngine is not null)
             {
                 localEngine.VideoFrameArrived -= CaptureEngine_VideoFrameArrived;
+                localEngine.GpuFrameArrived -= CaptureEngine_GpuFrameArrived;
                 await localEngine.StopAsync();
                 await localEngine.DisposeAsync();
             }
@@ -660,6 +858,9 @@ namespace Zink.Services.Recording
 
             _activeMicrophoneBuffer?.Clear();
             _activeMicrophoneBuffer = null;
+
+            _hardwareReplayBuffer?.Dispose();
+            _hardwareReplayBuffer = null;
 
             await CleanupSessionFolderAsync();
             await Task.Run(ReleaseRecorderMemory);
@@ -1128,6 +1329,7 @@ namespace Zink.Services.Recording
                 var elapsed = DateTimeOffset.UtcNow - finalizeStartedUtc;
                 await RecorderLog.InfoAsync(nameof(ManualRecordingService),
                     $"Segment finalized. Replay={batch.IsReplaySegment}, ElapsedMs={elapsed.TotalMilliseconds:F0}, Output='{batch.OutputPath}'");
+
             }
             finally
             {
@@ -1165,6 +1367,126 @@ namespace Zink.Services.Recording
                 catch
                 {
                 }
+
+                if (batch.IsReplaySegment)
+                {
+                    ReleaseRecorderMemory();
+                }
+            }
+        }
+
+        private static List<AudioPacket>? CloneAudioPackets(IReadOnlyList<AudioPacket>? packets)
+        {
+            if (packets == null)
+                return null;
+
+            return packets.Select(packet => new AudioPacket
+            {
+                Timestamp = packet.Timestamp,
+                PcmData = packet.PcmData.ToArray(),
+                SampleRate = packet.SampleRate,
+                Channels = packet.Channels,
+                BitsPerSample = packet.BitsPerSample,
+                FormatTag = packet.FormatTag,
+                IsFloatFormat = packet.IsFloatFormat
+            }).ToList();
+        }
+
+        private static RecordingOptions ApplyReplayPreferences(RecordingOptions options)
+        {
+            var replayOptions = options.Clone();
+            replayOptions.RetrospectiveSeconds = RecordingPreferences.BackgroundReplayDurationSeconds;
+            replayOptions.IncludeSystemAudio = RecordingPreferences.IsBackgroundReplaySystemAudioEnabled;
+            replayOptions.IncludeMicrophone = RecordingPreferences.IsBackgroundReplayMicrophoneEnabled;
+            replayOptions.FrameRate = 120;
+            replayOptions.AllowHighFrameRateCapture = true;
+            return replayOptions;
+        }
+
+        private static void PrepareReplayAudio(
+            List<AudioPacket>? systemPackets,
+            List<AudioPacket>? micPackets,
+            TimeSpan requestedDuration,
+            TimeSpan videoStartTimestamp,
+            out List<AudioPacket> shiftedSystem,
+            out List<AudioPacket> shiftedMic)
+        {
+            var allPackets = (systemPackets ?? Enumerable.Empty<AudioPacket>())
+                .Concat(micPackets ?? Enumerable.Empty<AudioPacket>())
+                .ToList();
+            if (allPackets.Count == 0)
+            {
+                shiftedSystem = new List<AudioPacket>();
+                shiftedMic = new List<AudioPacket>();
+                return;
+            }
+
+            TimeSpan duration = requestedDuration <= TimeSpan.Zero || requestedDuration > TimeSpan.FromMinutes(10)
+                ? TimeSpan.FromSeconds(RecordingPreferences.BackgroundReplayDurationSeconds)
+                : requestedDuration;
+            TimeSpan latest = allPackets.Max(packet => packet.Timestamp);
+            TimeSpan cutoff = videoStartTimestamp > TimeSpan.Zero
+                ? videoStartTimestamp
+                : latest - duration;
+            TimeSpan end = cutoff + duration;
+            var selectedSystem = (systemPackets ?? new List<AudioPacket>())
+                .Where(packet => packet.Timestamp >= cutoff && packet.Timestamp < end)
+                .ToList();
+            var selectedMic = (micPackets ?? new List<AudioPacket>())
+                .Where(packet => packet.Timestamp >= cutoff && packet.Timestamp < end)
+                .ToList();
+            shiftedSystem = AvSyncHelpers.ShiftAudio(selectedSystem, cutoff);
+            shiftedMic = AvSyncHelpers.ShiftAudio(selectedMic, cutoff);
+        }
+
+        private static List<AudioPacket> BuildExactReplayAudioTrack(
+            IReadOnlyList<AudioPacket> mixedAudio,
+            TimeSpan requestedDuration)
+        {
+            TimeSpan duration = requestedDuration <= TimeSpan.Zero || requestedDuration > TimeSpan.FromMinutes(10)
+                ? TimeSpan.FromSeconds(RecordingPreferences.BackgroundReplayDurationSeconds)
+                : requestedDuration;
+            int outputChannels = mixedAudio.Count > 0
+                ? mixedAudio[0].Channels
+                : AudioMixHelpers.TargetChannels;
+            int bytesPerSecond = AudioMixHelpers.TargetSampleRate *
+                outputChannels *
+                (AudioMixHelpers.TargetBitsPerSample / 8);
+            int requiredBytes = checked((int)Math.Round(duration.TotalSeconds * bytesPerSecond));
+            byte[] exactPcm = new byte[requiredBytes];
+
+            if (mixedAudio.Count > 0 && mixedAudio[0].PcmData.Length > 0)
+            {
+                Buffer.BlockCopy(
+                    mixedAudio[0].PcmData,
+                    0,
+                    exactPcm,
+                    0,
+                    Math.Min(exactPcm.Length, mixedAudio[0].PcmData.Length));
+            }
+
+            return new List<AudioPacket>
+            {
+                new AudioPacket
+                {
+                    Timestamp = TimeSpan.Zero,
+                    PcmData = exactPcm,
+                    SampleRate = AudioMixHelpers.TargetSampleRate,
+                    Channels = outputChannels,
+                    BitsPerSample = AudioMixHelpers.TargetBitsPerSample
+                }
+            };
+        }
+
+        private static void TryDeleteFile(string path)
+        {
+            try
+            {
+                if (File.Exists(path))
+                    File.Delete(path);
+            }
+            catch
+            {
             }
         }
 

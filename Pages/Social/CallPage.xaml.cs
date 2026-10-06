@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
 using System.Runtime.InteropServices.WindowsRuntime;
+using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
 using Windows.ApplicationModel.DataTransfer;
@@ -21,6 +22,7 @@ using Windows.Storage.Streams;
 using Windows.System;
 using Zink.Services;
 using Zink.Services.NativeCalling;
+using MediaFoundationH264Decoder = Zink.Services.NativeCalling.Quality720p.MediaFoundationH264Decoder;
 using Zink.Services.NativeCalling.Models;
 using Zink.Services.Social;
 
@@ -40,6 +42,7 @@ namespace Zink.Pages.Social
         private bool _screenShareHooksAttached;
         private bool _isRemoteVideoVisible;
         private bool _isRemoteScreenShareLoading;
+        private bool _isWatchingRemoteScreenShare;
         private bool _isFullscreen;
         private bool _isLocalPreviewHidden;
         private bool _isScreenShareSoundEnabled = true;
@@ -52,18 +55,28 @@ namespace Zink.Pages.Social
         private readonly HashSet<long> _leftParticipantIds = new();
         private readonly Dictionary<long, string> _participantDisplayNames = new();
         private readonly Dictionary<long, NativePeerConnectionService> _screenSharePeers = new();
+        private readonly object _screenShareViewersSync = new();
+        private readonly HashSet<long> _screenShareViewerIds = new();
+        private readonly SemaphoreSlim _screenShareAudioSendLock = new(1, 1);
+        private readonly object _screenShareAudioQueueSync = new();
+        private readonly Queue<(byte[] Data, int Generation)> _screenShareAudioQueue = new();
+        private static int MaxScreenShareAudioQueue => ScreenShareServiceSelector.Active.RuntimePolicy.Controls.MaxAudioSendQueue;
+        private int _screenShareAudioPumpRunning;
+        private int _screenShareAudioSendDrops;
+        private int _screenShareLifecycleGeneration;
         private MediaFoundationH264Decoder? _h264Decoder;
         private int _screenShareFrameCounter;
         private double _screenShareObservedFps;
         private int _screenShareLastWidth;
         private int _screenShareLastHeight;
         private long _screenShareLastBytes;
-        private string _screenShareLastQuality = NativeScreenShareStreamingService.Instance.CurrentQuality.Name;
+        private string _screenShareLastQuality = ScreenShareCapturePipeline.Instance.CurrentQuality.Name;
         private string _selectedScreenShareSoundDevice = SystemAudioShareService.Instance.SelectedDeviceName;
         private DateTimeOffset _screenShareFpsWindowStartedUtc = DateTimeOffset.UtcNow;
         private DateTimeOffset? _screenShareLastFrameAtUtc;
         private int _screenShareTransmitCounter;
         private int _screenShareDroppedFrames;
+        private int _screenShareSendRecoveryPending;
         private int _screenShareDroppedReceiveFrames;
         private DateTimeOffset _localPreviewLastRenderedUtc = DateTimeOffset.MinValue;
         private DateTimeOffset _localStagePreviewLastRenderedUtc = DateTimeOffset.MinValue;
@@ -82,6 +95,8 @@ namespace Zink.Pages.Social
         private int _lastRemoteBitstreamWidth;
         private int _lastRemoteBitstreamHeight;
         private long _remoteScreenShareSenderId;
+        private int _remoteScreenShareStopGeneration;
+        private string _remoteScreenShareCodec = ScreenShareCodecNames.H264;
         private DateTimeOffset _lastQosSentUtc = DateTimeOffset.MinValue;
         private int _lastQosDroppedReceiveFrames;
         private DateTimeOffset _lastScreenShareSendSummaryUtc = DateTimeOffset.MinValue;
@@ -123,6 +138,15 @@ namespace Zink.Pages.Social
         private DateTimeOffset _lastRemoteKeyFrameRequestAtUtc = DateTimeOffset.MinValue;
         private DateTimeOffset _lastRemoteBacklogTrimLogUtc = DateTimeOffset.MinValue;
         private DateTimeOffset _lastRemoteBacklogJumpLogUtc = DateTimeOffset.MinValue;
+        private DateTimeOffset _lastRemoteStutterDiagnosticLogUtc = DateTimeOffset.MinValue;
+        private long _lastRemoteQueuedSequence;
+        private DateTimeOffset _lastRemoteQueuedAtUtc = DateTimeOffset.MinValue;
+        private long _remoteSequenceGapCount;
+        private long _remoteDecodeSpikeCount;
+        private long _remoteRenderCoalesceCount;
+        private long _remoteRenderGapCount;
+        private DateTimeOffset _lastRemoteRenderAtUtc = DateTimeOffset.MinValue;
+        private int _remoteH264RecoveryInFlight;
         private int _remoteBacklogTrimmedSinceLastLog;
         private int _remoteBacklogJumpedSinceLastLog;
         private long _lastScreenShareMetadataTimestamp;
@@ -139,30 +163,55 @@ namespace Zink.Pages.Social
         private int _remoteRenderedFingerprintRepeat;
         private uint _lastRemotePreviewFingerprint;
         private int _remotePreviewFingerprintRepeat;
-        private const int FallbackMaxFps = 1;
-        private const int PreviewFallbackMaxFps = 2;
-        private const int WebSocketFallbackMaxDeltaBytes = 24 * 1024;
-        private static readonly TimeSpan WebSocketFallbackWarmupDuration = TimeSpan.FromSeconds(1);
-        private static readonly TimeSpan WebSocketFallbackGpuStartDelay = TimeSpan.FromMilliseconds(1600);
-        private const int MaxRemoteH264DecodeQueue = 12;
-        private const int RemoteGpuBacklogKeyFrameRequestQueue = 18;
-        private const int MaxRemoteGpuPlaybackQueue = 36;
-        private const int RealtimeBacklogRetainFrames = 2;
-        private static readonly TimeSpan RemoteGpuFrameDuration = TimeSpan.FromTicks(TimeSpan.TicksPerSecond / NativeScreenShareStreamingService.TargetFps);
+        private static ScreenShareRuntimePolicy ScreenSharePolicy => ScreenShareServiceSelector.Active.RuntimePolicy;
+        private static int FallbackMaxFps => ScreenSharePolicy.Signaling.FallbackMaxFps;
+        private static int PreviewFallbackMaxFps => ScreenSharePolicy.Signaling.PreviewFallbackMaxFps;
+        private static int WebSocketFallbackMaxDeltaBytes => ScreenSharePolicy.Signaling.WebSocketFallbackMaxDeltaBytes;
+        private static TimeSpan WebSocketFallbackWarmupDuration => ScreenSharePolicy.Signaling.WebSocketFallbackWarmup;
+        private static TimeSpan WebSocketFallbackGpuStartDelay => ScreenSharePolicy.Signaling.WebSocketFallbackGpuStartDelay;
+        // Normal Media Foundation decoder spikes can briefly accumulate four or
+        // five frames. Keep the queue below roughly 130 ms so playback remains
+        // live instead of displaying stale compressed frames.
+        private static int MaxRemoteH264DecodeQueue => ScreenSharePolicy.Controls.MaxDecodeQueue;
+        // Preserve H.264 decoder state while catching up, but avoid the expensive
+        // NV12-to-BGRA conversion for intermediate frames. This keeps startup
+        // decoder warm-up and short decode spikes from becoming visible freezes.
+        private static int RemoteDecodeRenderBacklogThreshold => ScreenSharePolicy.Controls.DecodeRenderBacklogThreshold;
+        // Do not throw away a still-decodable dependent frame chain during a
+        // short decoder spike. The normal pruning path requests a fresh IDR at
+        // four frames, but some hardware encoders do not honour that request
+        // immediately. Allow up to one second of compressed frames before the
+        // hard recovery path resets the decoder.
+        private static int MaxRemoteH264HardDecodeQueue => ScreenSharePolicy.Controls.MaxHardDecodeQueue;
+        // MediaStreamSource can continue accepting samples after MediaPlayerElement
+        // silently stops presenting them. Use the existing MF decoder/render path.
+        private static bool UseRemoteGpuPlayback => ScreenSharePolicy.Controls.UseGpuPlayback;
+        private static int RemoteGpuBacklogKeyFrameRequestQueue => ScreenSharePolicy.Controls.GpuBacklogKeyFrameRequestQueue;
+        private static int MaxRemoteGpuPlaybackQueue => ScreenSharePolicy.Controls.MaxGpuPlaybackQueue;
+        // Keep the sender, RTP clock and MediaStreamSource on one cadence. The
+        // ARM64 receiver in the field cannot sustain the former 50 FPS stream
+        // and repeatedly discarded dependent H.264 frames while catching up.
+        private static int RemoteGpuCompatibilityFps => ScreenSharePolicy.Controls.CompatibilityFps;
+        private static int RealtimeBacklogRetainFrames => ScreenSharePolicy.Controls.RealtimeBacklogRetainFrames;
+        private static TimeSpan RemoteGpuSustainedBacklogThreshold => ScreenSharePolicy.Errors.GpuSustainedBacklogThreshold;
+        private static TimeSpan RemoteGpuFrameDuration => TimeSpan.FromTicks(TimeSpan.TicksPerSecond / RemoteGpuCompatibilityFps);
         private static readonly TimeSpan RemoteGpuMinFrameDuration = TimeSpan.FromTicks(TimeSpan.TicksPerSecond / 75);
         private static readonly TimeSpan RemoteGpuMaxFrameDuration = TimeSpan.FromTicks(TimeSpan.TicksPerSecond / 24);
-        private static readonly TimeSpan RemoteGpuSampleWaitTimeout = TimeSpan.FromSeconds(6);
-        private static readonly TimeSpan RtpMetadataInterval = TimeSpan.FromSeconds(2);
-        private static readonly TimeSpan QosFeedbackInterval = TimeSpan.FromSeconds(2);
-        private static readonly TimeSpan RemoteFrameReceiveStallThreshold = TimeSpan.FromSeconds(3);
-        private static readonly TimeSpan RemoteRenderStallThreshold = TimeSpan.FromSeconds(2);
-        private static readonly TimeSpan RemoteDecoderResetCooldown = TimeSpan.FromSeconds(1);
-        private static readonly TimeSpan RemoteFallbackRtpSuppressWindow = TimeSpan.FromSeconds(1);
-        private static readonly TimeSpan ScreenShareSendTimeout = TimeSpan.FromMilliseconds(120);
+        private static TimeSpan RemoteGpuSampleWaitTimeout => ScreenSharePolicy.Errors.GpuSampleWaitTimeout;
+        private static TimeSpan RtpMetadataInterval => ScreenSharePolicy.Signaling.RtpMetadataInterval;
+        private static TimeSpan QosFeedbackInterval => ScreenSharePolicy.Signaling.QosFeedbackInterval;
+        private static TimeSpan RemoteFrameReceiveStallThreshold => ScreenSharePolicy.Errors.ReceiveStallThreshold;
+        private static TimeSpan RemoteRenderStallThreshold => ScreenSharePolicy.Errors.RenderStallThreshold;
+        private static TimeSpan RemoteDecoderResetCooldown => ScreenSharePolicy.Errors.DecoderResetCooldown;
+        private static TimeSpan RemoteFallbackRtpSuppressWindow => ScreenSharePolicy.Errors.FallbackRtpSuppressWindow;
+        private static TimeSpan ScreenShareSendTimeout => ScreenSharePolicy.Signaling.SendTimeout;
         private static readonly TimeSpan FullscreenChromeHideDelay = TimeSpan.FromSeconds(4);
         private readonly SemaphoreSlim _screenShareSendLock = new(1, 1);
         private readonly SemaphoreSlim _screenShareDecodeLock = new(1, 1);
         private readonly SemaphoreSlim _screenShareLifecycleLock = new(1, 1);
+        private readonly object _screenShareSendQueueSync = new();
+        private PendingLocalScreenShareSend? _pendingLocalScreenShareSend;
+        private int _localScreenShareSendPumpRunning;
         private readonly object _screenSharePeerRestartSync = new();
         private readonly object _rtpFrameSync = new();
         private readonly object _remoteDecoderSync = new();
@@ -183,6 +232,7 @@ namespace Zink.Pages.Social
         private int _rtpDecoderWidth;
         private int _rtpDecoderHeight;
         private string _rtpDecoderCodec = ScreenShareCodecNames.H264;
+        private DateTimeOffset _remoteDecodeBacklogStartedAtUtc = DateTimeOffset.MinValue;
         private readonly object _remoteGpuPlaybackSync = new();
         private readonly Queue<PendingRemoteH264Frame> _pendingRemoteGpuPlaybackFrames = new();
         private MediaPlayer? _remoteGpuMediaPlayer;
@@ -196,6 +246,7 @@ namespace Zink.Pages.Social
         private TimeSpan _remoteGpuPlaybackSampleTime;
         private TimeSpan _remoteGpuEstimatedFrameDuration = RemoteGpuFrameDuration;
         private DateTimeOffset? _remoteGpuLastQueuedAtUtc;
+        private DateTimeOffset _remoteGpuBacklogStartedAtUtc = DateTimeOffset.MinValue;
         private bool _remoteGpuWaitingForKeyFrame;
         private bool _remoteGpuBacklogKeyFrameRequested;
         private bool _remoteGpuFirstSampleSubmitted;
@@ -204,6 +255,7 @@ namespace Zink.Pages.Social
 
         private DispatcherTimer? _callTimer;
         private DispatcherTimer? _fullscreenChromeTimer;
+        private CancellationTokenSource? _sidebarNoticeCancellation;
         private DateTimeOffset? _connectedAtUtc;
 
         public CallPage()
@@ -251,6 +303,9 @@ namespace Zink.Pages.Social
 
         private void CallPage_Loaded(object sender, RoutedEventArgs e)
         {
+            App.MainWindow?.CollapseSidebar();
+            ShowSidebarCollapsedNotice();
+
             NativeSignalingBridge.Instance.EnsureHooked();
 
             NativeCallCoordinator.Instance.SessionChanged += NativeCallCoordinator_SessionChanged;
@@ -288,8 +343,32 @@ namespace Zink.Pages.Social
             ApplySessionToUi(NativeCallCoordinator.Instance.CurrentSession);
         }
 
+        private async void ShowSidebarCollapsedNotice()
+        {
+            _sidebarNoticeCancellation?.Cancel();
+            _sidebarNoticeCancellation?.Dispose();
+            var cancellation = new CancellationTokenSource();
+            _sidebarNoticeCancellation = cancellation;
+            SidebarCollapsedInfoBar.IsOpen = true;
+
+            try
+            {
+                await Task.Delay(TimeSpan.FromSeconds(5), cancellation.Token);
+                if (!cancellation.IsCancellationRequested)
+                    SidebarCollapsedInfoBar.IsOpen = false;
+            }
+            catch (OperationCanceledException)
+            {
+            }
+        }
+
         private void CallPage_Unloaded(object sender, RoutedEventArgs e)
         {
+            _sidebarNoticeCancellation?.Cancel();
+            _sidebarNoticeCancellation?.Dispose();
+            _sidebarNoticeCancellation = null;
+            SidebarCollapsedInfoBar.IsOpen = false;
+
             NativeCallCoordinator.Instance.SessionChanged -= NativeCallCoordinator_SessionChanged;
             NativeSignalingBridge.Instance.IncomingCallReceived -= NativeSignalingBridge_IncomingCallReceived;
             NativeSignalingBridge.Instance.CallAnsweredReceived -= NativeSignalingBridge_CallAnsweredReceived;
@@ -329,14 +408,15 @@ namespace Zink.Pages.Social
                 return;
 
             _screenShareHooksAttached = true;
-            NativeScreenShareStreamingService.Instance.FrameReady += NativeScreenShare_FrameReady;
-            NativeScreenShareStreamingService.Instance.StreamingFailed += NativeScreenShare_StreamingFailed;
+            ScreenShareCapturePipeline.Instance.FrameReady += NativeScreenShare_FrameReady;
+            ScreenShareCapturePipeline.Instance.StreamingFailed += NativeScreenShare_StreamingFailed;
             SystemAudioShareService.Instance.AudioCaptured += SystemAudioShare_AudioCaptured;
             SocialManager.Instance.Realtime.ScreenShareStarted += Realtime_ScreenShareStarted;
             SocialManager.Instance.Realtime.ScreenShareStopped += Realtime_ScreenShareStopped;
             SocialManager.Instance.Realtime.ScreenFrameReceived += Realtime_ScreenFrameReceived;
             SocialManager.Instance.Realtime.EncodedScreenFrameReceived += Realtime_EncodedScreenFrameReceived;
             SocialManager.Instance.Realtime.ScreenShareMetadataReceived += Realtime_ScreenShareMetadataReceived;
+            SocialManager.Instance.Realtime.ScreenShareCapabilitiesReceived += Realtime_ScreenShareCapabilitiesReceived;
             SocialManager.Instance.Realtime.ScreenShareQosReceived += Realtime_ScreenShareQosReceived;
             SocialManager.Instance.Realtime.WebRtcOfferReceived += Realtime_WebRtcOfferReceived;
             SocialManager.Instance.Realtime.WebRtcAnswerReceived += Realtime_WebRtcAnswerReceived;
@@ -349,14 +429,15 @@ namespace Zink.Pages.Social
                 return;
 
             _screenShareHooksAttached = false;
-            NativeScreenShareStreamingService.Instance.FrameReady -= NativeScreenShare_FrameReady;
-            NativeScreenShareStreamingService.Instance.StreamingFailed -= NativeScreenShare_StreamingFailed;
+            ScreenShareCapturePipeline.Instance.FrameReady -= NativeScreenShare_FrameReady;
+            ScreenShareCapturePipeline.Instance.StreamingFailed -= NativeScreenShare_StreamingFailed;
             SystemAudioShareService.Instance.AudioCaptured -= SystemAudioShare_AudioCaptured;
             SocialManager.Instance.Realtime.ScreenShareStarted -= Realtime_ScreenShareStarted;
             SocialManager.Instance.Realtime.ScreenShareStopped -= Realtime_ScreenShareStopped;
             SocialManager.Instance.Realtime.ScreenFrameReceived -= Realtime_ScreenFrameReceived;
             SocialManager.Instance.Realtime.EncodedScreenFrameReceived -= Realtime_EncodedScreenFrameReceived;
             SocialManager.Instance.Realtime.ScreenShareMetadataReceived -= Realtime_ScreenShareMetadataReceived;
+            SocialManager.Instance.Realtime.ScreenShareCapabilitiesReceived -= Realtime_ScreenShareCapabilitiesReceived;
             SocialManager.Instance.Realtime.ScreenShareQosReceived -= Realtime_ScreenShareQosReceived;
             SocialManager.Instance.Realtime.WebRtcOfferReceived -= Realtime_WebRtcOfferReceived;
             SocialManager.Instance.Realtime.WebRtcAnswerReceived -= Realtime_WebRtcAnswerReceived;
@@ -365,16 +446,16 @@ namespace Zink.Pages.Social
 
         private async Task StartLocalScreenShareAsync()
         {
+            var startupTimer = Stopwatch.StartNew();
             DiagnosticLogService.WriteLine(
-                $"[ScreenShare:UI] StartLocalScreenShareAsync requested; processArch={System.Runtime.InteropServices.RuntimeInformation.ProcessArchitecture}; osArch={System.Runtime.InteropServices.RuntimeInformation.OSArchitecture}; is64Bit={Environment.Is64BitProcess}; packageBase={AppContext.BaseDirectory}");
-            DiagnosticLogService.Flush();
+                $"[ScreenShare:STARTUP] requested elapsedMs={startupTimer.Elapsed.TotalMilliseconds:0.0}; processArch={System.Runtime.InteropServices.RuntimeInformation.ProcessArchitecture}; osArch={System.Runtime.InteropServices.RuntimeInformation.OSArchitecture}; is64Bit={Environment.Is64BitProcess}; packageBase={AppContext.BaseDirectory}");
 
             await _screenShareLifecycleLock.WaitAsync();
             try
             {
                 var session = NativeCallCoordinator.Instance.CurrentSession;
                 DiagnosticLogService.WriteLine(
-                    $"[ScreenShare:UI] StartLocalScreenShareAsync entered; state={session.State}; callId={session.CallId}; localSharing={_isSharingScreen}; nativeRunning={NativeScreenShareStreamingService.Instance.IsRunning}; requestedQuality={NativeScreenShareStreamingService.Instance.RequestedQuality.Name}");
+                    $"[ScreenShare:STARTUP] entered elapsedMs={startupTimer.Elapsed.TotalMilliseconds:0.0}; state={session.State}; callId={session.CallId}; localSharing={_isSharingScreen}; nativeRunning={ScreenShareCapturePipeline.Instance.IsRunning}; requestedQuality={ScreenShareCapturePipeline.Instance.RequestedQuality.Name}");
                 if (session.State != NativeCallState.Connected)
                     throw new InvalidOperationException("Start or accept the call before sharing your screen.");
 
@@ -383,15 +464,22 @@ namespace Zink.Pages.Social
                 if (participants.Count == 0 || string.IsNullOrWhiteSpace(session.CallId))
                     throw new InvalidOperationException("No remote users are connected for screen share.");
 
-                if (NativeScreenShareStreamingService.Instance.IsRunning)
+                if (ScreenShareCapturePipeline.Instance.IsRunning)
                     return;
 
                 ResetScreenShareStats();
+                var lifecycleGeneration = Interlocked.Increment(ref _screenShareLifecycleGeneration);
+                lock (_screenShareViewersSync)
+                    _screenShareViewerIds.Clear();
+                ScreenShareCapturePipeline.Instance.SetAdaptiveLatencyMode(true);
+                ScreenShareCapturePipeline.Instance.SetTargetFpsOverride(
+                    ScreenShareCapturePipeline.Instance.RequestedQuality.TargetFps);
                 _screenShareStartedAtUtc = DateTimeOffset.UtcNow;
-                Debug.WriteLine($"[ScreenShare:H264] Starting with locked selected quality: {NativeScreenShareStreamingService.Instance.RequestedQuality.Name}.");
+                Debug.WriteLine($"[ScreenShare:H264] Starting with locked selected quality: {ScreenShareCapturePipeline.Instance.RequestedQuality.Name}.");
                 TryEnqueueOnUi(() =>
                 {
                     _remoteScreenShareSenderId = 0;
+            _remoteScreenShareCodec = ScreenShareCodecNames.H264;
                     _isRemoteVideoVisible = false;
                     _isRemoteScreenShareLoading = false;
                     RemoteScreenImage.Source = null;
@@ -401,23 +489,33 @@ namespace Zink.Pages.Social
                     UpdateMediaLayerVisibility();
                 });
 
-                var startStreamingTask = NativeScreenShareStreamingService.Instance.StartAsync();
+                var captureStartTask = ScreenShareCapturePipeline.Instance.StartAsync();
+                DiagnosticLogService.WriteLine($"[ScreenShare:STARTUP] capture-start-requested elapsedMs={startupTimer.Elapsed.TotalMilliseconds:0.0}");
+                var capabilityTasks = participants
+                    .Select(participantId => SocialManager.Instance.Realtime.SendScreenShareCapabilitiesAsync(
+                        participantId,
+                        session.CallId,
+                        GetLocalScreenShareCodecs(),
+                        RuntimeInformation.ProcessArchitecture.ToString()))
+                    .ToList();
                 var signalingTasks = participants
                     .Select(participantId => StartScreenShareParticipantSignalingAsync(participantId, session.CallId))
                     .ToList();
-
-                await startStreamingTask;
-                DiagnosticLogService.WriteLine("[ScreenShare:UI] Native screen-share streaming service started.");
+                await Task.WhenAll(capabilityTasks.Concat(signalingTasks).Append(captureStartTask));
+                DiagnosticLogService.WriteLine(
+                    $"[ScreenShare:STARTUP] capture-and-signaling-complete elapsedMs={startupTimer.Elapsed.TotalMilliseconds:0.0}; captureRunning={ScreenShareCapturePipeline.Instance.IsRunning}; activeCodec={ScreenShareCapturePipeline.Instance.ActiveVideoCodec}; targetFps={ScreenShareCapturePipeline.Instance.CurrentTargetFps}");
                 Debug.WriteLine("[ScreenShare:H264] Using WebRTC RTP as the primary screen-share transport with low-bandwidth WebSocket fallback.");
-
-                await Task.WhenAll(signalingTasks);
 
                 if (_isScreenShareSoundEnabled)
                     await TryStartScreenShareSoundAsync(session, showSuccessStatus: false);
+
+                App.MainWindow?.CollapseSidebar();
+                DiagnosticLogService.WriteLine($"[ScreenShare:STARTUP] completed elapsedMs={startupTimer.Elapsed.TotalMilliseconds:0.0}; audioEnabled={_isScreenShareSoundEnabled}");
+                DiagnosticLogService.Flush();
             }
             catch (Exception ex)
             {
-                DiagnosticLogService.WriteLine("[ScreenShare:UI] StartLocalScreenShareAsync failed: " + ex);
+                DiagnosticLogService.WriteLine($"[ScreenShare:STARTUP] failed elapsedMs={startupTimer.Elapsed.TotalMilliseconds:0.0}; error={ex}");
                 DiagnosticLogService.Flush();
                 throw;
             }
@@ -432,13 +530,56 @@ namespace Zink.Pages.Social
             try
             {
                 Debug.WriteLine($"[ScreenShare:RTP] Notifying participant {participantId} that screen share is starting in call {callId}.");
-                await SocialManager.Instance.Realtime.SendScreenShareStartedAsync(participantId, callId);
-                _ = StartScreenShareRtpOfferAsync(participantId, callId);
+                var quality = ScreenShareCapturePipeline.Instance.CurrentQuality;
+                var codec = ScreenShareCapturePipeline.Instance.SelectedCodecName;
+                await SocialManager.Instance.Realtime.SendScreenShareStartedAsync(
+                    participantId,
+                    callId,
+                    quality.Width,
+                    quality.Height,
+                    codec);
+                await SocialManager.Instance.Realtime.SendScreenShareMetadataAsync(
+                    participantId,
+                    callId,
+                    quality.Width,
+                    quality.Height,
+                    DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                    codec);
+                // Media negotiation begins only after this participant chooses
+                // Watch now. Until then this is an announcement-only signal.
             }
             catch (Exception ex)
             {
                 Debug.WriteLine($"[ScreenShare:RTP] Start notification failed for participant {participantId}: {ex.Message}");
             }
+        }
+
+        private static IReadOnlyList<string> GetLocalScreenShareCodecs()
+        {
+            return new[] { ScreenShareCodecNames.H264, ScreenShareCodecNames.Av1 };
+        }
+
+        private void Realtime_ScreenShareCapabilitiesReceived(object? sender, ScreenShareCapabilitiesEventArgs e)
+        {
+            var session = NativeCallCoordinator.Instance.CurrentSession;
+            if (!IsCurrentCallSignal(session, e.CallId) || e.Codecs.Length == 0)
+                return;
+
+            var selected = SelectCompatibleScreenShareCodec(e.Codecs);
+            DiagnosticLogService.WriteLine(
+                $"[ScreenShare:CAPS] participant={e.FromUserId}; remoteArch={e.Architecture}; " +
+                $"remoteCodecs={string.Join(",", e.Codecs)}; selected={selected}");
+        }
+
+        private static string SelectCompatibleScreenShareCodec(IReadOnlyList<string> remoteCodecs)
+        {
+            if (remoteCodecs.Any(ScreenShareCodecNames.IsH264))
+                return ScreenShareCodecNames.H264;
+
+            if (remoteCodecs.Any(ScreenShareCodecNames.IsAv1))
+                return ScreenShareCodecNames.Av1;
+
+            return ScreenShareCodecNames.H264;
         }
 
         private async Task StopLocalScreenShareAsync(bool notifyRemote, bool promptForFeedback = false)
@@ -449,7 +590,13 @@ namespace Zink.Pages.Social
             await _screenShareLifecycleLock.WaitAsync();
             try
             {
-                var wasRunning = NativeScreenShareStreamingService.Instance.IsRunning;
+                Interlocked.Increment(ref _screenShareLifecycleGeneration);
+                lock (_screenShareSendQueueSync)
+                    _pendingLocalScreenShareSend = null;
+                lock (_screenShareAudioQueueSync)
+                    _screenShareAudioQueue.Clear();
+
+                var wasRunning = ScreenShareCapturePipeline.Instance.IsRunning;
                 Debug.WriteLine($"[ScreenShare:H264] StopLocalScreenShareAsync begin; notifyRemote={notifyRemote}; wasRunning={wasRunning}; uiSharing={_isSharingScreen}.");
 
                 if (wasRunning)
@@ -457,7 +604,7 @@ namespace Zink.Pages.Social
 
                 try
                 {
-                    await NativeScreenShareStreamingService.Instance.StopAsync();
+                    await ScreenShareCapturePipeline.Instance.StopAsync();
                 }
                 catch (Exception ex)
                 {
@@ -1006,7 +1153,7 @@ namespace Zink.Pages.Social
             if (participants.Count == 0)
                 return;
 
-            _ = SendLocalScreenFrameAndTrackAsync(participants, session.CallId, e);
+            QueueLocalScreenFrame(participants, session.CallId, e);
 
             TryEnqueueOnUi(async () =>
             {
@@ -1037,13 +1184,99 @@ namespace Zink.Pages.Social
             });
         }
 
-        private async Task SendLocalScreenFrameAndTrackAsync(IReadOnlyList<long> participantIds, string callId, NativeScreenFrameEventArgs e)
+        private void QueueLocalScreenFrame(IReadOnlyList<long> participantIds, string callId, NativeScreenFrameEventArgs e)
+        {
+            var droppedH264Reference = false;
+            lock (_screenShareSendQueueSync)
+            {
+                if (_pendingLocalScreenShareSend != null)
+                {
+                    _screenShareDroppedFrames++;
+                    droppedH264Reference = ScreenShareCodecNames.IsH264(
+                        _pendingLocalScreenShareSend.Frame.Codec);
+                }
+
+                _pendingLocalScreenShareSend = new PendingLocalScreenShareSend(
+                    participantIds.Distinct().ToArray(),
+                    callId,
+                    e,
+                    Volatile.Read(ref _screenShareLifecycleGeneration));
+            }
+
+            if (droppedH264Reference)
+            {
+                // Replacing a queued H.264 access unit breaks the reference chain
+                // just like a transport drop. Suppress dependent frames until the
+                // encoder produces a fresh IDR instead of showing macroblock
+                // corruption on the receiver.
+                Interlocked.Exchange(ref _screenShareSendRecoveryPending, 1);
+                ScreenShareCapturePipeline.Instance.RequestRecoveryKeyFrame(
+                    "local realtime send queue replaced an H.264 reference frame");
+                ScreenShareCapturePipeline.Instance.ReportSendCongestion(
+                    "local realtime send queue backlog");
+            }
+
+            if (Interlocked.CompareExchange(ref _localScreenShareSendPumpRunning, 1, 0) == 0)
+            {
+                _ = Task.Factory.StartNew(
+                    ProcessLocalScreenShareSendQueueAsync,
+                    CancellationToken.None,
+                    TaskCreationOptions.DenyChildAttach | TaskCreationOptions.LongRunning,
+                    TaskScheduler.Default).Unwrap();
+            }
+        }
+
+        private async Task ProcessLocalScreenShareSendQueueAsync()
         {
             try
             {
+                while (true)
+                {
+                    PendingLocalScreenShareSend? pending;
+                    lock (_screenShareSendQueueSync)
+                    {
+                        pending = _pendingLocalScreenShareSend;
+                        _pendingLocalScreenShareSend = null;
+                    }
+
+                    if (pending == null)
+                        return;
+
+                    await SendLocalScreenFrameAndTrackAsync(
+                        pending.ParticipantIds,
+                        pending.CallId,
+                        pending.Frame,
+                        pending.Generation);
+                }
+            }
+            finally
+            {
+                Interlocked.Exchange(ref _localScreenShareSendPumpRunning, 0);
+                lock (_screenShareSendQueueSync)
+                {
+                    if (_pendingLocalScreenShareSend != null &&
+                        Interlocked.CompareExchange(ref _localScreenShareSendPumpRunning, 1, 0) == 0)
+                    {
+                        _ = Task.Factory.StartNew(
+                            ProcessLocalScreenShareSendQueueAsync,
+                            CancellationToken.None,
+                            TaskCreationOptions.DenyChildAttach | TaskCreationOptions.LongRunning,
+                            TaskScheduler.Default).Unwrap();
+                    }
+                }
+            }
+        }
+
+        private async Task SendLocalScreenFrameAndTrackAsync(IReadOnlyList<long> participantIds, string callId, NativeScreenFrameEventArgs e, int lifecycleGeneration)
+        {
+            try
+            {
+                if (lifecycleGeneration != Volatile.Read(ref _screenShareLifecycleGeneration))
+                    return;
+
                 if (ScreenShareCodecNames.IsH264(e.Codec) || ScreenShareCodecNames.IsAv1(e.Codec))
                 {
-                    var sent = await TrySendScreenFrameBestAvailableAsync(participantIds, callId, e);
+                    var sent = await TrySendScreenFrameBestAvailableAsync(participantIds, callId, e, lifecycleGeneration);
                     LogLocalScreenShareFlow(e, participantIds.Count, sent);
                     if (!sent)
                         return;
@@ -1070,52 +1303,56 @@ namespace Zink.Pages.Social
             }
         }
 
-        private async Task<bool> TrySendScreenFrameBestAvailableAsync(IReadOnlyList<long> participantIds, string callId, NativeScreenFrameEventArgs e)
+        private async Task<bool> TrySendScreenFrameBestAvailableAsync(IReadOnlyList<long> participantIds, string callId, NativeScreenFrameEventArgs e, int lifecycleGeneration)
         {
+            if (lifecycleGeneration != Volatile.Read(ref _screenShareLifecycleGeneration))
+                return false;
+
+            lock (_screenShareViewersSync)
+                participantIds = participantIds.Where(id => _screenShareViewerIds.Contains(id)).ToArray();
+
+            // Nobody has opted in to this stream yet. Keep the local capture
+            // running for its owner without sending or loading remote media.
+            if (participantIds.Count == 0)
+                return true;
+
             if (!_screenShareSendLock.Wait(0))
             {
                 _screenShareDroppedFrames++;
-                if (_screenShareDroppedFrames == 1 || _screenShareDroppedFrames % NativeScreenShareStreamingService.TargetFps == 0)
+                if (ScreenShareCodecNames.IsH264(e.Codec))
+                {
+                    // Dropping an H.264 access unit also invalidates dependent P
+                    // frames. Do not let those frames create visible corruption;
+                    // hold transmission until the encoder supplies a fresh IDR.
+                    Interlocked.Exchange(ref _screenShareSendRecoveryPending, 1);
+                    ScreenShareCapturePipeline.Instance.RequestRecoveryKeyFrame("legacy H.264 send overlap dropped a reference frame");
+                }
+                if (_screenShareDroppedFrames == 1 || _screenShareDroppedFrames % ScreenShareCapturePipeline.TargetFps == 0)
                     Debug.WriteLine($"[ScreenShare:H264] Dropped stale frame while previous send is still in flight. dropped={_screenShareDroppedFrames}");
 
-                NativeScreenShareStreamingService.Instance.ReportSendCongestion("send backlog");
+                ScreenShareCapturePipeline.Instance.ReportSendCongestion("send backlog");
                 return false;
             }
 
             try
             {
+                if (ScreenShareCodecNames.IsH264(e.Codec) &&
+                    Volatile.Read(ref _screenShareSendRecoveryPending) == 1)
+                {
+                    if (!e.IsKeyFrame && !ContainsH264IdrFrame(e.FrameData))
+                    {
+                        _screenShareDroppedFrames++;
+                        return false;
+                    }
+
+                    Interlocked.Exchange(ref _screenShareSendRecoveryPending, 0);
+                    Debug.WriteLine("[ScreenShare:H264] Fresh IDR restored the send dependency chain after a local overlap drop.");
+                }
+
                 var sendStartedAt = Stopwatch.StartNew();
                 var sentToAnyPeer = false;
                 var fallbackParticipantIds = new List<long>();
-
-                foreach (var participantId in participantIds)
-                {
-                    if (_screenSharePeers.TryGetValue(participantId, out var peer) &&
-                        await TrySendWithTimeoutAsync(
-                            peer.SendEncodedVideoFrameAsync(e.FrameData, e.Codec),
-                            $"RTP frame to participant {participantId}"))
-                    {
-                        sentToAnyPeer = true;
-                        _screenShareRtpFrames++;
-                    }
-                    else
-                    {
-                        fallbackParticipantIds.Add(participantId);
-                    }
-                }
-
-                var rtpFailedTargets = fallbackParticipantIds.Distinct().ToList();
-                var shouldSendWebSocketFallback = ShouldSendFallbackFrame(e);
-                var websocketFallbackTargets = new List<long>();
-                if (shouldSendWebSocketFallback)
-                {
-                    websocketFallbackTargets = rtpFailedTargets.ToList();
-                }
-
-                var shouldSendRtpMetadata = sentToAnyPeer && ShouldSendRtpMetadataFrame(e);
-                var sentFallback = false;
-                var sentFallbackTargets = 0;
-                var sentPreview = false;
+                var shouldSendRtpMetadata = ShouldSendRtpMetadataFrame(e);
 
                 if (shouldSendRtpMetadata)
                 {
@@ -1132,6 +1369,48 @@ namespace Zink.Pages.Social
                         _screenShareRtpMetadataFrames++;
                     }
                 }
+
+                foreach (var participantId in participantIds)
+                {
+                    if (_screenSharePeers.TryGetValue(participantId, out var peer) &&
+                        await TrySendWithTimeoutAsync(
+                            peer.SendEncodedVideoFrameAsync(
+                                e.FrameData,
+                                e.Codec,
+                                ScreenShareCapturePipeline.Instance.CurrentTargetFps),
+                            $"RTP frame to participant {participantId}"))
+                    {
+                        sentToAnyPeer = true;
+                        _screenShareRtpFrames++;
+                    }
+                    else
+                    {
+                        fallbackParticipantIds.Add(participantId);
+                    }
+                }
+
+                var rtpFailedTargets = fallbackParticipantIds.Distinct().ToList();
+                var shouldSendWebSocketFallback = ShouldSendFallbackFrame(e);
+                var websocketFallbackTargets = new List<long>();
+                if (shouldSendWebSocketFallback)
+                {
+                    // A WebRTC connection can remain nominally "connected" after
+                    // its selected UDP path has stopped delivering packets. Keep a
+                    // reliable, independently decodable keyframe path warm through
+                    // signaling so the receiver can switch immediately while ICE is
+                    // rebuilt. Delta frames still use fallback only when RTP reports
+                    // an explicit send failure, avoiding duplicate full-rate video.
+                    // Do not feed the same encoded access unit into the same
+                    // decoder over both RTP and the reliable fallback path.
+                    // The two transports can arrive out of order, which makes
+                    // H.264 reference frames appear corrupted. Peers without
+                    // a successful RTP send still receive the fallback.
+                    websocketFallbackTargets = rtpFailedTargets.ToList();
+                }
+
+                var sentFallback = false;
+                var sentFallbackTargets = 0;
+                var sentPreview = false;
 
                 if (websocketFallbackTargets.Count > 0)
                 {
@@ -1181,7 +1460,7 @@ namespace Zink.Pages.Social
                 else if (!sentToAnyPeer && rtpFailedTargets.Count > 0)
                 {
                     _screenShareDroppedFrames++;
-                    NativeScreenShareStreamingService.Instance.ReportSendCongestion("fallback transport backlog");
+                    ScreenShareCapturePipeline.Instance.ReportSendCongestion("fallback transport backlog");
                 }
 
                 if (!sentToAnyPeer &&
@@ -1245,7 +1524,7 @@ namespace Zink.Pages.Social
             if (!e.IsKeyFrame && e.FrameData.Length > WebSocketFallbackMaxDeltaBytes)
                 return false;
 
-            if (FallbackMaxFps >= NativeScreenShareStreamingService.TargetFps)
+            if (FallbackMaxFps >= ScreenShareCapturePipeline.TargetFps)
                 return true;
 
             var now = DateTimeOffset.UtcNow;
@@ -1314,12 +1593,13 @@ namespace Zink.Pages.Social
 
         private bool ShouldSendRtpMetadataFrame(NativeScreenFrameEventArgs e)
         {
-            if (!e.IsKeyFrame)
+            var isAv1 = ScreenShareCodecNames.IsAv1(e.Codec);
+            if (!isAv1 && !e.IsKeyFrame)
                 return false;
 
             var now = DateTimeOffset.UtcNow;
             var resolutionChanged = _lastRtpMetadataWidth != e.Width || _lastRtpMetadataHeight != e.Height;
-            if (!resolutionChanged && now - _lastRtpMetadataSentUtc < RtpMetadataInterval)
+            if (!resolutionChanged && now - _lastRtpMetadataSentUtc < (isAv1 ? TimeSpan.FromSeconds(1) : RtpMetadataInterval))
                 return false;
 
             _lastRtpMetadataSentUtc = now;
@@ -1350,14 +1630,79 @@ namespace Zink.Pages.Social
 
         private async void SystemAudioShare_AudioCaptured(byte[] data)
         {
+            if (data == null || data.Length == 0)
+                return;
+
+            lock (_screenShareAudioQueueSync)
+            {
+                if (_screenShareAudioQueue.Count >= MaxScreenShareAudioQueue)
+                {
+                    _ = _screenShareAudioQueue.Dequeue();
+                    var dropped = Interlocked.Increment(ref _screenShareAudioSendDrops);
+                    if (dropped == 1 || dropped % 50 == 0)
+                    {
+                        DiagnosticLogService.WriteLine($"[ScreenShare:Audio] Dropped oldest queued packet to preserve realtime playback; dropped={dropped}; queue={_screenShareAudioQueue.Count}.");
+                    }
+                }
+
+                _screenShareAudioQueue.Enqueue((data, Volatile.Read(ref _screenShareLifecycleGeneration)));
+            }
+
+            if (Interlocked.Exchange(ref _screenShareAudioPumpRunning, 1) == 0)
+            {
+                _ = ProcessScreenShareAudioQueueAsync();
+            }
+        }
+
+        private async Task ProcessScreenShareAudioQueueAsync()
+        {
             try
             {
+                while (true)
+                {
+                    (byte[] Data, int Generation)? queued;
+                    lock (_screenShareAudioQueueSync)
+                    {
+                        queued = _screenShareAudioQueue.Count > 0
+                            ? _screenShareAudioQueue.Dequeue()
+                            : ((byte[] Data, int Generation)?)null;
+                    }
+
+                    if (queued == null)
+                        break;
+
+                    if (queued.Value.Generation == Volatile.Read(ref _screenShareLifecycleGeneration))
+                        await SendScreenShareAudioPacketAsync(queued.Value.Data, queued.Value.Generation);
+                }
+            }
+            finally
+            {
+                Interlocked.Exchange(ref _screenShareAudioPumpRunning, 0);
+
+                lock (_screenShareAudioQueueSync)
+                {
+                    if (_screenShareAudioQueue.Count > 0 &&
+                        Interlocked.Exchange(ref _screenShareAudioPumpRunning, 1) == 0)
+                    {
+                        _ = ProcessScreenShareAudioQueueAsync();
+                    }
+                }
+            }
+        }
+
+        private async Task SendScreenShareAudioPacketAsync(byte[] data, int lifecycleGeneration)
+        {
+            await _screenShareAudioSendLock.WaitAsync();
+            try
+            {
+                if (lifecycleGeneration != Volatile.Read(ref _screenShareLifecycleGeneration))
+                    return;
+
                 var session = NativeCallCoordinator.Instance.CurrentSession;
                 if (!_isSharingScreen ||
                     !_isScreenShareSoundEnabled ||
                     session.State != NativeCallState.Connected ||
-                    string.IsNullOrWhiteSpace(session.CallId) ||
-                    data.Length == 0)
+                    string.IsNullOrWhiteSpace(session.CallId))
                 {
                     return;
                 }
@@ -1365,38 +1710,30 @@ namespace Zink.Pages.Social
                 var participants = GetCallParticipants(session).ToList();
                 if (participants.Count > 1)
                 {
-                    await SocialManager.Instance.Realtime.SendAudioChunkAsync(
-                        0,
-                        session.CallId,
-                        data);
+                    await SocialManager.Instance.Realtime.SendAudioChunkAsync(0, session.CallId, data);
                 }
                 else
                 {
                     foreach (var participantId in participants)
                     {
-                        await SocialManager.Instance.Realtime.SendAudioChunkAsync(
-                            participantId,
-                            session.CallId,
-                            data);
+                        await SocialManager.Instance.Realtime.SendAudioChunkAsync(participantId, session.CallId, data);
                     }
                 }
 
                 _screenShareSoundPacketsSent++;
                 _screenShareSoundLastPacketAtUtc = DateTimeOffset.UtcNow;
-                if (_screenShareSoundPacketsSent == 1 ||
-                    _screenShareSoundPacketsSent % 100 == 0)
+                if (_screenShareSoundPacketsSent == 1 || _screenShareSoundPacketsSent % 100 == 0)
                 {
                     Debug.WriteLine($"[ScreenShare:Audio] Sent system-audio packet {_screenShareSoundPacketsSent}; bytes={data.Length}; targets={participants.Count}; broadcast={participants.Count > 1}.");
                 }
             }
             catch (Exception ex)
             {
-                TryEnqueueOnUi(() =>
-                {
-                    NativeCallCoordinator.Instance.SetStatus(
-                        NativeCallCoordinator.Instance.CurrentSession.State,
-                        $"Screen share sound failed: {ex.Message}");
-                });
+                DiagnosticLogService.WriteLine($"[ScreenShare:Audio] Send failed: {ex.Message}");
+            }
+            finally
+            {
+                _screenShareAudioSendLock.Release();
             }
         }
 
@@ -1407,11 +1744,12 @@ namespace Zink.Pages.Social
             _screenShareLastWidth = 0;
             _screenShareLastHeight = 0;
             _screenShareLastBytes = 0;
-            _screenShareLastQuality = NativeScreenShareStreamingService.Instance.CurrentQuality.Name;
+            _screenShareLastQuality = ScreenShareCapturePipeline.Instance.CurrentQuality.Name;
             _screenShareFpsWindowStartedUtc = DateTimeOffset.UtcNow;
             _screenShareLastFrameAtUtc = null;
             _screenShareTransmitCounter = 0;
             _screenShareDroppedFrames = 0;
+            Interlocked.Exchange(ref _screenShareSendRecoveryPending, 0);
             _screenShareDroppedReceiveFrames = 0;
             _localPreviewLastRenderedUtc = DateTimeOffset.MinValue;
             _localStagePreviewLastRenderedUtc = DateTimeOffset.MinValue;
@@ -1431,10 +1769,12 @@ namespace Zink.Pages.Social
             _lastQosDroppedReceiveFrames = 0;
             _lastScreenShareSendSummaryUtc = DateTimeOffset.MinValue;
             _remoteScreenShareSenderId = 0;
+            _isWatchingRemoteScreenShare = false;
             _remoteScreenLastReceivedAtUtc = null;
             _remoteScreenLastRenderedAtUtc = null;
             _lastRemoteDecoderResetAtUtc = DateTimeOffset.MinValue;
             _lastRemoteReceiveStallRecoveryUtc = DateTimeOffset.MinValue;
+            Interlocked.Exchange(ref _remoteH264RecoveryInFlight, 0);
             _remoteFallbackLastReceivedAtUtc = DateTimeOffset.MinValue;
             _remoteFallbackFirstReceivedAtUtc = DateTimeOffset.MinValue;
             Interlocked.Exchange(ref _remoteRtpFrameCount, 0);
@@ -1477,6 +1817,14 @@ namespace Zink.Pages.Social
             _lastRemoteFallbackHoldLogUtc = DateTimeOffset.MinValue;
             _lastRemoteBacklogTrimLogUtc = DateTimeOffset.MinValue;
             _lastRemoteBacklogJumpLogUtc = DateTimeOffset.MinValue;
+                _lastRemoteStutterDiagnosticLogUtc = DateTimeOffset.MinValue;
+                _lastRemoteQueuedSequence = 0;
+                _lastRemoteQueuedAtUtc = DateTimeOffset.MinValue;
+                _remoteSequenceGapCount = 0;
+                _remoteDecodeSpikeCount = 0;
+                _remoteRenderCoalesceCount = 0;
+                _remoteRenderGapCount = 0;
+                _lastRemoteRenderAtUtc = DateTimeOffset.MinValue;
             _remoteBacklogTrimmedSinceLastLog = 0;
             _remoteBacklogJumpedSinceLastLog = 0;
             _lastLocalEncodedFingerprint = 0;
@@ -1505,6 +1853,7 @@ namespace Zink.Pages.Social
             _remoteGpuPlaybackQueueTotal = 0;
             _remoteGpuPlaybackQueueSamples = 0;
             _remoteGpuPlaybackAverageQueue = 0;
+            _remoteGpuBacklogStartedAtUtc = DateTimeOffset.MinValue;
             _lastRemoteRealtimeStatsLogUtc = DateTimeOffset.MinValue;
         }
 
@@ -1589,44 +1938,164 @@ namespace Zink.Pages.Social
             }
         }
 
-        private void Realtime_ScreenShareStarted(object? sender, (string CallId, long FromUserId) e)
+        private void Realtime_ScreenShareStarted(object? sender, (string CallId, long FromUserId, int Width, int Height, string Codec) e)
         {
-            TryEnqueueOnUi(() =>
+            var sessionLogPath = DiagnosticLogService.StartScreenShareSession("remote screen-share started");
+            DiagnosticLogService.WriteLine($"[ScreenShare:SESSION] sessionLog={sessionLogPath}; role=receiver; senderId={e.FromUserId}; callId={e.CallId}; until=remote screen-share ended");
+            // Cancel any delayed stop confirmation from an older lifecycle signal.
+            Interlocked.Increment(ref _remoteScreenShareStopGeneration);
+            TryEnqueueOnUi(async () =>
             {
                 var session = NativeCallCoordinator.Instance.CurrentSession;
                 if (e.CallId != session.CallId)
                     return;
 
+                var continueWatching = _isWatchingRemoteScreenShare &&
+                    _remoteScreenShareSenderId == e.FromUserId;
+                if (continueWatching &&
+                    _screenSharePeers.TryGetValue(e.FromUserId, out var recoveryPeer) &&
+                    (recoveryPeer.ConnectionState.Equals("failed", StringComparison.OrdinalIgnoreCase) ||
+                     recoveryPeer.ConnectionState.Equals("disconnected", StringComparison.OrdinalIgnoreCase) ||
+                     recoveryPeer.HasRemoteDescription))
+                {
+                    // A repeated started signal while the viewer is already watching
+                    // is the sender's recovery handshake. Retire the old negotiated
+                    // peer before ICE for the replacement offer arrives; otherwise
+                    // those candidates attach to the dead peer and are discarded
+                    // when WebRtcOfferReceived replaces it a moment later.
+                    await ResetScreenSharePeerAsync(
+                        e.FromUserId,
+                        $"sender restart handshake; previous state={recoveryPeer.ConnectionState}");
+                }
+
                 ResetRemoteScreenShareReceiveState(clearImage: true);
                 _remoteScreenShareSenderId = e.FromUserId;
-                _remoteScreenLastReceivedAtUtc = DateTimeOffset.UtcNow;
+                _isWatchingRemoteScreenShare = continueWatching;
+                _remoteScreenShareCodec = ScreenShareCodecNames.IsAv1(e.Codec)
+                    ? ScreenShareCodecNames.Av1
+                    : ScreenShareCodecNames.H264;
+                if (e.Width > 0 && e.Height > 0)
+                {
+                    _screenShareLastWidth = e.Width;
+                    _screenShareLastHeight = e.Height;
+                    _screenShareLastQuality = GetResolutionTier(e.Height);
+
+                }
                 _isRemoteVideoVisible = false;
-                _ = ResetScreenSharePeerAsync(e.FromUserId, "remote screen-share restarted");
-                ShowRemoteScreenShareLoading(
-                    $"{GetParticipantDisplayName(e.FromUserId)} is sharing their screen",
-                    "Connecting to the live stream...");
+                // Do not reset signaling here. The started notification and the
+                // WebRTC offer travel independently, and the offer can arrive
+                // first. Closing its newly-created peer here caused the initial
+                // connection to be destroyed and forced a delayed renegotiation.
+                // Realtime_WebRtcOfferReceived is the sole owner of replacing a
+                // peer for a new offer.
+                var displayName = GetParticipantDisplayName(e.FromUserId);
+                RemoteScreenWatchTitle.Text = $"{displayName} has started a stream";
+                RemoteScreenWatchSubtitle.Text = "Watch when you're ready. The stream won't load automatically.";
+                RemoteScreenWatchButton.IsEnabled = true;
+                RemoteScreenWatchButton.Content = "Watch now";
+                if (continueWatching)
+                {
+                    ShowRemoteScreenShareLoading(
+                        $"Reconnecting to {displayName}'s stream",
+                        "Waiting for the live stream...");
+                }
                 UpdateMediaLayerVisibility();
-                NativeCallCoordinator.Instance.SetStatus(session.State, "Remote screen share started.", session.PeerText);
+                NativeCallCoordinator.Instance.SetStatus(session.State, $"{displayName} has started a stream.", session.PeerText);
             });
+        }
+
+        private async void RemoteScreenWatchButton_Click(object sender, RoutedEventArgs e)
+        {
+            var session = NativeCallCoordinator.Instance.CurrentSession;
+            var senderId = _remoteScreenShareSenderId;
+            if (_isWatchingRemoteScreenShare || senderId <= 0 || string.IsNullOrWhiteSpace(session.CallId))
+                return;
+
+            _isWatchingRemoteScreenShare = true;
+            RemoteScreenWatchButton.IsEnabled = false;
+            RemoteScreenWatchButton.Content = "Connecting...";
+            ShowRemoteScreenShareLoading(
+                $"Connecting to {GetParticipantDisplayName(senderId)}'s stream",
+                "Waiting for the live stream...");
+            UpdateMediaLayerVisibility();
+            App.MainWindow?.CollapseSidebar();
+
+            try
+            {
+                await SocialManager.Instance.Realtime.SendScreenShareQosAsync(
+                    senderId,
+                    session.CallId,
+                    0,
+                    0,
+                    "restart screen-share offer: viewer selected Watch now");
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"[ScreenShare:RTP] Watch-now request failed for participant {senderId}: {ex.Message}");
+                _isWatchingRemoteScreenShare = false;
+                _isRemoteScreenShareLoading = false;
+                RemoteScreenWatchButton.IsEnabled = true;
+                RemoteScreenWatchButton.Content = "Try again";
+                UpdateMediaLayerVisibility();
+            }
         }
 
         private void Realtime_ScreenShareStopped(object? sender, (string CallId, long FromUserId) e)
         {
+            var session = NativeCallCoordinator.Instance.CurrentSession;
+            if (e.CallId != session.CallId)
+                return;
+
+            var stoppedAtUtc = DateTimeOffset.UtcNow;
+            var stopGeneration = Interlocked.Increment(ref _remoteScreenShareStopGeneration);
+            _ = ConfirmRemoteScreenShareStoppedAsync(
+                e.CallId,
+                e.FromUserId,
+                stoppedAtUtc,
+                stopGeneration);
+        }
+
+        private async Task ConfirmRemoteScreenShareStoppedAsync(
+            string callId,
+            long fromUserId,
+            DateTimeOffset stoppedAtUtc,
+            int stopGeneration)
+        {
+            // Started/stopped notifications and media use independent transports.
+            // A delayed stop from an older share must not tear down a peer that is
+            // still delivering live RTP. Give in-flight media a short confirmation
+            // window; a genuine stop has no newer frames and still closes promptly.
+            await Task.Delay(TimeSpan.FromMilliseconds(1250));
+
+            if (stopGeneration != Volatile.Read(ref _remoteScreenShareStopGeneration))
+                return;
+
+            var lastReceivedAtUtc = _remoteScreenLastReceivedAtUtc;
+            if (lastReceivedAtUtc.HasValue && lastReceivedAtUtc.Value > stoppedAtUtc)
+            {
+                Debug.WriteLine(
+                    $"[ScreenShare:RTP] Ignored stale screen-share stopped signal from {fromUserId}; live media continued for {(lastReceivedAtUtc.Value - stoppedAtUtc).TotalMilliseconds:0}ms after the signal.");
+                return;
+            }
+
+            DiagnosticLogService.StopScreenShareSession("remote screen-share stopped");
             TryEnqueueOnUi(() =>
             {
                 var session = NativeCallCoordinator.Instance.CurrentSession;
-                if (e.CallId != session.CallId)
+                if (callId != session.CallId ||
+                    stopGeneration != Volatile.Read(ref _remoteScreenShareStopGeneration))
                     return;
 
-                var displayName = GetParticipantDisplayName(e.FromUserId);
+                var displayName = GetParticipantDisplayName(fromUserId);
                 var stoppedText = $"{displayName} stopped screen sharing";
                 _isRemoteVideoVisible = false;
                 _isRemoteScreenShareLoading = false;
+                _isWatchingRemoteScreenShare = false;
                 _remoteScreenShareSenderId = 0;
                 ResetRemoteScreenShareReceiveState(clearImage: true);
-                _ = ResetScreenSharePeerAsync(e.FromUserId, "remote screen-share stopped");
+                _ = ResetScreenSharePeerAsync(fromUserId, "confirmed remote screen-share stopped");
                 RemotePlaceholderTitleText.Text = stoppedText;
-                RemotePlaceholderSubtitleText.Text = $"User {e.FromUserId} has stopped their screen share.";
+                RemotePlaceholderSubtitleText.Text = $"User {fromUserId} has stopped their screen share.";
                 MediaOverlayText.Text = stoppedText;
                 UpdateMediaLayerVisibility();
                 NativeCallCoordinator.Instance.SetStatus(session.State, stoppedText, session.PeerText);
@@ -1652,25 +2121,19 @@ namespace Zink.Pages.Social
                 if (e.Timestamp > 0)
                     _lastScreenShareMetadataTimestamp = e.Timestamp;
 
-                if (_lastRemoteBitstreamWidth > 0 &&
-                    _lastRemoteBitstreamHeight > 0 &&
-                    DateTimeOffset.UtcNow - _lastRemoteBitstreamResolutionAtUtc < TimeSpan.FromSeconds(3) &&
-                    (_lastRemoteBitstreamWidth != e.Width || _lastRemoteBitstreamHeight != e.Height))
-                {
-                    Debug.WriteLine($"[ScreenShare:H264] Ignored metadata {e.Width}x{e.Height}; recent H.264 SPS says {_lastRemoteBitstreamWidth}x{_lastRemoteBitstreamHeight}. ts={e.Timestamp}.");
-                    return;
-                }
-
                 var hadPreviousResolution = _screenShareLastWidth > 0 && _screenShareLastHeight > 0;
                 var resolutionChanged = hadPreviousResolution &&
                     (_screenShareLastWidth != e.Width || _screenShareLastHeight != e.Height);
                 _remoteScreenShareSenderId = e.FromUserId;
+                _remoteScreenShareCodec = ScreenShareCodecNames.IsAv1(e.Codec)
+                    ? ScreenShareCodecNames.Av1
+                    : ScreenShareCodecNames.H264;
                 _screenShareLastWidth = e.Width;
                 _screenShareLastHeight = e.Height;
                 _screenShareLastQuality = GetResolutionTier(e.Height);
                 _screenShareLastFrameAtUtc = DateTimeOffset.UtcNow;
 
-                if (!_remoteScreenLastRenderedAtUtc.HasValue)
+                if (_isWatchingRemoteScreenShare && !_remoteScreenLastRenderedAtUtc.HasValue)
                 {
                     ShowRemoteScreenShareLoading(
                         $"{GetParticipantDisplayName(e.FromUserId)} is sharing their screen",
@@ -1692,19 +2155,31 @@ namespace Zink.Pages.Social
             if (e.CallId != session.CallId || !_isSharingScreen)
                 return;
 
-            NativeScreenShareStreamingService.Instance.ReportSendCongestion(
+            ScreenShareCapturePipeline.Instance.ReportSendCongestion(
                 e.Reason,
                 e.DroppedReceiveFrames,
                 e.RenderBacklog);
 
             Debug.WriteLine($"[ScreenShare:RTP] Receiver QoS from {e.FromUserId}: {e.Reason}; dropped={e.DroppedReceiveFrames}; renderBacklog={e.RenderBacklog}");
 
-            if (IsReceiverRtpRestartRequest(e.Reason))
+            if (e.Reason.Contains("viewer selected Watch now", StringComparison.OrdinalIgnoreCase))
+            {
+                lock (_screenShareViewersSync)
+                    _screenShareViewerIds.Add(e.FromUserId);
+
+                _ = StartScreenShareRtpOfferAsync(e.FromUserId, session.CallId);
+            }
+            else if (IsReceiverRtpRestartRequest(e.Reason))
+            {
                 _ = RestartScreenShareRtpOfferForParticipantAsync(e.FromUserId, session.CallId, e.Reason);
+            }
         }
 
         private void Realtime_ScreenFrameReceived(object? sender, ScreenFrameEventArgs e)
         {
+            if (!_isWatchingRemoteScreenShare)
+                return;
+
             TryEnqueueOnUi(async () =>
             {
                 var session = NativeCallCoordinator.Instance.CurrentSession;
@@ -1753,6 +2228,9 @@ namespace Zink.Pages.Social
 
         private void Realtime_EncodedScreenFrameReceived(object? sender, ScreenFrameEventArgs e)
         {
+            if (!_isWatchingRemoteScreenShare)
+                return;
+
             var session = NativeCallCoordinator.Instance.CurrentSession;
             if (e.CallId != session.CallId || e.FrameData.Length == 0)
                 return;
@@ -1794,7 +2272,7 @@ namespace Zink.Pages.Social
 
                 var receivedFallbackFrames = Interlocked.Increment(ref _remoteFallbackFrameCount);
                 LogRemoteEncodedReceiveFlow("websocket", e.FromUserId, e.FrameData, e.Width, e.Height, e.IsKeyFrame, hasIdr, receivedFallbackFrames);
-                if (receivedFallbackFrames == 1 || receivedFallbackFrames % (NativeScreenShareStreamingService.TargetFps * 2) == 0)
+                if (receivedFallbackFrames == 1 || receivedFallbackFrames % (ScreenShareCapturePipeline.TargetFps * 2) == 0)
                 {
                     Debug.WriteLine(
                         $"[ScreenShare:FALLBACK] Received {receivedFallbackFrames} WebSocket {(isAv1 ? "AV1X" : "H.264")} frames from {e.FromUserId}; bytes={e.FrameData.Length}; {e.Width}x{e.Height}; keyFlag={e.IsKeyFrame}; idr={hasIdr}.");
@@ -1850,14 +2328,23 @@ namespace Zink.Pages.Social
         private async void Realtime_WebRtcOfferReceived(object? sender, WebRtcOfferEventArgs e)
         {
             var session = NativeCallCoordinator.Instance.CurrentSession;
-            if (!IsCurrentCallSignal(session, e.CallId))
+            if (!IsCurrentCallSignal(session, e.CallId) || !_isWatchingRemoteScreenShare)
                 return;
 
             try
             {
                 Debug.WriteLine($"[ScreenShare:RTP] Offer received from participant {e.FromUserId}: type={e.SdpType}, sdpLength={e.Sdp?.Length ?? 0}.");
                 AddCallParticipant(e.FromUserId);
-                await ResetScreenSharePeerAsync(e.FromUserId, "new remote offer");
+                // ICE can legitimately arrive before the offer. In that case the
+                // candidate handler has already created a pristine peer and queued
+                // the candidate on it; replacing that peer here loses the fastest
+                // path and adds seconds to first-frame startup. Only replace a peer
+                // that has already negotiated an older offer.
+                if (_screenSharePeers.TryGetValue(e.FromUserId, out var existingPeer) &&
+                    existingPeer.HasRemoteDescription)
+                {
+                    await ResetScreenSharePeerAsync(e.FromUserId, "new remote offer");
+                }
                 var peer = GetOrCreateScreenSharePeer(e.FromUserId);
                 await peer.SetRemoteOfferAsync(new SessionDescriptionModel
                 {
@@ -1946,7 +2433,7 @@ namespace Zink.Pages.Social
         {
             try
             {
-                await peer.SendEncodedVideoFrameAsync(frameData, NativeScreenShareStreamingService.Instance.ActiveVideoCodec);
+                await peer.SendEncodedVideoFrameAsync(frameData, ScreenShareCapturePipeline.Instance.ActiveVideoCodec);
             }
             catch (Exception ex)
             {
@@ -1986,7 +2473,8 @@ namespace Zink.Pages.Social
             if (_screenSharePeers.TryGetValue(participantId, out var existingPeer))
                 return existingPeer;
 
-            var peer = new NativePeerConnectionService($"participant {participantId}");
+            var peer = ScreenShareServiceSelector.Active.CreatePeer($"participant {participantId}");
+            peer.SetExpectedRemoteVideoCodec(_remoteScreenShareCodec);
             peer.LocalIceCandidateReady += async (_, ice) =>
             {
                 var session = NativeCallCoordinator.Instance.CurrentSession;
@@ -2004,24 +2492,60 @@ namespace Zink.Pages.Social
             peer.EncodedVideoFrameReceived += ScreenSharePeer_EncodedVideoFrameReceived;
             peer.ConnectionStateChanged += (_, state) =>
             {
-                _ = HandleScreenSharePeerConnectionStateChangedAsync(participantId, state);
+                _ = HandleScreenSharePeerConnectionStateChangedAsync(participantId, peer, state);
             };
 
             _screenSharePeers[participantId] = peer;
             return peer;
         }
 
-        private async Task HandleScreenSharePeerConnectionStateChangedAsync(long participantId, string state)
+        private async Task HandleScreenSharePeerConnectionStateChangedAsync(
+            long participantId,
+            NativePeerConnectionService peer,
+            string state)
         {
+            if (state.Equals("connected", StringComparison.OrdinalIgnoreCase))
+            {
+                // The initial encoder IDR may have been generated while this peer
+                // was still negotiating, so it could only be sent over the preview
+                // fallback.  Force a new, unthrottled IDR at the exact point RTP is
+                // usable instead of starting the receiver on dependent P-frames.
+                if (_isSharingScreen && ScreenShareCapturePipeline.Instance.IsRunning)
+                {
+                    ScreenShareCapturePipeline.Instance.RequestRecoveryKeyFrame(
+                        $"RTP transport connected for participant {participantId}; send first live IDR");
+                    Debug.WriteLine(
+                        $"[ScreenShare:RTP] Participant {participantId} connected; requested an immediate live IDR.");
+                }
+
+                return;
+            }
+
             if (!state.Equals("failed", StringComparison.OrdinalIgnoreCase) &&
                 !state.Equals("disconnected", StringComparison.OrdinalIgnoreCase))
             {
                 return;
             }
 
+            if (state.Equals("disconnected", StringComparison.OrdinalIgnoreCase))
+            {
+                // WebRTC can report a short-lived disconnected state while ICE
+                // checks a different route. Give that connection time to recover;
+                // immediately replacing it abandons the working peer and leaves
+                // the replacement offer stuck in the new state.
+                await Task.Delay(TimeSpan.FromSeconds(2));
+
+                if (!_screenSharePeers.TryGetValue(participantId, out var currentPeer) ||
+                    !ReferenceEquals(currentPeer, peer) ||
+                    !peer.ConnectionState.Equals("disconnected", StringComparison.OrdinalIgnoreCase))
+                {
+                    return;
+                }
+            }
+
             var session = NativeCallCoordinator.Instance.CurrentSession;
             if (!_isSharingScreen ||
-                !NativeScreenShareStreamingService.Instance.IsRunning ||
+                !ScreenShareCapturePipeline.Instance.IsRunning ||
                 session.State != NativeCallState.Connected ||
                 string.IsNullOrWhiteSpace(session.CallId))
             {
@@ -2056,7 +2580,7 @@ namespace Zink.Pages.Social
         {
             var session = NativeCallCoordinator.Instance.CurrentSession;
             if (!_isSharingScreen ||
-                !NativeScreenShareStreamingService.Instance.IsRunning ||
+                !ScreenShareCapturePipeline.Instance.IsRunning ||
                 session.State != NativeCallState.Connected ||
                 string.IsNullOrWhiteSpace(callId))
             {
@@ -2097,8 +2621,11 @@ namespace Zink.Pages.Social
 
         private void ScreenSharePeer_EncodedVideoFrameReceived(object? sender, NativeRtpVideoFrameEventArgs e)
         {
-            var width = _lastRemoteBitstreamWidth;
-            var height = _lastRemoteBitstreamHeight;
+            if (!_isWatchingRemoteScreenShare)
+                return;
+
+            var width = _lastRemoteBitstreamWidth > 0 ? _lastRemoteBitstreamWidth : _screenShareLastWidth;
+            var height = _lastRemoteBitstreamHeight > 0 ? _lastRemoteBitstreamHeight : _screenShareLastHeight;
             var isAv1 = ScreenShareCodecNames.IsAv1(e.Codec);
             var isKeyFrame = isAv1 || ContainsH264IdrFrame(e.FrameData);
             if (!isAv1 && TryReadH264Dimensions(e.FrameData, out var bitstreamWidth, out var bitstreamHeight))
@@ -2142,9 +2669,11 @@ namespace Zink.Pages.Social
             var receivedRtpFrames = Interlocked.Increment(ref _remoteRtpFrameCount);
             if (receivedRtpFrames == 1)
                 _remoteFallbackFirstReceivedAtUtc = DateTimeOffset.MinValue;
+            if (!isAv1)
+                Interlocked.Exchange(ref _remoteH264RecoveryInFlight, 0);
 
             LogRemoteEncodedReceiveFlow("rtp", _remoteScreenShareSenderId, e.FrameData, width, height, isKeyFrame, isKeyFrame, receivedRtpFrames);
-            if (receivedRtpFrames == 1 || receivedRtpFrames % (NativeScreenShareStreamingService.TargetFps * 2) == 0)
+            if (receivedRtpFrames == 1 || receivedRtpFrames % (ScreenShareCapturePipeline.TargetFps * 2) == 0)
             {
                 Debug.WriteLine(
                     $"[ScreenShare:RTP] Received {receivedRtpFrames} remote RTP {(isAv1 ? "AV1X" : "H.264")} frames: bytes={e.FrameData.Length}, assumed={width}x{height}, key={isKeyFrame}.");
@@ -2152,7 +2681,7 @@ namespace Zink.Pages.Social
 
             if (DateTimeOffset.UtcNow - _remoteFallbackLastReceivedAtUtc < RemoteFallbackRtpSuppressWindow)
             {
-                if (receivedRtpFrames == 1 || receivedRtpFrames % (NativeScreenShareStreamingService.TargetFps * 2) == 0)
+                if (receivedRtpFrames == 1 || receivedRtpFrames % (ScreenShareCapturePipeline.TargetFps * 2) == 0)
                     Debug.WriteLine("[ScreenShare:RTP] RTP frame arrived while WebSocket backup was active; preferring RTP for lower latency.");
 
                 _remoteFallbackLastReceivedAtUtc = DateTimeOffset.MinValue;
@@ -2196,7 +2725,7 @@ namespace Zink.Pages.Social
                 _remoteH264FramesDroppedWaitingForKeyFrame = 0;
             }
 
-            if (!isAv1 && QueueRemoteGpuPlaybackFrame(frameData, width, height, isKeyFrame, backlogReason))
+            if (!isAv1 && UseRemoteGpuPlayback && QueueRemoteGpuPlaybackFrame(frameData, width, height, isKeyFrame, backlogReason))
                 return;
 
             long sequence;
@@ -2210,7 +2739,7 @@ namespace Zink.Pages.Social
                         _screenShareDroppedReceiveFrames++;
                         _remoteH264FramesDroppedWaitingForKeyFrame++;
                         if (_remoteH264FramesDroppedWaitingForKeyFrame == 1 ||
-                            _remoteH264FramesDroppedWaitingForKeyFrame % NativeScreenShareStreamingService.TargetFps == 0)
+                            _remoteH264FramesDroppedWaitingForKeyFrame % ScreenShareCapturePipeline.TargetFps == 0)
                         {
                             Debug.WriteLine(
                                 $"[ScreenShare:H264] Waiting for keyframe; dropped {_remoteH264FramesDroppedWaitingForKeyFrame} delta frames after decoder reset.");
@@ -2235,7 +2764,7 @@ namespace Zink.Pages.Social
                         _screenShareDroppedReceiveFrames++;
                         _remoteH264FramesDroppedWaitingForKeyFrame++;
                         if (_remoteH264FramesDroppedWaitingForKeyFrame == 1 ||
-                            _remoteH264FramesDroppedWaitingForKeyFrame % NativeScreenShareStreamingService.TargetFps == 0)
+                            _remoteH264FramesDroppedWaitingForKeyFrame % ScreenShareCapturePipeline.TargetFps == 0)
                         {
                             Debug.WriteLine(
                                 $"[ScreenShare:H264] Waiting for keyframe after realtime backlog prune; dropped {_remoteH264FramesDroppedWaitingForKeyFrame} delta frames.");
@@ -2251,35 +2780,54 @@ namespace Zink.Pages.Social
                     Debug.WriteLine($"[ScreenShare:H264] Keyframe received after realtime backlog prune; restarting remote decoder at {width}x{height}.");
                 }
 
-                if (_pendingRemoteH264Frames.Count >= MaxRemoteH264DecodeQueue * 2)
+                if (_pendingRemoteH264Frames.Count >= MaxRemoteH264HardDecodeQueue)
                 {
                     var beforeDrop = _pendingRemoteH264Frames.Count;
+                    var queuedFrames = _pendingRemoteH264Frames.ToList();
+                    var latestQueuedKeyIndex = queuedFrames.FindLastIndex(frame => frame.IsKeyFrame);
                     _pendingRemoteH264Frames.Clear();
-                    var dropped = beforeDrop;
+                    if (latestQueuedKeyIndex >= 0)
+                    {
+                        for (var i = latestQueuedKeyIndex; i < queuedFrames.Count; i++)
+                            _pendingRemoteH264Frames.Enqueue(queuedFrames[i]);
+                    }
+                    var dropped = beforeDrop - _pendingRemoteH264Frames.Count;
                     _screenShareDroppedReceiveFrames += dropped;
                     _remoteBacklogTrimmedSinceLastLog += dropped;
-                    _remoteDecodeGeneration++;
                     _ = SendScreenShareQosIfNeededAsync(backlogReason);
 
-                    if (!isKeyFrame)
+                    if (!isKeyFrame && latestQueuedKeyIndex < 0)
                     {
-                        _screenShareDroppedReceiveFrames++;
+                        // None of the retained frames is independently decodable.
+                        // Continuing from this incomplete dependency chain causes
+                        // macroblock corruption until a later IDR.  Pause playback
+                        // and discard deltas until the requested keyframe arrives.
+                        _pendingRemoteH264Frames.Clear();
                         _remoteH264WaitingForKeyFrame = true;
-                        _remoteH264FramesDroppedWaitingForKeyFrame = 1;
+                        _remoteH264FramesDroppedWaitingForKeyFrame = 0;
+                        _remoteDecodeGeneration++;
                         RequestRemoteVideoKeyFrame("receiver decode queue overflow");
-                        Debug.WriteLine($"[ScreenShare:H264] Decode queue pressure; dropped {dropped} queued frames and the current delta frame, then requested a fresh IDR to avoid H.264 colour corruption.");
+                        Debug.WriteLine($"[ScreenShare:H264] Decode queue pressure; discarded an incomplete dependent chain after dropping {dropped} stale frames and will resume on a fresh IDR.");
                         return;
                     }
 
-                    _remoteH264WaitingForKeyFrame = false;
-                    _remoteH264FramesDroppedWaitingForKeyFrame = 0;
-                    Debug.WriteLine($"[ScreenShare:H264] Decode queue pressure; dropped {dropped} queued frames and resumed from the current IDR keyframe.");
+                    if (isKeyFrame || latestQueuedKeyIndex >= 0)
+                    {
+                        _remoteH264WaitingForKeyFrame = false;
+                        _remoteH264FramesDroppedWaitingForKeyFrame = 0;
+                        Debug.WriteLine($"[ScreenShare:H264] Decode queue pressure; dropped {dropped} stale frames and retained the newest keyframe chain.");
+                    }
                 }
 
                 _pendingRtpFrameSequence++;
                 sequence = _pendingRtpFrameSequence;
+                var queuedAtUtc = DateTimeOffset.UtcNow;
+                if (_lastRemoteQueuedSequence > 0 && sequence > _lastRemoteQueuedSequence + 1)
+                    _remoteSequenceGapCount += sequence - _lastRemoteQueuedSequence - 1;
+                _lastRemoteQueuedSequence = sequence;
+                _lastRemoteQueuedAtUtc = queuedAtUtc;
                 var generation = _remoteDecodeGeneration;
-                _pendingRemoteH264Frames.Enqueue(new PendingRemoteH264Frame(
+                var pendingFrame = new PendingRemoteH264Frame(
                     frameData,
                     width,
                     height,
@@ -2287,7 +2835,11 @@ namespace Zink.Pages.Social
                     sequence,
                     generation,
                     RemoteGpuFrameDuration,
-                    codec));
+                    codec)
+                {
+                    QueuedAtUtc = queuedAtUtc
+                };
+                _pendingRemoteH264Frames.Enqueue(pendingFrame);
                 queueCount = _pendingRemoteH264Frames.Count;
             }
 
@@ -2306,25 +2858,49 @@ namespace Zink.Pages.Social
         private void PruneRemoteH264Backlog(string reason)
         {
             if (_pendingRemoteH264Frames.Count < MaxRemoteH264DecodeQueue)
+            {
+                _remoteDecodeBacklogStartedAtUtc = DateTimeOffset.MinValue;
                 return;
+            }
+
+            var now = DateTimeOffset.UtcNow;
+            if (_remoteDecodeBacklogStartedAtUtc == DateTimeOffset.MinValue)
+            {
+                _remoteDecodeBacklogStartedAtUtc = now;
+                return;
+            }
+
+            // A single 80-160 ms decoder spike is common on the ARM64 receiver.
+            // Give that burst time to drain instead of immediately throwing away
+            // a valid H.264 dependency chain and freezing while awaiting an IDR.
+            if (now - _remoteDecodeBacklogStartedAtUtc < TimeSpan.FromMilliseconds(100))
+                return;
+
+            _remoteDecodeBacklogStartedAtUtc = DateTimeOffset.MinValue;
 
             var frames = _pendingRemoteH264Frames.ToList();
             var latestKeyIndex = frames.FindLastIndex(frame => frame.IsKeyFrame);
             if (latestKeyIndex < 0)
             {
-                DropRemoteBacklogAndRequestKeyFrame(reason, "receiver realtime queue contains only dependent delta frames");
+                RequestRemoteVideoKeyFrame("receiver realtime queue contains only dependent delta frames");
+                if (ShouldLogFlow(ref _lastRemoteBacklogTrimLogUtc, TimeSpan.FromSeconds(1)))
+                {
+                    Debug.WriteLine($"[ScreenShare:H264] Preserving the dependent delta chain while requesting a fresh IDR; queue={_pendingRemoteH264Frames.Count}; reason={reason}.");
+                }
+
                 return;
             }
 
             if (latestKeyIndex == 0)
             {
                 if (_pendingRemoteH264Frames.Count >= MaxRemoteH264DecodeQueue)
-                    DropRemoteBacklogAndRequestKeyFrame(reason, "receiver realtime queue exceeded low-latency budget after current IDR");
+                    DropRemoteBacklogAndRequestKeyFrame(reason, "receiver realtime queue exceeded low-latency budget after current IDR", waitForKeyFrame: false);
 
                 return;
             }
 
             _pendingRemoteH264Frames.Clear();
+            _remoteDecodeBacklogStartedAtUtc = DateTimeOffset.MinValue;
             for (var i = latestKeyIndex; i < frames.Count; i++)
                 _pendingRemoteH264Frames.Enqueue(frames[i]);
 
@@ -2338,23 +2914,24 @@ namespace Zink.Pages.Social
             }
         }
 
-        private void DropRemoteBacklogAndRequestKeyFrame(string reason, string keyFrameReason)
+        private void DropRemoteBacklogAndRequestKeyFrame(string reason, string keyFrameReason, bool waitForKeyFrame = true)
         {
             var dropped = _pendingRemoteH264Frames.Count;
             if (dropped <= 0)
                 return;
 
             _pendingRemoteH264Frames.Clear();
+            _remoteDecodeBacklogStartedAtUtc = DateTimeOffset.MinValue;
             _screenShareDroppedReceiveFrames += dropped;
             _remoteBacklogTrimmedSinceLastLog += dropped;
-            _remoteH264WaitingForKeyFrame = true;
+            _remoteH264WaitingForKeyFrame = waitForKeyFrame;
             _remoteH264FramesDroppedWaitingForKeyFrame = 0;
             _remoteDecodeGeneration++;
             _ = SendScreenShareQosIfNeededAsync(reason);
             RequestRemoteVideoKeyFrame(keyFrameReason);
             if (ShouldLogFlow(ref _lastRemoteBacklogTrimLogUtc, TimeSpan.FromSeconds(1)))
             {
-                Debug.WriteLine($"[ScreenShare:H264] 60fps receiver recovery dropped {_remoteBacklogTrimmedSinceLastLog} queued frames and requested a fresh IDR; queue={_pendingRemoteH264Frames.Count}; reason={reason}; keyRequest={keyFrameReason}.");
+                Debug.WriteLine($"[ScreenShare:H264] Receiver recovery dropped {_remoteBacklogTrimmedSinceLastLog} queued frames and requested a fresh IDR; queue={_pendingRemoteH264Frames.Count}; reason={reason}; keyRequest={keyFrameReason}.");
                 _remoteBacklogTrimmedSinceLastLog = 0;
             }
         }
@@ -2395,6 +2972,7 @@ namespace Zink.Pages.Social
                     _remoteGpuFirstSampleSubmitted = false;
                     _remoteGpuEstimatedFrameDuration = RemoteGpuFrameDuration;
                     _remoteGpuLastQueuedAtUtc = null;
+                    _remoteGpuBacklogStartedAtUtc = DateTimeOffset.MinValue;
                     shouldStartPlayback = true;
                     if (dropped > 0)
                         Debug.WriteLine($"[ScreenShare:GPU:RECEIVER] Restarting hardware playback from IDR at {width}x{height}; dropped {dropped} stale compressed frames.");
@@ -2418,6 +2996,7 @@ namespace Zink.Pages.Social
                     _remoteGpuBacklogKeyFrameRequested = false;
                     _remoteGpuEstimatedFrameDuration = RemoteGpuFrameDuration;
                     _remoteGpuLastQueuedAtUtc = null;
+                    _remoteGpuBacklogStartedAtUtc = DateTimeOffset.MinValue;
                     Debug.WriteLine($"[ScreenShare:GPU:RECEIVER] Fresh IDR received; restarted compressed GPU playback queue at {width}x{height}.");
                 }
 
@@ -2430,12 +3009,26 @@ namespace Zink.Pages.Social
                     _remoteGpuBacklogKeyFrameRequested = false;
                     _remoteGpuEstimatedFrameDuration = RemoteGpuFrameDuration;
                     _remoteGpuLastQueuedAtUtc = null;
+                    _remoteGpuBacklogStartedAtUtc = DateTimeOffset.MinValue;
                     Debug.WriteLine($"[ScreenShare:GPU:RECEIVER] Fresh IDR caught up realtime playback; dropped {dropped} old dependent compressed frames before decode.");
                 }
 
+                var queuedBeforeCurrentFrame = _pendingRemoteGpuPlaybackFrames.Count;
+                if (queuedBeforeCurrentFrame < RemoteGpuBacklogKeyFrameRequestQueue)
+                {
+                    _remoteGpuBacklogStartedAtUtc = DateTimeOffset.MinValue;
+                }
+                else if (_remoteGpuBacklogStartedAtUtc == DateTimeOffset.MinValue)
+                {
+                    _remoteGpuBacklogStartedAtUtc = DateTimeOffset.UtcNow;
+                }
+
+                var backlogHasPersisted = _remoteGpuBacklogStartedAtUtc != DateTimeOffset.MinValue &&
+                    DateTimeOffset.UtcNow - _remoteGpuBacklogStartedAtUtc >= RemoteGpuSustainedBacklogThreshold;
                 if (!isKeyFrame &&
                     !_remoteGpuBacklogKeyFrameRequested &&
-                    _pendingRemoteGpuPlaybackFrames.Count >= RemoteGpuBacklogKeyFrameRequestQueue)
+                    queuedBeforeCurrentFrame >= RemoteGpuBacklogKeyFrameRequestQueue &&
+                    backlogHasPersisted)
                 {
                     _remoteGpuBacklogKeyFrameRequested = true;
                     var keyFrameReason = "receiver GPU playback keyframe requested after realtime queue pressure";
@@ -2499,13 +3092,6 @@ namespace Zink.Pages.Social
             _remoteScreenLastRenderedAtUtc = DateTimeOffset.UtcNow;
             _isRemoteVideoVisible = true;
             _isRemoteScreenShareLoading = false;
-            TryEnqueueOnUi(() =>
-            {
-                RemoteScreenImage.Visibility = Visibility.Collapsed;
-                RemoteScreenPlayer.Visibility = Visibility.Visible;
-                UpdateMediaLayerVisibility();
-                MediaOverlayText.Text = $"GPU H.264 stream {width} x {height}";
-            });
 
             return true;
         }
@@ -2540,7 +3126,7 @@ namespace Zink.Pages.Social
             var videoProperties = VideoEncodingProperties.CreateH264();
             videoProperties.Width = (uint)width;
             videoProperties.Height = (uint)height;
-            videoProperties.FrameRate.Numerator = NativeScreenShareStreamingService.TargetFps;
+            videoProperties.FrameRate.Numerator = (uint)RemoteGpuCompatibilityFps;
             videoProperties.FrameRate.Denominator = 1;
             videoProperties.PixelAspectRatio.Numerator = 1;
             videoProperties.PixelAspectRatio.Denominator = 1;
@@ -2566,6 +3152,8 @@ namespace Zink.Pages.Social
             RemoteScreenPlayer.SetMediaPlayer(player);
             RemoteScreenPlayer.Visibility = Visibility.Visible;
             RemoteScreenImage.Visibility = Visibility.Collapsed;
+            MediaOverlayText.Text = $"GPU H.264 stream {width} x {height}";
+            UpdateMediaLayerVisibility();
             player.Play();
 
             lock (_remoteGpuPlaybackSync)
@@ -2586,7 +3174,7 @@ namespace Zink.Pages.Social
 
             _remoteGpuMediaStreamSource = source;
             _remoteGpuMediaPlayer = player;
-            Debug.WriteLine($"[ScreenShare:GPU:RECEIVER] Started hardware MediaStreamSource playback surface {width}x{height} @ {NativeScreenShareStreamingService.TargetFps}fps. Decoded frames stay out of managed BGRA/WriteableBitmap path.");
+            Debug.WriteLine($"[ScreenShare:GPU:RECEIVER] Started hardware MediaStreamSource playback surface {width}x{height} @ {RemoteGpuCompatibilityFps}fps. Decoded frames stay out of managed BGRA/WriteableBitmap path.");
         }
 
         private void RemoteGpuMediaStreamSource_Starting(MediaStreamSource sender, MediaStreamSourceStartingEventArgs args)
@@ -2625,7 +3213,8 @@ namespace Zink.Pages.Social
                             : TimeSpan.MaxValue;
                         if (!requestedRecoveryForCurrentUnderrun &&
                             _remoteGpuFirstSampleSubmitted &&
-                            lastReceiveAge >= TimeSpan.FromMilliseconds(900))
+                            lastReceiveAge >= TimeSpan.FromMilliseconds(1500) &&
+                            _remoteGpuConsecutiveSampleStarvations >= 2)
                         {
                             requestedRecoveryForCurrentUnderrun = true;
                             _screenShareDroppedReceiveFrames++;
@@ -2695,7 +3284,7 @@ namespace Zink.Pages.Social
                 var renderedFrames = Interlocked.Increment(ref _remoteRenderedFrameCount);
                 var queueDepth = GetPendingRemoteGpuPlaybackFrameCount();
                 UpdateRemotePlaybackFps(queueDepth);
-                if (renderedFrames == 1 || renderedFrames % (NativeScreenShareStreamingService.TargetFps * 2) == 0)
+                if (renderedFrames == 1 || renderedFrames % (ScreenShareCapturePipeline.TargetFps * 2) == 0)
                 {
                     Debug.WriteLine($"[ScreenShare:GPU:RECEIVER] Submitted {renderedFrames} compressed H.264 samples to hardware playback; frame={frame.Width}x{frame.Height}; key={frame.IsKeyFrame}; playbackFps={_remotePlaybackObservedFps:0.0}; receiveFps={_remoteReceiveObservedFps:0.0}; queued={queueDepth}; avgQueue={_remoteGpuPlaybackAverageQueue:0.0}; peakQueue={_remoteGpuPlaybackQueuePeak}.");
                 }
@@ -2829,10 +3418,22 @@ namespace Zink.Pages.Social
                                 _rtpDecoderCodec = pendingFrame.Codec;
                             }
 
+                            var materializeOutput = GetPendingRemoteH264FrameCount() < RemoteDecodeRenderBacklogThreshold;
                             bgraFrame = _rtpH264Decoder.DecodeToBgra(
                                 pendingFrame.FrameData,
                                 pendingFrame.Width,
-                                pendingFrame.Height);
+                                pendingFrame.Height,
+                                materializeOutput);
+
+                            if (!materializeOutput)
+                            {
+                                // This is an intentional presentation drop, not an
+                                // empty decoder output. The sample was decoded and
+                                // advanced the reference chain normally.
+                                _screenShareDroppedReceiveFrames++;
+                                _remoteEmptyDecodeCount = 0;
+                                continue;
+                            }
                         }
                         decodeTimer.Stop();
                         var queueRemaining = GetPendingRemoteH264FrameCount();
@@ -2849,7 +3450,7 @@ namespace Zink.Pages.Social
                             _remoteEmptyDecodeCount++;
                             LogRemoteDecodeFlow(pendingFrame, null, queueRemaining, decodeTimer.Elapsed.TotalMilliseconds);
                             if (!ScreenShareCodecNames.IsAv1(pendingFrame.Codec) &&
-                                _remoteEmptyDecodeCount == NativeScreenShareStreamingService.TargetFps)
+                                _remoteEmptyDecodeCount == ScreenShareCapturePipeline.TargetFps)
                             {
                                 var switchedInputMode = false;
                                 lock (_remoteDecoderSync)
@@ -2873,7 +3474,7 @@ namespace Zink.Pages.Social
                                 }
                             }
 
-                            if (_remoteEmptyDecodeCount >= NativeScreenShareStreamingService.TargetFps * 5 ||
+                            if (_remoteEmptyDecodeCount >= ScreenShareCapturePipeline.TargetFps * 5 ||
                                 IsRemoteRenderStalled(DateTimeOffset.UtcNow))
                             {
                                 ResetRemoteH264Decoder("receiver decoder produced no frame");
@@ -2920,8 +3521,9 @@ namespace Zink.Pages.Social
 
             if (replacedPendingFrame)
             {
+                _remoteRenderCoalesceCount++;
                 if (ShouldLogFlow(ref _lastRemoteRenderCoalescedLogUtc, TimeSpan.FromSeconds(2)))
-                    Debug.WriteLine("[ScreenShare:H264] Coalesced decoded frames because the UI renderer was still presenting the previous frame.");
+                    Debug.WriteLine($"[ScreenShare:H264:STUTTER] Render coalesced decoded frame; count={_remoteRenderCoalesceCount}; receiveFps={_remoteReceiveObservedFps:0.0}; playbackFps={_remotePlaybackObservedFps:0.0}; pendingQueue={GetPendingRemoteH264FrameCount()}; lastQueuedAge={FormatAge(_lastRemoteQueuedAtUtc, DateTimeOffset.UtcNow)}.");
             }
 
             if (Interlocked.CompareExchange(ref _remoteRenderQueued, 1, 0) == 0)
@@ -2930,7 +3532,7 @@ namespace Zink.Pages.Social
 
         private void EnqueueLatestRemoteRender()
         {
-            if (!TryEnqueueOnUi(RenderLatestRemoteFrame))
+            if (!TryEnqueueOnUi(RenderLatestRemoteFrame, Microsoft.UI.Dispatching.DispatcherQueuePriority.High))
                 Interlocked.Exchange(ref _remoteRenderQueued, 0);
         }
 
@@ -2966,11 +3568,12 @@ namespace Zink.Pages.Social
                     RenderBgraFrame(bgraFrame, width, height, RemoteScreenImage);
                     renderTimer.Stop();
                     var renderedFrames = Interlocked.Increment(ref _remoteRenderedFrameCount);
+                    UpdateRemotePlaybackFps(0);
                     var queuedMs = queuedAtUtc == default || !_screenShareLastFrameAtUtc.HasValue
                         ? 0
                         : Math.Max(0, (_screenShareLastFrameAtUtc.Value - queuedAtUtc).TotalMilliseconds);
                     LogRemoteRenderFlow(bgraFrame, width, height, renderedFrames, renderTimer.Elapsed.TotalMilliseconds, queuedMs);
-                    if (renderedFrames == 1 || renderedFrames % (NativeScreenShareStreamingService.TargetFps * 2) == 0)
+                    if (renderedFrames == 1 || renderedFrames % (ScreenShareCapturePipeline.TargetFps * 2) == 0)
                     {
                         Debug.WriteLine(
                             $"[ScreenShare:H264] Rendered {renderedFrames} remote frames: {width}x{height}; bgraBytes={bgraFrame.Length}.");
@@ -3023,21 +3626,30 @@ namespace Zink.Pages.Social
             }
 
             var now = DateTimeOffset.UtcNow;
-            if (now - _lastQosSentUtc < QosFeedbackInterval)
+            // A transport restart is a recovery command, not routine receiver
+            // pressure telemetry. A pacing-underrun message can be sent just before
+            // RTP goes silent; throttling the following restart command leaves a
+            // peer that still reports "connected" permanently stuck with no media.
+            bool isRtpRestartRequest = IsReceiverRtpRestartRequest(reason);
+            if (!isRtpRestartRequest && now - _lastQosSentUtc < QosFeedbackInterval)
             {
                 return;
             }
 
             _lastQosSentUtc = now;
+            var isLegacyH264 = !ScreenShareCodecNames.IsAv1(_remoteScreenShareCodec);
+            var droppedForQos = isLegacyH264
+                ? Math.Max(0, _screenShareDroppedReceiveFrames - _lastQosDroppedReceiveFrames)
+                : _screenShareDroppedReceiveFrames;
             _lastQosDroppedReceiveFrames = _screenShareDroppedReceiveFrames;
 
             try
             {
-                Debug.WriteLine($"[ScreenShare:QOS] Sending receiver pressure to {_remoteScreenShareSenderId}: dropped={_screenShareDroppedReceiveFrames}; renderQueued={Volatile.Read(ref _remoteRenderQueued)}; reason={reason}.");
+                Debug.WriteLine($"[ScreenShare:QOS] Sending receiver pressure to {_remoteScreenShareSenderId}: dropped={droppedForQos}; renderQueued={Volatile.Read(ref _remoteRenderQueued)}; reason={reason}.");
                 await SocialManager.Instance.Realtime.SendScreenShareQosAsync(
                     _remoteScreenShareSenderId,
                     session.CallId,
-                    _screenShareDroppedReceiveFrames,
+                    droppedForQos,
                     Volatile.Read(ref _remoteRenderQueued),
                     reason);
             }
@@ -3142,7 +3754,7 @@ namespace Zink.Pages.Social
                 previewFingerprint);
 
             if (!ShouldLogFlow(ref _lastLocalFrameFlowLogUtc, TimeSpan.FromSeconds(2)) &&
-                encodedRepeat != NativeScreenShareStreamingService.TargetFps * 3 &&
+                encodedRepeat != ScreenShareCapturePipeline.TargetFps * 3 &&
                 previewRepeat != PreviewFallbackMaxFps * 3)
             {
                 return;
@@ -3171,8 +3783,8 @@ namespace Zink.Pages.Social
                 fingerprint);
 
             if (!ShouldLogFlow(ref _lastRemoteReceiveFlowLogUtc, TimeSpan.FromSeconds(2)) &&
-                repeat != NativeScreenShareStreamingService.TargetFps * 3 &&
-                receivedFrames % (NativeScreenShareStreamingService.TargetFps * 5) != 0)
+                repeat != ScreenShareCapturePipeline.TargetFps * 3 &&
+                receivedFrames % (ScreenShareCapturePipeline.TargetFps * 5) != 0)
             {
                 return;
             }
@@ -3220,7 +3832,7 @@ namespace Zink.Pages.Social
             if (!ShouldLogFlow(ref _lastRemoteRealtimeStatsLogUtc, TimeSpan.FromSeconds(2)))
                 return;
 
-            var target = NativeScreenShareStreamingService.TargetFps;
+            var target = ScreenShareCapturePipeline.TargetFps;
             var receiveLocked = _remoteReceiveObservedFps >= target - 2;
             var playbackLocked = _remotePlaybackObservedFps >= target - 2;
             Debug.WriteLine(
@@ -3267,7 +3879,7 @@ namespace Zink.Pages.Social
 
             if (!ShouldLogFlow(ref _lastRemoteDecodeFlowLogUtc, TimeSpan.FromSeconds(2)) &&
                 decoded &&
-                decodedRepeat != NativeScreenShareStreamingService.TargetFps * 3)
+                decodedRepeat != ScreenShareCapturePipeline.TargetFps * 3)
             {
                 return;
             }
@@ -3286,7 +3898,7 @@ namespace Zink.Pages.Social
 
             if (!ShouldLogFlow(ref _lastRemoteRenderFlowLogUtc, TimeSpan.FromSeconds(2)) &&
                 renderedFrames != 1 &&
-                repeat != NativeScreenShareStreamingService.TargetFps * 3)
+                repeat != ScreenShareCapturePipeline.TargetFps * 3)
             {
                 return;
             }
@@ -3655,6 +4267,24 @@ namespace Zink.Pages.Social
             }
 
             var now = DateTimeOffset.UtcNow;
+            // WebSocket fallback frames prove that the sender is alive, but they
+            // must not hide a failed/missed WebRTC negotiation. They update the
+            // normal receive/render timestamps, so the generic stall checks below
+            // never fire when a peer is stuck in "new" after the receiver rejoins.
+            // Explicitly request a fresh offer when fallback has been active for a
+            // short grace period and RTP has still delivered no video frames.
+            if (Volatile.Read(ref _remoteRtpFrameCount) == 0 &&
+                _remoteFallbackFirstReceivedAtUtc != DateTimeOffset.MinValue &&
+                now - _remoteFallbackFirstReceivedAtUtc > TimeSpan.FromSeconds(3) &&
+                now - _lastRemoteReceiveStallRecoveryUtc > TimeSpan.FromSeconds(4))
+            {
+                const string reason = "receiver RTP stalled; restart screen-share offer";
+                _lastRemoteReceiveStallRecoveryUtc = now;
+                Debug.WriteLine(
+                    $"[ScreenShare:HEALTH] WebSocket fallback is active but RTP has delivered no frames for {(now - _remoteFallbackFirstReceivedAtUtc).TotalMilliseconds:0}ms; requesting a fresh offer.");
+                _ = SendScreenShareQosIfNeededAsync(reason);
+            }
+
             if (!_remoteScreenLastRenderedAtUtc.HasValue)
             {
                 ShowRemoteScreenShareLoading("Screen share is loading", "Waiting for the first live frame...");
@@ -3668,12 +4298,14 @@ namespace Zink.Pages.Social
             {
                 if (_remoteScreenLastReceivedAtUtc.HasValue &&
                     now - _remoteScreenLastReceivedAtUtc.Value > RemoteFrameReceiveStallThreshold &&
-                    now - _lastRemoteReceiveStallRecoveryUtc > TimeSpan.FromSeconds(2))
+                now - _lastRemoteReceiveStallRecoveryUtc > TimeSpan.FromSeconds(2) &&
+                Interlocked.CompareExchange(ref _remoteH264RecoveryInFlight, 1, 0) == 0)
                 {
                     var receiveStallAge = now - _remoteScreenLastReceivedAtUtc.Value;
-                    var reason = receiveStallAge > TimeSpan.FromSeconds(4)
-                        ? "receiver RTP stalled; restart screen-share offer"
-                        : "receiver GPU playback stopped receiving RTP frames";
+                    // The hardware player cannot repair a complete RTP input stall
+                    // with a PLI. The peer may remain nominally "connected", so ask
+                    // the sender to rebuild its offer on the first confirmed stall.
+                    const string reason = "receiver RTP stalled; restart screen-share offer";
 
                     _lastRemoteReceiveStallRecoveryUtc = now;
                     _screenShareDroppedReceiveFrames++;
@@ -3690,7 +4322,8 @@ namespace Zink.Pages.Social
 
             if (_remoteScreenLastReceivedAtUtc.HasValue &&
                 now - _remoteScreenLastReceivedAtUtc.Value > RemoteFrameReceiveStallThreshold &&
-                now - _lastRemoteReceiveStallRecoveryUtc > TimeSpan.FromSeconds(2))
+                now - _lastRemoteReceiveStallRecoveryUtc > TimeSpan.FromSeconds(2) &&
+                Interlocked.CompareExchange(ref _remoteH264RecoveryInFlight, 1, 0) == 0)
             {
                 var receiveStallAge = now - _remoteScreenLastReceivedAtUtc.Value;
                 var reason = receiveStallAge > TimeSpan.FromSeconds(4)
@@ -3777,9 +4410,14 @@ namespace Zink.Pages.Social
                 _remoteScreenBitmap = new WriteableBitmap(width, height);
                 _remoteScreenBitmapWidth = width;
                 _remoteScreenBitmapHeight = height;
-                target.Source = _remoteScreenBitmap;
                 Debug.WriteLine($"[ScreenShare:FLOW:RENDER] Created remote WriteableBitmap {width}x{height}.");
             }
+
+            // A late JPEG preview can finish decoding after RTP rendering starts
+            // and replace Image.Source. Reclaim the visible surface before every
+            // decoded frame so updates are never written to an off-screen bitmap.
+            if (!ReferenceEquals(target.Source, _remoteScreenBitmap))
+                target.Source = _remoteScreenBitmap;
 
             using var pixelStream = _remoteScreenBitmap.PixelBuffer.AsStream();
             pixelStream.Seek(0, System.IO.SeekOrigin.Begin);
@@ -3956,7 +4594,10 @@ namespace Zink.Pages.Social
                         : leaveText;
                     _isRemoteVideoVisible = false;
                     _isRemoteScreenShareLoading = false;
+                    _isWatchingRemoteScreenShare = false;
                     _remoteScreenShareSenderId = 0;
+                    lock (_screenShareViewersSync)
+                        _screenShareViewerIds.Remove(e.FromUserId);
                     ResetRemoteScreenShareReceiveState(clearImage: true);
                     RemotePlaceholderTitleText.Text = screenShareEndedText;
                     RemotePlaceholderSubtitleText.Text = leaveText;
@@ -4002,19 +4643,37 @@ namespace Zink.Pages.Social
             }
         }
 
-        private void HeadphonesButton_Click(object sender, RoutedEventArgs e)
+        private void SoundDeviceButton_Click(object sender, RoutedEventArgs e)
         {
             var flyout = new MenuFlyout();
 
+            var outputHeader = new MenuFlyoutSubItem
+            {
+                Text = $"Speaker: {_selectedAudioOutput}"
+            };
+
             foreach (var device in AudioPlaybackService.Instance.GetOutputDevices())
             {
-                AddAudioOutputMenuItem(flyout, device);
+                AddAudioOutputMenuItem(outputHeader, device);
             }
 
-            flyout.ShowAt(HeadphonesButton);
+            flyout.Items.Add(outputHeader);
+
+            var microphoneHeader = new MenuFlyoutSubItem
+            {
+                Text = $"Microphone: {_selectedMicrophone}"
+            };
+
+            foreach (var device in MicCaptureService.Instance.GetInputDevices())
+            {
+                AddMicrophoneMenuItem(microphoneHeader, device);
+            }
+
+            flyout.Items.Add(microphoneHeader);
+            flyout.ShowAt(SoundDeviceButton);
         }
 
-        private void AddAudioOutputMenuItem(MenuFlyout flyout, AudioPlaybackService.OutputDeviceInfo device)
+        private void AddAudioOutputMenuItem(MenuFlyoutSubItem parent, AudioPlaybackService.OutputDeviceInfo device)
         {
             var item = new ToggleMenuFlyoutItem
             {
@@ -4034,28 +4693,15 @@ namespace Zink.Pages.Social
                 }
             };
 
-            flyout.Items.Add(item);
-        }
-
-        private void MuteToggleButton_Click(object sender, RoutedEventArgs e)
-        {
-            _isMuted = !_isMuted;
-            _isMicEnabled = !_isMuted;
-
-            if (_isMuted)
-                AudioActivityService.Instance.UpdateLocalLevel(0);
-
-            NativeCallCoordinator.Instance.SetLocalAudioMuted(_isMuted || !_isMicEnabled);
-
-            NativeCallCoordinator.Instance.SetStatus(
-                NativeCallCoordinator.Instance.CurrentSession.State,
-                _isMuted ? "Microphone muted." : "Microphone unmuted.");
-
-            UpdateDockVisualStates();
-            UpdateSpeakingIndicators(NativeCallCoordinator.Instance.CurrentSession, AudioActivityService.Instance.Current);
+            parent.Items.Add(item);
         }
 
         private bool TryEnqueueOnUi(Action action)
+        {
+            return TryEnqueueOnUi(action, Microsoft.UI.Dispatching.DispatcherQueuePriority.Normal);
+        }
+
+        private bool TryEnqueueOnUi(Action action, Microsoft.UI.Dispatching.DispatcherQueuePriority priority)
         {
             var queue = DispatcherQueue;
             if (queue == null)
@@ -4064,7 +4710,7 @@ namespace Zink.Pages.Social
                 return false;
             }
 
-            return queue.TryEnqueue(() => action());
+            return queue.TryEnqueue(priority, () => action());
         }
 
         private bool TryEnqueueOnUi(Func<Task> action)
@@ -4089,9 +4735,47 @@ namespace Zink.Pages.Social
             });
         }
 
-        private void DeafenToggleButton_Click(object sender, RoutedEventArgs e)
+        private void DeafenMenuButton_Click(object sender, RoutedEventArgs e)
         {
-            _isDeafened = !_isDeafened;
+            var flyout = new MenuFlyout();
+            var muteItem = new ToggleMenuFlyoutItem
+            {
+                Text = "Mute microphone",
+                IsChecked = _isMuted
+            };
+            muteItem.Click += (_, __) => SetMicrophoneMuted(!_isMuted);
+            flyout.Items.Add(muteItem);
+
+            var deafenItem = new ToggleMenuFlyoutItem
+            {
+                Text = "Deafen sound",
+                IsChecked = _isDeafened
+            };
+            deafenItem.Click += (_, __) => SetDeafened(!_isDeafened);
+            flyout.Items.Add(deafenItem);
+            flyout.ShowAt(DeafenToggleButton);
+        }
+
+        private void SetMicrophoneMuted(bool muted)
+        {
+            _isMuted = muted;
+            _isMicEnabled = !muted;
+
+            if (_isMuted)
+                AudioActivityService.Instance.UpdateLocalLevel(0);
+
+            NativeCallCoordinator.Instance.SetLocalAudioMuted(_isMuted || !_isMicEnabled);
+            NativeCallCoordinator.Instance.SetStatus(
+                NativeCallCoordinator.Instance.CurrentSession.State,
+                _isMuted ? "Microphone muted." : "Microphone unmuted.");
+
+            UpdateDockVisualStates();
+            UpdateSpeakingIndicators(NativeCallCoordinator.Instance.CurrentSession, AudioActivityService.Instance.Current);
+        }
+
+        private void SetDeafened(bool deafened)
+        {
+            _isDeafened = deafened;
 
             if (_isDeafened)
                 AudioActivityService.Instance.UpdateRemoteLevel(0);
@@ -4109,7 +4793,7 @@ namespace Zink.Pages.Social
         private async void ScreenShareToggleButton_Click(object sender, RoutedEventArgs e)
         {
             DiagnosticLogService.WriteLine(
-                $"[ScreenShare:UI] Toggle clicked; state={NativeCallCoordinator.Instance.CurrentSession.State}; currentSharing={_isSharingScreen}; nativeRunning={NativeScreenShareStreamingService.Instance.IsRunning}");
+                $"[ScreenShare:UI] Toggle clicked; state={NativeCallCoordinator.Instance.CurrentSession.State}; currentSharing={_isSharingScreen}; nativeRunning={ScreenShareCapturePipeline.Instance.IsRunning}");
             DiagnosticLogService.Flush();
 
             if (NativeCallCoordinator.Instance.CurrentSession.State != NativeCallState.Connected)
@@ -4308,7 +4992,7 @@ namespace Zink.Pages.Social
 
         private Border BuildScreenShareSummaryPanel()
         {
-            var isSharing = NativeScreenShareStreamingService.Instance.IsRunning && _isSharingScreen;
+            var isSharing = ScreenShareCapturePipeline.Instance.IsRunning && _isSharingScreen;
             var resolutionText = _screenShareLastWidth > 0 && _screenShareLastHeight > 0
                 ? $"{_screenShareLastWidth} x {_screenShareLastHeight}"
                 : "Waiting for frames";
@@ -4327,10 +5011,10 @@ namespace Zink.Pages.Social
             });
 
             panel.Children.Add(CreateDetailsText($"Status: {(isSharing ? "Sharing" : "Not sharing")}"));
-            panel.Children.Add(CreateDetailsText($"Quality: {NativeScreenShareStreamingService.Instance.CurrentQuality.Name}"));
-            panel.Children.Add(CreateDetailsText($"FPS: {_screenShareObservedFps:0.0} / {NativeScreenShareStreamingService.TargetFps}"));
+            panel.Children.Add(CreateDetailsText($"Quality: {ScreenShareCapturePipeline.Instance.CurrentQuality.Name}"));
+            panel.Children.Add(CreateDetailsText($"FPS: {_screenShareObservedFps:0.0} / {ScreenShareCapturePipeline.TargetFps}"));
             panel.Children.Add(CreateDetailsText($"Receiver FPS: {_remoteReceiveObservedFps:0.0} in / {_remotePlaybackObservedFps:0.0} view"));
-            panel.Children.Add(CreateDetailsText($"Bitrate: {NativeScreenShareStreamingService.Instance.CurrentBitrate / 1_000_000d:0.0} Mbps"));
+            panel.Children.Add(CreateDetailsText($"Bitrate: {ScreenShareCapturePipeline.Instance.CurrentBitrate / 1_000_000d:0.0} Mbps"));
             panel.Children.Add(CreateDetailsText($"Resolution: {resolutionText}"));
             panel.Children.Add(CreateDetailsText($"Last frame: {FormatBytes(_screenShareLastBytes)}"));
 
@@ -4347,7 +5031,7 @@ namespace Zink.Pages.Social
 
         private Border BuildStreamInformationPanel()
         {
-            var isSharing = NativeScreenShareStreamingService.Instance.IsRunning && _isSharingScreen;
+            var isSharing = ScreenShareCapturePipeline.Instance.IsRunning && _isSharingScreen;
             var resolutionText = _screenShareLastWidth > 0 && _screenShareLastHeight > 0
                 ? $"{_screenShareLastWidth} x {_screenShareLastHeight} ({GetResolutionTier(_screenShareLastHeight)})"
                 : "Waiting for frames";
@@ -4367,36 +5051,36 @@ namespace Zink.Pages.Social
 
             panel.Children.Add(CreateDetailsText($"Status: {(isSharing ? "Sharing" : "Not sharing")}"));
             panel.Children.Add(CreateDetailsText($"Transport codec: H.264"));
-            panel.Children.Add(CreateDetailsText($"Transport path: {NativeScreenShareStreamingService.Instance.TransportPipeline}"));
-            panel.Children.Add(CreateDetailsText($"Capture policy: {(NativeScreenShareStreamingService.Instance.RequireDirectX12CapturePath ? "DirectX 12 WGC required" : "Best available")}"));
-            panel.Children.Add(CreateDetailsText($"Encoder policy: {(NativeScreenShareStreamingService.Instance.RequireHardwareEncoder ? "DirectX 12 GPU hardware required" : "GPU preferred with software fallback")}"));
-            panel.Children.Add(CreateDetailsText($"Encoder mode: {NativeScreenShareStreamingService.Instance.EncoderMode}"));
-            panel.Children.Add(CreateDetailsText($"GPU path: {NativeScreenShareStreamingService.Instance.EncoderGpuDeviceMode}"));
-            panel.Children.Add(CreateDetailsText($"Encoder input: {NativeScreenShareStreamingService.Instance.EncoderInputFormat}"));
-            panel.Children.Add(CreateDetailsText($"Low latency flags: {(NativeScreenShareStreamingService.Instance.EncoderRealtimeModeEnabled ? "encoder" : "encoder pending")} / {(NativeScreenShareStreamingService.Instance.EncoderLowLatencyOutputEnabled ? "output" : "output pending")}"));
-            panel.Children.Add(CreateDetailsText($"Recovery keyframe: every {NativeScreenShareStreamingService.Instance.RecoveryKeyFrameInterval} frames"));
-            panel.Children.Add(CreateDetailsText($"Recovery requests: {NativeScreenShareStreamingService.Instance.RecoveryKeyFrameRequests}"));
+            panel.Children.Add(CreateDetailsText($"Transport path: {ScreenShareCapturePipeline.Instance.TransportPipeline}"));
+            panel.Children.Add(CreateDetailsText($"Capture policy: {(ScreenShareCapturePipeline.Instance.RequireDirectX12CapturePath ? "DirectX 12 WGC required" : "Best available")}"));
+            panel.Children.Add(CreateDetailsText($"Encoder policy: {(ScreenShareCapturePipeline.Instance.RequireHardwareEncoder ? "DirectX 12 GPU hardware required" : "GPU preferred with software fallback")}"));
+            panel.Children.Add(CreateDetailsText($"Encoder mode: {ScreenShareCapturePipeline.Instance.EncoderMode}"));
+            panel.Children.Add(CreateDetailsText($"GPU path: {ScreenShareCapturePipeline.Instance.EncoderGpuDeviceMode}"));
+            panel.Children.Add(CreateDetailsText($"Encoder input: {ScreenShareCapturePipeline.Instance.EncoderInputFormat}"));
+            panel.Children.Add(CreateDetailsText($"Low latency flags: {(ScreenShareCapturePipeline.Instance.EncoderRealtimeModeEnabled ? "encoder" : "encoder pending")} / {(ScreenShareCapturePipeline.Instance.EncoderLowLatencyOutputEnabled ? "output" : "output pending")}"));
+            panel.Children.Add(CreateDetailsText($"Recovery keyframe: every {ScreenShareCapturePipeline.Instance.RecoveryKeyFrameInterval} frames"));
+            panel.Children.Add(CreateDetailsText($"Recovery requests: {ScreenShareCapturePipeline.Instance.RecoveryKeyFrameRequests}"));
             panel.Children.Add(CreateDetailsText($"Mode: locked realtime"));
-            panel.Children.Add(CreateDetailsText($"Quality state: {NativeScreenShareStreamingService.Instance.AdaptiveState}"));
-            panel.Children.Add(CreateDetailsText($"Target FPS: {NativeScreenShareStreamingService.TargetFps} locked"));
+            panel.Children.Add(CreateDetailsText($"Quality state: {ScreenShareCapturePipeline.Instance.AdaptiveState}"));
+            panel.Children.Add(CreateDetailsText($"Target FPS: {ScreenShareCapturePipeline.TargetFps} locked"));
             panel.Children.Add(CreateDetailsText($"Sender throughput: {_screenShareObservedFps:0.0} FPS"));
-            panel.Children.Add(CreateDetailsText($"Capture loop: {NativeScreenShareStreamingService.Instance.CaptureFps:0.0} FPS"));
-            panel.Children.Add(CreateDetailsText($"Encoder output: {NativeScreenShareStreamingService.Instance.EncodedFps:0.0} FPS"));
+            panel.Children.Add(CreateDetailsText($"Capture loop: {ScreenShareCapturePipeline.Instance.CaptureFps:0.0} FPS"));
+            panel.Children.Add(CreateDetailsText($"Encoder output: {ScreenShareCapturePipeline.Instance.EncodedFps:0.0} FPS"));
             panel.Children.Add(CreateDetailsText($"Receiver input: {_remoteReceiveObservedFps:0.0} FPS"));
             panel.Children.Add(CreateDetailsText($"Receiver playback: {_remotePlaybackObservedFps:0.0} FPS"));
             panel.Children.Add(CreateDetailsText($"Receiver GPU queue: avg {_remoteGpuPlaybackAverageQueue:0.0}, peak {_remoteGpuPlaybackQueuePeak}, now {GetPendingRemoteGpuPlaybackFrameCount()}"));
             panel.Children.Add(CreateDetailsText($"Gaming readiness: {GetGamingReadinessText()}"));
-            panel.Children.Add(CreateDetailsText($"Capture/encode: {NativeScreenShareStreamingService.Instance.LastCaptureMilliseconds:0}ms / {NativeScreenShareStreamingService.Instance.LastEncodeMilliseconds:0}ms"));
-            panel.Children.Add(CreateDetailsText($"Bitrate: {NativeScreenShareStreamingService.Instance.CurrentBitrate / 1_000_000d:0.0} Mbps"));
+            panel.Children.Add(CreateDetailsText($"Capture/encode: {ScreenShareCapturePipeline.Instance.LastCaptureMilliseconds:0}ms / {ScreenShareCapturePipeline.Instance.LastEncodeMilliseconds:0}ms"));
+            panel.Children.Add(CreateDetailsText($"Bitrate: {ScreenShareCapturePipeline.Instance.CurrentBitrate / 1_000_000d:0.0} Mbps"));
             panel.Children.Add(CreateDetailsText($"Resolution: {resolutionText}"));
-            panel.Children.Add(CreateDetailsText($"Preference: {NativeScreenShareStreamingService.Instance.RequestedQuality.Name}"));
-            panel.Children.Add(CreateDetailsText($"Active quality: {NativeScreenShareStreamingService.Instance.CurrentQuality.Name}"));
+            panel.Children.Add(CreateDetailsText($"Preference: {ScreenShareCapturePipeline.Instance.RequestedQuality.Name}"));
+            panel.Children.Add(CreateDetailsText($"Active quality: {ScreenShareCapturePipeline.Instance.CurrentQuality.Name}"));
             panel.Children.Add(CreateDetailsText($"Auto quality changes: Off"));
-            panel.Children.Add(CreateDetailsText($"Congestion signals: {NativeScreenShareStreamingService.Instance.CongestionSignals}"));
-            panel.Children.Add(CreateDetailsText($"Encoder fallbacks: {NativeScreenShareStreamingService.Instance.HardwareEncoderFallbackCount}"));
+            panel.Children.Add(CreateDetailsText($"Congestion signals: {ScreenShareCapturePipeline.Instance.CongestionSignals}"));
+            panel.Children.Add(CreateDetailsText($"Encoder fallbacks: {ScreenShareCapturePipeline.Instance.HardwareEncoderFallbackCount}"));
             panel.Children.Add(CreateDetailsText($"Local preview: throttled snapshot"));
             panel.Children.Add(CreateDetailsText($"Remote render: hardware H.264 playback"));
-            panel.Children.Add(CreateDetailsText($"Render target: {NativeScreenShareStreamingService.Instance.CurrentQuality.Width} x {NativeScreenShareStreamingService.Instance.CurrentQuality.Height}"));
+            panel.Children.Add(CreateDetailsText($"Render target: {ScreenShareCapturePipeline.Instance.CurrentQuality.Width} x {ScreenShareCapturePipeline.Instance.CurrentQuality.Height}"));
             panel.Children.Add(CreateDetailsText($"RTP frames: {_screenShareRtpFrames}"));
             panel.Children.Add(CreateDetailsText($"RTP metadata frames: {_screenShareRtpMetadataFrames}"));
             panel.Children.Add(CreateDetailsText($"RTCP recovery: PLI {_screenSharePeers.Values.Sum(peer => peer.SentPliRequests)}, NACK {_screenSharePeers.Values.Sum(peer => peer.SentNackRequests)}"));
@@ -4455,10 +5139,10 @@ namespace Zink.Pages.Social
 
         private string GetGamingReadinessText()
         {
-            var target = NativeScreenShareStreamingService.TargetFps;
+            var target = ScreenShareCapturePipeline.TargetFps;
             var senderLocked =
-                NativeScreenShareStreamingService.Instance.CaptureFps >= target - 2 &&
-                NativeScreenShareStreamingService.Instance.EncodedFps >= target - 2;
+                ScreenShareCapturePipeline.Instance.CaptureFps >= target - 2 &&
+                ScreenShareCapturePipeline.Instance.EncodedFps >= target - 2;
             var receiverLocked =
                 _remoteReceiveObservedFps >= target - 2 &&
                 _remotePlaybackObservedFps >= target - 2;
@@ -4503,7 +5187,49 @@ namespace Zink.Pages.Social
             var flyout = new MenuFlyout();
             AddScreenShareQualityItem(flyout, ScreenShareQualityPreset.Hd720p);
             AddScreenShareQualityItem(flyout, ScreenShareQualityPreset.FullHd1080p);
+            AddScreenShareQualityItem(flyout, ScreenShareQualityPreset.QuadHd2K);
             flyout.ShowAt((FrameworkElement)sender);
+        }
+
+        private void ScreenShareCodecButton_Click(object sender, RoutedEventArgs e)
+        {
+            var flyout = new MenuFlyout();
+            AddScreenShareCodecItem(flyout, ScreenShareVideoCodec.Auto, "Auto compatibility (recommended)");
+            AddScreenShareCodecItem(flyout, ScreenShareVideoCodec.AV1X, "AV1X hardware/modern codec");
+            AddScreenShareCodecItem(flyout, ScreenShareVideoCodec.H264, "H.264 compatibility codec");
+            flyout.ShowAt((FrameworkElement)sender);
+        }
+
+        private void AddScreenShareCodecItem(MenuFlyout flyout, ScreenShareVideoCodec codec, string text)
+        {
+            var item = new ToggleMenuFlyoutItem
+            {
+                Text = text,
+                IsChecked = ScreenShareCapturePipeline.Instance.PreferredVideoCodec == codec
+            };
+
+            item.Click += async (_, __) =>
+            {
+                var wasSharing = _isSharingScreen && ScreenShareCapturePipeline.Instance.IsRunning;
+                ScreenShareCapturePipeline.Instance.PreferredVideoCodec = codec;
+                ScreenShareCodecLabel.Text = codec == ScreenShareVideoCodec.Auto
+                    ? "Auto"
+                    : codec == ScreenShareVideoCodec.AV1X ? "AV1X" : "H.264";
+                DiagnosticLogService.WriteLine($"[ScreenShare:UI] Preferred video codec changed to {codec}; wasSharing={wasSharing}.");
+                ScreenShareTestLogService.WriteLine($"codec-selection codec={codec}; wasSharing={wasSharing}");
+
+                if (wasSharing)
+                {
+                    await StopLocalScreenShareAsync(false);
+                    await StartLocalScreenShareAsync();
+                }
+
+                NativeCallCoordinator.Instance.SetStatus(
+                    NativeCallCoordinator.Instance.CurrentSession.State,
+                    wasSharing ? $"Restarted screen share using {ScreenShareCodecLabel.Text}." : $"Screen share codec set to {ScreenShareCodecLabel.Text}.");
+            };
+
+            flyout.Items.Add(item);
         }
 
         private void AddScreenShareQualityItem(MenuFlyout flyout, ScreenShareQualityPreset preset)
@@ -4511,14 +5237,41 @@ namespace Zink.Pages.Social
             var profile = ScreenShareQualityProfile.FromPreset(preset);
             var item = new ToggleMenuFlyoutItem
             {
-                Text = $"{profile.Name} screen share quality",
-                IsChecked = NativeScreenShareStreamingService.Instance.QualityPreset == preset
+                Text = $"{profile.Name} {profile.TargetFps} FPS",
+                IsChecked = ScreenShareCapturePipeline.Instance.QualityPreset == preset
             };
 
-            item.Click += (_, __) =>
+            item.Click += async (_, __) =>
             {
-                var wasSharing = _isSharingScreen && NativeScreenShareStreamingService.Instance.IsRunning;
-                ApplyScreenShareQuality(preset);
+                var wasSharing = _isSharingScreen && ScreenShareCapturePipeline.Instance.IsRunning;
+                if (wasSharing)
+                {
+                    var session = NativeCallCoordinator.Instance.CurrentSession;
+                    if (!string.IsNullOrWhiteSpace(session.CallId))
+                    {
+                        var transitionTimestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+                        var codec = ScreenShareCapturePipeline.Instance.ActiveVideoCodec;
+                        foreach (var participantId in GetCallParticipants(session))
+                        {
+                            try
+                            {
+                                await SocialManager.Instance.Realtime.SendScreenShareMetadataAsync(
+                                    participantId,
+                                    session.CallId,
+                                    profile.Width,
+                                    profile.Height,
+                                    transitionTimestamp,
+                                    codec);
+                            }
+                            catch (Exception ex)
+                            {
+                                Debug.WriteLine($"[ScreenShare:H264] Quality transition metadata failed for participant {participantId}: {ex.Message}");
+                            }
+                        }
+                    }
+                }
+
+                await ApplyScreenShareQualityAsync(preset, wasSharing);
 
                 NativeCallCoordinator.Instance.SetStatus(
                     NativeCallCoordinator.Instance.CurrentSession.State,
@@ -4537,15 +5290,46 @@ namespace Zink.Pages.Social
             flyout.Items.Add(item);
         }
 
-        private void ApplyScreenShareQuality(ScreenShareQualityPreset preset)
+        private async Task ApplyScreenShareQualityAsync(
+            ScreenShareQualityPreset preset,
+            bool restartActiveShare)
         {
             var profile = ScreenShareQualityProfile.FromPreset(preset);
 
-            NativeScreenShareStreamingService.Instance.SetQuality(preset);
+            var previousStack = ScreenShareServiceSelector.Active;
+            var previousPipeline = previousStack.CapturePipeline;
+            if (previousStack.Preset != preset)
+            {
+                previousPipeline.FrameReady -= NativeScreenShare_FrameReady;
+                previousPipeline.StreamingFailed -= NativeScreenShare_StreamingFailed;
+
+                if (previousPipeline.IsRunning)
+                    await previousPipeline.StopAsync();
+
+                previousStack.AudioPlayback.Stop();
+            }
+
+            ScreenShareServiceSelector.Select(preset);
+            ScreenShareCapturePipeline.Instance.SetQuality(preset);
+            DiagnosticLogService.WriteLine(
+                $"[ScreenShare:STACK] selected={preset}; policyFps={ScreenSharePolicy.Controls.CompatibilityFps}; " +
+                $"decodeQueue={ScreenSharePolicy.Controls.MaxDecodeQueue}; sendTimeoutMs={ScreenSharePolicy.Signaling.SendTimeout.TotalMilliseconds:0}; " +
+                $"receiveStallMs={ScreenSharePolicy.Errors.ReceiveStallThreshold.TotalMilliseconds:0}.");
+
+            if (previousStack.Preset != preset)
+            {
+                ScreenShareCapturePipeline.Instance.FrameReady += NativeScreenShare_FrameReady;
+                ScreenShareCapturePipeline.Instance.StreamingFailed += NativeScreenShare_StreamingFailed;
+                AudioPlaybackService.Instance.Start();
+
+                if (restartActiveShare)
+                    await ScreenShareCapturePipeline.Instance.StartAsync();
+            }
+
             _screenShareLastQuality = profile.Name;
             _screenShareLastWidth = profile.Width;
             _screenShareLastHeight = profile.Height;
-            ScreenShareQualityLabel.Text = profile.Name;
+            ScreenShareQualityLabel.Text = $"{profile.Name} {profile.TargetFps} FPS";
             _screenShareFpsWindowStartedUtc = DateTimeOffset.UtcNow;
             _screenShareFrameCounter = 0;
             _screenShareObservedFps = 0;
@@ -4576,7 +5360,7 @@ namespace Zink.Pages.Social
                 _isScreenShareSoundEnabled = !_isScreenShareSoundEnabled;
                 var wantedEnabled = _isScreenShareSoundEnabled;
 
-                if (_isSharingScreen && NativeScreenShareStreamingService.Instance.IsRunning)
+                if (_isSharingScreen && ScreenShareCapturePipeline.Instance.IsRunning)
                 {
                     if (wantedEnabled)
                         await TryStartScreenShareSoundAsync(NativeCallCoordinator.Instance.CurrentSession, showSuccessStatus: true);
@@ -4711,7 +5495,7 @@ namespace Zink.Pages.Social
             AddCallParticipant(friend.UserId);
             RememberParticipantName(friend.UserId, friend.DisplayName, friend.Username);
             await SocialManager.Instance.Realtime.CallUserAsync(friend.UserId, session.CallId);
-            if (NativeScreenShareStreamingService.Instance.IsRunning)
+            if (ScreenShareCapturePipeline.Instance.IsRunning)
                 _ = StartScreenShareRtpOfferAsync(friend.UserId, session.CallId);
 
             NativeCallCoordinator.Instance.SetStatus(
@@ -5042,6 +5826,7 @@ namespace Zink.Pages.Social
             _isSharingScreen = false;
             _isRemoteVideoVisible = false;
             _isRemoteScreenShareLoading = false;
+            _isWatchingRemoteScreenShare = false;
             _remoteScreenShareSenderId = 0;
             ResetRemoteScreenShareReceiveState(clearImage: true);
             ResetCallTimer();
@@ -5148,7 +5933,7 @@ namespace Zink.Pages.Social
                 var isScreenSharing =
                     _isSharingScreen ||
                     session.IsScreenShare ||
-                    NativeScreenShareStreamingService.Instance.IsRunning;
+                    ScreenShareCapturePipeline.Instance.IsRunning;
 
                 var participantCount = Math.Min(
                     MaxCallParticipants,
@@ -5190,7 +5975,7 @@ namespace Zink.Pages.Social
             var participantCount = Math.Min(MaxCallParticipants, 1 + GetCallParticipants(session).Count());
             MembersSummaryText.Text = session.State == NativeCallState.Ended
                 ? "Call ended"
-                : $"In call - {participantCount}";
+                : $"The current number of people in the call: {participantCount}";
             AddFriendToCallButton.IsEnabled = participantCount < MaxCallParticipants &&
                 (session.State == NativeCallState.Connected || session.State == NativeCallState.Calling);
             RenderAdditionalMembers();
@@ -5225,11 +6010,14 @@ namespace Zink.Pages.Social
 
         private void UpdateMediaLayerVisibility()
         {
-            RemotePlaceholderPanel.Visibility = (_isRemoteVideoVisible || _isRemoteScreenShareLoading)
+            var showWatchPrompt = _remoteScreenShareSenderId > 0 && !_isWatchingRemoteScreenShare;
+            var showLoadingPanel = _isWatchingRemoteScreenShare && _isRemoteScreenShareLoading;
+            RemotePlaceholderPanel.Visibility = (_isRemoteVideoVisible || showLoadingPanel || showWatchPrompt)
                 ? Visibility.Collapsed
                 : Visibility.Visible;
-            RemoteScreenLoadingPanel.Visibility = _isRemoteScreenShareLoading ? Visibility.Visible : Visibility.Collapsed;
-            RemoteScreenLoadingRing.IsActive = _isRemoteScreenShareLoading;
+            RemoteScreenWatchPanel.Visibility = showWatchPrompt ? Visibility.Visible : Visibility.Collapsed;
+            RemoteScreenLoadingPanel.Visibility = showLoadingPanel ? Visibility.Visible : Visibility.Collapsed;
+            RemoteScreenLoadingRing.IsActive = showLoadingPanel;
             ApplyLocalPreviewVisibility();
         }
 
@@ -5296,12 +6084,12 @@ namespace Zink.Pages.Social
         private void ApplyLocalPreviewVisibility()
         {
             bool showPreview = _isSharingScreen &&
-                NativeScreenShareStreamingService.Instance.IsRunning &&
+                ScreenShareCapturePipeline.Instance.IsRunning &&
                 !_isLocalPreviewHidden &&
                 !_isFullscreen;
             LocalPreviewBorder.Visibility = showPreview ? Visibility.Visible : Visibility.Collapsed;
             LocalPreviewRestorePanel.Visibility = _isSharingScreen &&
-                NativeScreenShareStreamingService.Instance.IsRunning &&
+                ScreenShareCapturePipeline.Instance.IsRunning &&
                 _isLocalPreviewHidden &&
                 !_isFullscreen
                 ? Visibility.Visible
@@ -5359,6 +6147,12 @@ namespace Zink.Pages.Social
                 else if (remoteSpeaking)
                 {
                     PeerText.Text = $"Connected with user {session.RemoteUserId} - remote is speaking";
+                }
+                else
+                {
+                    PeerText.Text = string.IsNullOrWhiteSpace(session.PeerText)
+                        ? $"Connected with user {session.RemoteUserId}"
+                        : session.PeerText;
                 }
             }
             else if (session.State == NativeCallState.Ended)
@@ -5419,11 +6213,7 @@ namespace Zink.Pages.Social
 
         private void UpdateDockVisualStates()
         {
-            MuteToggleButton.Background = _isMuted
-                ? new SolidColorBrush(ColorHelper.FromArgb(255, 95, 40, 40))
-                : new SolidColorBrush(ColorHelper.FromArgb(255, 23, 26, 32));
-
-            DeafenToggleButton.Background = _isDeafened
+            DeafenToggleButton.Background = _isDeafened || _isMuted
                 ? new SolidColorBrush(ColorHelper.FromArgb(255, 95, 40, 40))
                 : new SolidColorBrush(ColorHelper.FromArgb(255, 23, 26, 32));
 
@@ -5431,7 +6221,7 @@ namespace Zink.Pages.Social
                 ? new SolidColorBrush(ColorHelper.FromArgb(255, 36, 88, 62))
                 : new SolidColorBrush(ColorHelper.FromArgb(255, 23, 26, 32));
 
-            HeadphonesButton.Background = new SolidColorBrush(ColorHelper.FromArgb(255, 23, 26, 32));
+            SoundDeviceButton.Background = new SolidColorBrush(ColorHelper.FromArgb(255, 23, 26, 32));
             MoreButton.Background = new SolidColorBrush(ColorHelper.FromArgb(255, 23, 26, 32));
             ScreenShareSoundButton.Background = _isScreenShareSoundEnabled
                 ? new SolidColorBrush(ColorHelper.FromArgb(255, 36, 88, 62))
@@ -5439,10 +6229,11 @@ namespace Zink.Pages.Social
             LocalPreviewRestoreButton.Background = _isLocalPreviewHidden
                 ? new SolidColorBrush(ColorHelper.FromArgb(255, 36, 64, 96))
                 : new SolidColorBrush(ColorHelper.FromArgb(255, 23, 26, 32));
-            ScreenShareQualityButton.Background = NativeScreenShareStreamingService.Instance.QualityPreset == ScreenShareQualityPreset.UltraHd4K
+            ScreenShareQualityButton.Background = ScreenShareCapturePipeline.Instance.QualityPreset == ScreenShareQualityPreset.UltraHd4K
                 ? new SolidColorBrush(ColorHelper.FromArgb(255, 36, 88, 62))
                 : new SolidColorBrush(ColorHelper.FromArgb(255, 23, 26, 32));
-            ScreenShareQualityLabel.Text = NativeScreenShareStreamingService.Instance.CurrentQuality.Name;
+            var screenShareQuality = ScreenShareCapturePipeline.Instance.CurrentQuality;
+            ScreenShareQualityLabel.Text = $"{screenShareQuality.Name} {screenShareQuality.TargetFps} FPS";
             ScreenShareDetailsButton.Background = _isSharingScreen
                 ? new SolidColorBrush(ColorHelper.FromArgb(255, 36, 64, 96))
                 : new SolidColorBrush(ColorHelper.FromArgb(255, 23, 26, 32));
@@ -5453,7 +6244,6 @@ namespace Zink.Pages.Social
                 ? new SolidColorBrush(ColorHelper.FromArgb(255, 36, 64, 96))
                 : new SolidColorBrush(ColorHelper.FromArgb(255, 23, 26, 32));
 
-            MuteIcon.Glyph = _isMuted ? "\uE74F" : "\uE720";
         }
 
         private sealed class PendingRemoteH264Frame
@@ -5493,6 +6283,27 @@ namespace Zink.Pages.Social
             public long Generation { get; }
             public TimeSpan SampleDuration { get; }
             public string Codec { get; }
+            public DateTimeOffset QueuedAtUtc { get; init; }
+        }
+
+        private sealed class PendingLocalScreenShareSend
+        {
+            public PendingLocalScreenShareSend(
+                IReadOnlyList<long> participantIds,
+                string callId,
+                NativeScreenFrameEventArgs frame,
+                int generation)
+            {
+                ParticipantIds = participantIds;
+                CallId = callId;
+                Frame = frame;
+                Generation = generation;
+            }
+
+            public IReadOnlyList<long> ParticipantIds { get; }
+            public string CallId { get; }
+            public NativeScreenFrameEventArgs Frame { get; }
+            public int Generation { get; }
         }
 
         private sealed class BitReader

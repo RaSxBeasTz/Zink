@@ -11,37 +11,66 @@ namespace Zink.Pages
         private readonly Dictionary<string, (string Title, DateTime? Released, string Notes)> _changelog =
             new(StringComparer.OrdinalIgnoreCase)
             {
-                // 3.0.35.0
-                ["3.0.35.0"] = (
-                    Title: "Version 3.0.35.0",
-                    Released: new DateTime(2026, 07, 07),
-                    Notes:
-@"Version 3.0.35.0"
-                ),
-                // 3.0.34.0
-                ["3.0.34.0"] = (
-                    Title: "Version 3.0.34.0",
+                // 4.0.0.0 is the last major update for a while.
+                ["4.0.0.0"] = (
+                    Title: "Version 4.0.0.0",
                     Released: new DateTime(2026, 06, 28),
                     Notes:
-@"Version 3.0.35.0
-- Improved Video Library performance for large film folders by letting the film grid virtualize items instead of creating every film card at once.
-- Made saved films appear faster by loading the library list first, then filling thumbnails, durations, and poster artwork afterward.
-- Reduced repeated Video Library collection rebuilds while adding films so the page stays more responsive during large imports.
-- Added clearer progress text while films are being added, including how many films have loaded out of the total.
-- Added a second loading phase for cover artwork so Zink shows progress while adding cover artwork for the films.
-- Improved film cover artwork loading so poster artwork can replace plain video thumbnails when artwork is found.
-- Reduced duplicate film-cover lookups and unnecessary artwork work while keeping fallback video thumbnails.
-- Reduced background Video Library scan pressure for large folders by spacing automatic deep rescans further apart.
-- Reduced shell/startup memory pressure by decoding large background and startup images at display-friendly sizes.
+@"Version 4.0.0.0.
+Bug Fixes: 
+- Fixed a bug in the call page where it would keep showing some one as speaking even when they are not.
+- Fixed the play with youtube on the liked songs page where the loading for youtube would take some time.
+- Fixed the youtube player for the liked songs play with youtube not playing or getting stuck on loading.
+- Prevented accidental YouTube embed-page redirects from causing video player configuration error 153.
+- Fixed local MSIX package signing so Windows App Installer can verify the publisher certificate and enable the Install button.
+- Fixed when right clicking the system tray 'exit' button will now shut down zink and not freeze.
+- Fixed the system tray right click 'exit' zink button so it shuts down the app and the system tray and the background processes on the first right click exit.
+- Fixed the non webview radio stations that would stop playing after a few minutes of being opened fixed it so after a while of them playing they would stop playing. The non webview radio stations will now play with out stopping.
+- Fixed the widget radio size so it now fits into the widget window and doesn't get cut off.
 - Fixed opening movie files directly from File Explorer with Zink so file activation now reaches the video player instead of hanging on the startup loading screen.
-- Added support for media paths passed through Explorer command-line launches as well as packaged Windows file activation.
 - Fixed the startup overlay so it clears immediately when a video or music file is opened directly with Zink.
-- Added real timeouts to video and audio metadata probing so slow or unusual movie files cannot leave the app waiting forever before playback.
 - Fixed direct-open movie playback hanging on the video player page by keeping Windows-playable AAC and other supported audio streams on the native Windows media path instead of starting the custom FFmpeg audio pipe.
 - Fixed slow, laggy, and sometimes unresponsive app behaviour by reducing repeated Home Dashboard Spotify checks and throttling diagnostic log flushing/mirroring.
-- Added film poster artwork to the Video Library so film cards can show title poster art instead of only video thumbnails.
+- Fixed the Video Library file count so it stays on the first calculated total after navigating away and only updates when new files are found.
+- Fixed a Zink Connect browser issue where opening a YouTube video in a new window from a playing video could create a blank tab, break the original YouTube tab, or destabilise the browser.
+- YouTube new-window requests now open as independent Zink Connect tabs and navigate directly to the requested video page.
+- Fixed background game replay storage so Zink continuously deletes the oldest unused temporary video segments, keeps only the active replay window, and clears abandoned replay session folders on launch and exit without affecting saved clips.
+- Fixed replay clip saving when Windows Controlled Folder Access protects the Videos folder by completing clips in Zink's local workspace and saving them to Downloads\Zink Captures when Videos\Zink Captures is blocked.
 
-Version 3.0.34.0
+Updated features:
+- Updated the Zink video file overlay badge in File Explorer to use the refreshed Zink logo artwork.
+- Updated the package certificate to match the app publisher identity and extended the local signing certificate validity to 2046.
+- Updated Discord presence text so each Zink page now describes what that page is doing, such as using the Zink Connect browser, watching a video, playing Spotify, playing Zink Radio, using social pages, or playing on cloud gaming pages.
+
+
+
+- Improvements: 
+- Improved video seeking so playback can continue smoothly while dragging through the timeline.
+- Reduced background Video Library scan pressure for large folders by spacing automatic deep rescans further apart.
+- Reduced shell/startup memory pressure by decoding large background and startup images at display-friendly sizes.
+- Reduced duplicate film-cover lookups and unnecessary artwork work while keeping fallback video thumbnails.
+- Improved film cover artwork loading so poster artwork can replace plain video thumbnails when artwork is found.
+- Reduced repeated Video Library collection rebuilds while adding films so the page stays more responsive during large imports.
+- Improved Made saved films appear faster by loading the library list first, then filling thumbnails, durations, and poster artwork afterward.
+- Improved Kept Zink Discord Rich Presence enabled by default while still allowing it to clear properly when the setting is turned off.
+- Improved Video Library performance for large film folders by letting the film grid virtualize items instead of creating every film card at once.
+- Improved video subtitles so Zink now turns on one subtitle track at a time, supports matching sidecar subtitle files, and prevents duplicated caption text.
+- Improved video audio track selection so films with cinema audio tracks can fall back to a Windows-playable audio track when available.
+- Improved the naming of the Zink app to be more clear and concise for users.
+- Improved web-based Discord presence updates so Spotify, YouTube Music, and Amazon Music say they are playing the current page or track title when the embedded web page title is available.
+- Improved video, streaming, social, and cloud gaming web presence updates so Zink can show more specific activity from the active page title when available.
+- Improved the packaging setup so Visual Studio local package builds are signed by default while Store upload builds can still opt out when needed.
+- Improved Discord Rich Presence so Zink no longer advertises normal app pages as a main Playing activity, helping games and other Discord activities stay more visible.
+
+
+- New features added: 
+- Added HDR support for the background replay gaming record clips
+- Added support for media paths passed through Explorer command-line launches as well as packaged Windows file activation.
+- Added live video scrubbing to the video player so moving the time bar updates the video frame in real time while choosing where to watch.
+- Added real timeouts to video and audio metadata probing so slow or unusual movie files cannot leave the app waiting forever before playback.
+- Added clearer progress text while films are being added, including how many films have loaded out of the total.
+- Added a second loading phase for cover artwork so Zink shows progress while adding cover artwork for the films.
+- Added film poster artwork to the Video Library so film cards can show title poster art instead of only video thumbnails.
 - Added Duplicate Video Searcher to the Video section in the sidebar so duplicate videos in the Zink Video Library can be found in one place.
 - Added duplicate video results grouped by matching video name and file size, with quick actions to play each video.
 - Added Open file location for duplicate videos so Zink opens the folder containing the selected file and highlights it when Windows allows.
@@ -49,19 +78,16 @@ Version 3.0.34.0
 - Added a Delete button to duplicate video results so unwanted copies can be removed directly from the Duplicate Video Searcher page.
 - Added a custom Zink deletion confirmation after a duplicate video has been deleted.
 - Added search to the Video Library page so films can be found by name, file type, folder, and duration.
-- Fixed the Video Library file count so it stays on the first calculated total after navigating away and only updates when new files are found.
-- Improved video subtitles so Zink now turns on one subtitle track at a time, supports matching sidecar subtitle files, and prevents duplicated caption text.
-- Improved video audio track selection so films with cinema audio tracks can fall back to a Windows-playable audio track when available.
-- Added live video scrubbing to the video player so moving the time bar updates the video frame in real time while choosing where to watch.
-- Improved video seeking so playback can continue smoothly while dragging through the timeline.
 - Added Zink video file thumbnails so videos opened by default with Zink can show a video-style Zink thumbnail in Windows.
-- Updated the Zink video file overlay badge in File Explorer to use the refreshed Zink logo artwork.
-- Fixed a Zink Connect browser issue where opening a YouTube video in a new window from a playing video could create a blank tab, break the original YouTube tab, or destabilise the browser.
-- YouTube new-window requests now open as independent Zink Connect tabs and navigate directly to the requested video page.
-- Prevented accidental YouTube embed-page redirects from causing video player configuration error 153.
-- Fixed local MSIX package signing so Windows App Installer can verify the publisher certificate and enable the Install button.
-- Updated the package certificate to match the app publisher identity and extended the local signing certificate validity to 2046.
-- Improved the packaging setup so Visual Studio local package builds are signed by default while Store upload builds can still opt out when needed."
+- Added a Zink Connect setting to remember website sign-ins, saved passwords, cookies, and cookie preferences across app restarts, updates, and reinstalls when local app data is kept.
+- Added scrolling to the Zink Connect settings page so every browser setting remains reachable on smaller windows.
+- Added clearer Discord presence labels for Video Library, Duplicate Video Searcher, Radio Discovery, Equalizer, Visualizer, Widget Hub, Settings, About, and other sidebar pages.
+- Added a compatibility check for the gaming background recording so the Zink app will detect what's best for your system for recording settings and this inculdes 1080P at 60FPS  with HDR support as normal for lower ends devices and 4K 120FPS with HDR support for higher end devices.
+- Added Moved the zink app from .net 8 to .net 10 for better performance and stability.
+- Added a close or minimize dialog when you click the close button on the title bar, so you can choose to close the zink app or minimize the Zink app to the system tray..
+- Added automatic app-language detection so Zink follows the language selected in Windows by default.
+- Added a manual app-language selector in Settings so users can choose a different language and apply it across Zink's pages, buttons, dialogs, menus, and secondary windows.
+- Added live language search in Settings so languages can be found by language name, native name, country, regional variant, or language code."
                 ),
                 // 3.0.33.0
                 ["3.0.33.0"] = (
@@ -221,9 +247,9 @@ The Changed features in the Zink App --
                     Released: new DateTime(2025, 7, 24),
                     Notes:
 @"Initial release of Zink.
-• Core music, radio, and video foundations.
-• First sidebar layout and navigation.
-• Basic player controls and page structure."
+â€¢ Core music, radio, and video foundations.
+â€¢ First sidebar layout and navigation.
+â€¢ Basic player controls and page structure."
                 ),
             };
 

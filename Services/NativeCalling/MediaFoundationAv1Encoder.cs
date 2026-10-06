@@ -18,8 +18,10 @@ namespace Zink.Services.NativeCalling
         private static readonly Guid CodecApiAvEncCommonLowLatency = new("9D3ECD55-89E8-490A-970A-0C9548D5A56E");
         private static readonly Guid CodecApiAvEncCommonRealTime = new("143A0FF6-A131-43DA-B81E-98FBB8EC378E");
         private const int MfENeedMoreInput = unchecked((int)0xC00D6D72);
+        private const int MfENotAccepting = unchecked((int)0xC00D36B5);
         private const int MftOutputStreamProvidesSamples = 0x00000100;
         private const int MftOutputStreamCanProvideSamples = 0x00000200;
+        private const int ImfTransformProcessOutputVtableSlot = 25;
 
         private readonly Transform _encoder;
         private readonly int _width;
@@ -31,6 +33,15 @@ namespace Zink.Services.NativeCalling
         private int _frameIndex;
         private int _forceNextKeyFrame = 1;
         private bool _loggedFirstOutputFrame;
+        private bool _loggedOutputStreamInfo;
+        private MediaEventGenerator? _eventGenerator;
+        private readonly object _eventSync = new();
+        private Thread? _eventThread;
+        private bool _stopEventThread;
+        private int _inputRequests;
+        private int _outputRequests;
+        private bool _asyncMft;
+        private ProcessOutputNativeDelegate? _processOutputNative;
 
         static MediaFoundationAv1Encoder()
         {
@@ -41,12 +52,17 @@ namespace Zink.Services.NativeCalling
         {
             _width = width;
             _height = height;
-            _frameRate = Math.Clamp(frameRate, 1, NativeScreenShareStreamingService.TargetFps);
+            _frameRate = Math.Clamp(frameRate, 1, ScreenShareCapturePipeline.TargetFps);
             _frameDuration100Ns = 10_000_000L / _frameRate;
             _nv12Buffer = new byte[_width * _height * 3 / 2];
 
             _encoder = CreateEncoderTransform();
             ConfigureEncoder(bitrate);
+            InitializeAsyncEventPump();
+            DiagnosticLogService.WriteLine(
+                $"[ScreenShare:AV1X] Configured encoder: mode='{EncoderMode}'; hardware={IsHardwareAccelerated}; input={InputFormat}; size={_width}x{_height}; fps={_frameRate}; bitrate={bitrate}; synchronous=true.");
+            ScreenShareTestLogService.WriteLine(
+                $"av1-configured mode='{EncoderMode}'; hardware={IsHardwareAccelerated}; input={InputFormat}; size={_width}x{_height}; fps={_frameRate}; bitrate={bitrate}; synchronous=true");
         }
 
         public string EncoderMode { get; private set; } = "Windows Media Foundation AV1X";
@@ -60,6 +76,9 @@ namespace Zink.Services.NativeCalling
 
         public IReadOnlyList<EncodedVideoFrame> Encode(Bitmap bitmap)
         {
+            if (_asyncMft && _frameIndex > 0 && !WaitForInputRequest())
+                return Array.Empty<EncodedVideoFrame>();
+
             using var inputBuffer = MediaFactory.CreateMemoryBuffer(_nv12Buffer.Length);
             int maxLength;
             int currentLength;
@@ -88,9 +107,41 @@ namespace Zink.Services.NativeCalling
                 try { sample.Set(SampleAttributeKeys.CleanPoint, true); } catch { }
             }
 
-            _encoder.ProcessInput(0, sample, 0);
+            try
+            {
+                var submitted = false;
+                for (var attempt = 0; attempt < 3 && !submitted; attempt++)
+                {
+                    try
+                    {
+                        _encoder.ProcessInput(0, sample, 0);
+                        submitted = true;
+                    }
+                    catch (SharpDXException ex) when (ex.ResultCode.Code == MfENotAccepting && attempt < 2)
+                    {
+                        Thread.Sleep(1);
+                        WaitForInputRequest();
+                    }
+                }
+
+                if (!submitted)
+                    return Array.Empty<EncodedVideoFrame>();
+            }
+            catch (Exception ex)
+            {
+                DiagnosticLogService.WriteLine(
+                    $"[ScreenShare:AV1X] ProcessInput failed: mode='{EncoderMode}'; size={_width}x{_height}; fps={_frameRate}; sampleBytes={_nv12Buffer.Length}; error={ex}");
+                ScreenShareTestLogService.WriteLine($"av1-process-input-failed mode='{EncoderMode}'; error={ex}");
+                throw;
+            }
             _sampleTime += _frameDuration100Ns;
             _frameIndex++;
+
+            if (_asyncMft)
+            {
+                WaitForOutputRequest();
+                return DrainOutput(forceKeyFrame);
+            }
 
             return DrainOutput(forceKeyFrame);
         }
@@ -130,42 +181,67 @@ namespace Zink.Services.NativeCalling
         {
             var frames = new List<EncodedVideoFrame>();
             _encoder.GetOutputStreamInfo(0, out var info);
-            var outputBufferSize = Math.Max(info.CbSize, _width * _height);
+            var outputBufferSize = Math.Max(Math.Max(info.CbSize, _width * _height), _width * _height * 4);
             var useEncoderAllocatedOutput =
                 (info.DwFlags & MftOutputStreamProvidesSamples) != 0 ||
                 (info.DwFlags & MftOutputStreamCanProvideSamples) != 0;
 
+            if (_asyncMft && !TryConsumeOutputRequest())
+                return frames;
+
+            if (!_loggedOutputStreamInfo)
+            {
+                _loggedOutputStreamInfo = true;
+                DiagnosticLogService.WriteLine(
+                    $"[ScreenShare:AV1X] Output stream info: flags=0x{info.DwFlags:X}; bufferSize={info.CbSize}; callerBufferSize={outputBufferSize}; encoderAllocatedOutput={useEncoderAllocatedOutput}.");
+            }
+
             while (true)
             {
-                Sample? outputSample = null;
-                MediaBuffer? outputBuffer = null;
-                TOutputDataBuffer[]? output = null;
+                Sample? callerOutputSample = null;
+                MediaBuffer? callerOutputBuffer = null;
+                NativeProcessOutputResult? nativeOutput = null;
                 try
                 {
                     if (!useEncoderAllocatedOutput)
                     {
-                        outputSample = MediaFactory.CreateSample();
-                        outputBuffer = MediaFactory.CreateMemoryBuffer(outputBufferSize);
-                        outputSample.AddBuffer(outputBuffer);
+                        callerOutputSample = MediaFactory.CreateSample();
+                        callerOutputBuffer = MediaFactory.CreateMemoryBuffer(outputBufferSize);
+                        callerOutputSample.AddBuffer(callerOutputBuffer);
                     }
-
-                    output = new[]
-                    {
-                        new TOutputDataBuffer { DwStreamID = 0, PSample = outputSample }
-                    };
 
                     try
                     {
-                        _encoder.ProcessOutput(TransformProcessOutputFlags.None, output, out _);
+                        nativeOutput = ProcessOutputNative(callerOutputSample, useEncoderAllocatedOutput);
                     }
                     catch (SharpDXException ex) when (ex.ResultCode.Code == MfENeedMoreInput)
                     {
+                        if (_loggedFirstOutputFrame)
+                            DiagnosticLogService.WriteLine("[ScreenShare:AV1X] ProcessOutput requested more input after a HaveOutput event.");
+                        break;
+                    }
+                    catch (Exception ex)
+                    {
+                        DiagnosticLogService.WriteLine(
+                            $"[ScreenShare:AV1X] ProcessOutput failed: mode='{EncoderMode}'; flags=0x{info.DwFlags:X}; error={ex}");
+                        ScreenShareTestLogService.WriteLine($"av1-process-output-failed mode='{EncoderMode}'; flags=0x{info.DwFlags:X}; error={ex}");
+                        throw;
+                    }
+
+                    var sampleToRead = nativeOutput.Sample ?? callerOutputSample;
+                    if (sampleToRead == null)
+                    {
+                        DiagnosticLogService.WriteLine($"[ScreenShare:AV1X] ProcessOutput returned no output sample; status=0x{nativeOutput.OutputBufferStatus:X}; processStatus={nativeOutput.ProcessStatus}.");
+                        ScreenShareTestLogService.WriteLine($"av1-output-empty reason=null-sample status=0x{nativeOutput.OutputBufferStatus:X}");
                         break;
                     }
 
-                    var sampleToRead = output[0].PSample ?? outputSample;
-                    if (sampleToRead == null || !TryReadSampleBytes(sampleToRead, out var data))
+                    if (!TryReadSampleBytes(sampleToRead, out var data))
+                    {
+                        DiagnosticLogService.WriteLine("[ScreenShare:AV1X] ProcessOutput returned a sample that could not be read.");
+                        ScreenShareTestLogService.WriteLine("av1-output-empty reason=unreadable-sample");
                         break;
+                    }
 
                     if (!_loggedFirstOutputFrame)
                     {
@@ -174,18 +250,75 @@ namespace Zink.Services.NativeCalling
                     }
 
                     frames.Add(new EncodedVideoFrame(data, keyFrameHint, GetSampleTimestampMilliseconds(sampleToRead), ScreenShareCodecNames.Av1));
+
+                    if (_asyncMft)
+                        break;
                 }
                 finally
                 {
-                    if (output != null && useEncoderAllocatedOutput)
-                        output[0].PSample?.Dispose();
-
-                    outputBuffer?.Dispose();
-                    outputSample?.Dispose();
+                    nativeOutput?.Dispose();
+                    callerOutputBuffer?.Dispose();
+                    callerOutputSample?.Dispose();
                 }
             }
 
             return frames;
+        }
+
+        private NativeProcessOutputResult ProcessOutputNative(
+            Sample? callerOutputSample,
+            bool useEncoderAllocatedOutput)
+        {
+            var nativeBuffer = new NativeMftOutputDataBuffer
+            {
+                DwStreamID = 0,
+                PSample = callerOutputSample?.NativePointer ?? IntPtr.Zero,
+                DwStatus = 0,
+                PEvents = IntPtr.Zero
+            };
+            var nativeBufferPtr = Marshal.AllocHGlobal(Marshal.SizeOf<NativeMftOutputDataBuffer>());
+
+            try
+            {
+                Marshal.StructureToPtr(nativeBuffer, nativeBufferPtr, false);
+                var hr = GetNativeProcessOutput()(
+                    _encoder.NativePointer,
+                    (int)TransformProcessOutputFlags.None,
+                    1,
+                    nativeBufferPtr,
+                    out var processStatus);
+                new Result(hr).CheckError();
+
+                nativeBuffer = Marshal.PtrToStructure<NativeMftOutputDataBuffer>(nativeBufferPtr);
+                Sample? outputSample = null;
+                Collection? outputEvents = null;
+
+                if (useEncoderAllocatedOutput && nativeBuffer.PSample != IntPtr.Zero)
+                    outputSample = new Sample(nativeBuffer.PSample);
+                if (nativeBuffer.PEvents != IntPtr.Zero)
+                    outputEvents = new Collection(nativeBuffer.PEvents);
+
+                return new NativeProcessOutputResult(
+                    outputSample,
+                    outputEvents,
+                    nativeBuffer.DwStatus,
+                    (TransformProcessOutputStatus)processStatus);
+            }
+            finally
+            {
+                Marshal.FreeHGlobal(nativeBufferPtr);
+            }
+        }
+
+        private ProcessOutputNativeDelegate GetNativeProcessOutput()
+        {
+            if (_processOutputNative != null)
+                return _processOutputNative;
+
+            var vtable = Marshal.ReadIntPtr(_encoder.NativePointer);
+            var processOutputPtr = Marshal.ReadIntPtr(vtable, IntPtr.Size * ImfTransformProcessOutputVtableSlot);
+            _processOutputNative = Marshal.GetDelegateForFunctionPointer<ProcessOutputNativeDelegate>(processOutputPtr);
+            return _processOutputNative;
         }
 
         private Transform CreateEncoderTransform()
@@ -201,7 +334,13 @@ namespace Zink.Services.NativeCalling
                 GuidSubtype = VideoFormatGuids.NV12
             };
 
-            var activations = EnumerateEncoderActivations(inputInfo, outputInfo, TransformEnumFlag.Hardware | TransformEnumFlag.Asyncmft | TransformEnumFlag.SortAndFilter).ToList();
+            // AV1 hardware MFTs commonly require the asynchronous unlock contract.
+            // Enumerating them without Asyncmft produces MF_E_ASYNC_MFT_CANCELED
+            // (0xC00D6D77) during SetInputType/stream startup.
+            var activations = EnumerateEncoderActivations(
+                inputInfo,
+                outputInfo,
+                TransformEnumFlag.Hardware | TransformEnumFlag.Asyncmft | TransformEnumFlag.SortAndFilter).ToList();
             if (activations.Count == 0)
                 activations = EnumerateEncoderActivations(inputInfo, outputInfo, TransformEnumFlag.SortAndFilter).ToList();
             foreach (var activation in activations)
@@ -211,6 +350,7 @@ namespace Zink.Services.NativeCalling
                     var name = GetActivationString(activation, TransformAttributeKeys.MftFriendlyNameAttribute, "Windows AV1 encoder");
                     var hardware = GetActivationString(activation, TransformAttributeKeys.MftEnumHardwareVendorIdAttribute, "");
                     IsHardwareAccelerated = !string.IsNullOrWhiteSpace(hardware);
+                    _asyncMft = IsHardwareAccelerated;
                     EncoderMode = IsHardwareAccelerated
                         ? $"{ScreenShareCodecNames.AV1XDisplayName} hardware MFT: {name}"
                         : $"{ScreenShareCodecNames.AV1XDisplayName} software MFT: {name}";
@@ -231,7 +371,8 @@ namespace Zink.Services.NativeCalling
             try
             {
                 using var attributes = _encoder.Attributes;
-                attributes.Set(TransformAttributeKeys.TransformAsyncUnlock, 1);
+                if (_asyncMft)
+                    attributes.Set(TransformAttributeKeys.TransformAsyncUnlock, 1);
                 attributes.Set(SinkWriterAttributeKeys.LowLatency.Guid, 1);
                 attributes.Set(CodecApiAvEncCommonLowLatency, 1);
                 attributes.Set(CodecApiAvEncCommonRealTime, 1);
@@ -239,6 +380,159 @@ namespace Zink.Services.NativeCalling
             catch (Exception ex)
             {
                 Debug.WriteLine($"[ScreenShare:AV1X] Realtime AV1X attributes skipped: {ex.Message}");
+            }
+        }
+
+        private void InitializeAsyncEventPump()
+        {
+            if (!_asyncMft)
+                return;
+
+            try
+            {
+                _eventGenerator = _encoder.QueryInterfaceOrNull<MediaEventGenerator>();
+                if (_eventGenerator == null)
+                {
+                    _asyncMft = false;
+                    DiagnosticLogService.WriteLine("[ScreenShare:AV1X] Async AV1 MFT did not expose a media event generator.");
+                    return;
+                }
+
+                lock (_eventSync)
+                {
+                    _stopEventThread = false;
+                    _inputRequests = 0;
+                    _outputRequests = 0;
+                }
+
+                _eventThread = new Thread(AsyncEventLoop)
+                {
+                    IsBackground = true,
+                    Name = "Zink AV1 MFT Event Pump",
+                    Priority = ThreadPriority.AboveNormal
+                };
+                _eventThread.Start();
+                DiagnosticLogService.WriteLine("[ScreenShare:AV1X] Asynchronous AV1 MFT event pump enabled.");
+                ScreenShareTestLogService.WriteLine("av1-event-pump enabled=true");
+            }
+            catch (Exception ex)
+            {
+                _asyncMft = false;
+                _eventGenerator = null;
+                DiagnosticLogService.WriteLine($"[ScreenShare:AV1X] Failed to initialize async event pump: {ex}");
+                ScreenShareTestLogService.WriteLine($"av1-event-pump-failed error={ex}");
+            }
+        }
+
+        private void AsyncEventLoop()
+        {
+            while (true)
+            {
+                MediaEventGenerator? generator;
+                lock (_eventSync)
+                {
+                    if (_stopEventThread)
+                        return;
+
+                    generator = _eventGenerator;
+                }
+
+                if (generator == null)
+                    return;
+
+                try
+                {
+                    using var mediaEvent = generator.GetEvent(isBlocking: true);
+                    mediaEvent.Status.CheckError();
+                    lock (_eventSync)
+                    {
+                        switch (mediaEvent.TypeInfo)
+                        {
+                            case MediaEventTypes.TransformNeedInput:
+                                _inputRequests++;
+                                break;
+                            case MediaEventTypes.TransformHaveOutput:
+                                _outputRequests++;
+                                break;
+                        }
+
+                        if ((_inputRequests + _outputRequests) <= 24)
+                        {
+                            DiagnosticLogService.WriteLine(
+                                $"[ScreenShare:AV1X] Async MFT event={mediaEvent.TypeInfo}; needInput={_inputRequests}; haveOutput={_outputRequests}.");
+                            ScreenShareTestLogService.WriteLine(
+                                $"av1-event type={mediaEvent.TypeInfo}; needInput={_inputRequests}; haveOutput={_outputRequests}");
+                        }
+                    }
+                }
+                catch (ObjectDisposedException)
+                {
+                    return;
+                }
+                catch (Exception ex)
+                {
+                    lock (_eventSync)
+                    {
+                        if (_stopEventThread)
+                            return;
+                    }
+
+                    DiagnosticLogService.WriteLine($"[ScreenShare:AV1X] Async MFT event pump error: {ex.Message}");
+                    Thread.Sleep(5);
+                }
+            }
+        }
+
+        private bool TryConsumeInputRequest()
+        {
+            lock (_eventSync)
+            {
+                if (_inputRequests <= 0)
+                    return false;
+
+                _inputRequests--;
+                return true;
+            }
+        }
+
+        private bool TryConsumeOutputRequest()
+        {
+            lock (_eventSync)
+            {
+                if (_outputRequests <= 0)
+                    return false;
+
+                _outputRequests--;
+                return true;
+            }
+        }
+
+        private bool WaitForInputRequest()
+        {
+            var deadline = Stopwatch.GetTimestamp() + Stopwatch.Frequency / 60;
+            while (Stopwatch.GetTimestamp() < deadline)
+            {
+                if (TryConsumeInputRequest())
+                    return true;
+
+                Thread.Yield();
+            }
+
+            return false;
+        }
+
+        private void WaitForOutputRequest()
+        {
+            var deadline = Stopwatch.GetTimestamp() + Stopwatch.Frequency / 60;
+            while (Stopwatch.GetTimestamp() < deadline)
+            {
+                lock (_eventSync)
+                {
+                    if (_outputRequests > 0)
+                        return;
+                }
+
+                Thread.Yield();
             }
         }
 
@@ -325,8 +619,9 @@ namespace Zink.Services.NativeCalling
                     contiguous.Unlock();
                 }
             }
-            catch
+            catch (Exception ex)
             {
+                DiagnosticLogService.WriteLine($"[ScreenShare:AV1X] Output sample read failed: {ex}");
                 return false;
             }
         }
@@ -402,6 +697,21 @@ namespace Zink.Services.NativeCalling
 
         public void Dispose()
         {
+            lock (_eventSync)
+            {
+                _stopEventThread = true;
+            }
+
+            try { _eventGenerator?.Dispose(); } catch { }
+            try
+            {
+                if (_eventThread != null && _eventThread != Thread.CurrentThread)
+                    _eventThread.Join(200);
+            }
+            catch { }
+
+            _eventGenerator = null;
+            _eventThread = null;
             try { _encoder.ProcessMessage(TMessageType.NotifyEndOfStream, IntPtr.Zero); } catch { }
             try { _encoder.ProcessMessage(TMessageType.NotifyEndStreaming, IntPtr.Zero); } catch { }
             _encoder.Dispose();
@@ -419,11 +729,54 @@ namespace Zink.Services.NativeCalling
         [DllImport("ole32.dll", ExactSpelling = true)]
         private static extern void CoTaskMemFree(IntPtr ptr);
 
+        [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+        private delegate int ProcessOutputNativeDelegate(
+            IntPtr transform,
+            int flags,
+            int outputBufferCount,
+            IntPtr outputSamples,
+            out int status);
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct NativeMftOutputDataBuffer
+        {
+            public int DwStreamID;
+            public IntPtr PSample;
+            public int DwStatus;
+            public IntPtr PEvents;
+        }
+
         [StructLayout(LayoutKind.Sequential)]
         private struct NativeMftRegisterTypeInfo
         {
             public Guid GuidMajorType;
             public Guid GuidSubtype;
+        }
+
+        private sealed class NativeProcessOutputResult : IDisposable
+        {
+            public NativeProcessOutputResult(
+                Sample? sample,
+                Collection? events,
+                int outputBufferStatus,
+                TransformProcessOutputStatus processStatus)
+            {
+                Sample = sample;
+                Events = events;
+                OutputBufferStatus = outputBufferStatus;
+                ProcessStatus = processStatus;
+            }
+
+            public Sample? Sample { get; }
+            public Collection? Events { get; }
+            public int OutputBufferStatus { get; }
+            public TransformProcessOutputStatus ProcessStatus { get; }
+
+            public void Dispose()
+            {
+                try { Sample?.Dispose(); } catch { }
+                try { Events?.Dispose(); } catch { }
+            }
         }
     }
 

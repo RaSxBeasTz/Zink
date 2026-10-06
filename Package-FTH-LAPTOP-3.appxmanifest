@@ -13,10 +13,10 @@
   <Identity
     Name="FrancisHayle.Zink-MusicVideoPlayer"
     Publisher="CN=Franc"
-    Version="3.0.38.0" />
+    Version="4.0.0.0" />
 
   <Properties>
-    <DisplayName>Zink Music Video Player</DisplayName>
+    <DisplayName>Zink.</DisplayName>
     <PublisherDisplayName>Francis Hayle</PublisherDisplayName>
     <Logo>Assets\StoreLogo.png</Logo>
   </Properties>
@@ -39,7 +39,7 @@
       EntryPoint="$targetentrypoint$">
 
       <uap:VisualElements
-        DisplayName="Zink Music Video Player"
+        DisplayName="Zink"
         Description="Zink - Your all-in-one media hub"
         BackgroundColor="transparent"
         Square150x150Logo="Assets\Square150x150Logo.png"
@@ -61,7 +61,7 @@
           <uap5:StartupTask
             TaskId="ZinkStartupTask"
             Enabled="false"
-            DisplayName="Zink Music Video Player" />
+            DisplayName="Zink" />
         </uap5:Extension>
       </Extensions>
 

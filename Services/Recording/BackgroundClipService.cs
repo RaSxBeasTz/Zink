@@ -55,7 +55,8 @@ namespace Zink.Services.Recording
 
         public async Task<string> SaveLast45SecondsAsync()
         {
-            string path = await ManualRecordingService.Instance.SaveReplayAsync(TimeSpan.FromSeconds(45));
+            string path = await ManualRecordingService.Instance.SaveReplayAsync(
+                TimeSpan.FromSeconds(RecordingPreferences.BackgroundReplayDurationSeconds));
             StatusChanged?.Invoke(this, $"Saved last 45 seconds: {path}");
             return path;
         }

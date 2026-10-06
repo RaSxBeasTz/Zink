@@ -1,6 +1,8 @@
 <Project>
   <PropertyGroup>
-    <BaseIntermediateOutputPath>obj\$(MSBuildProjectName)\</BaseIntermediateOutputPath>
+    <!-- Keep generated build files outside the OneDrive-synchronized project folder. -->
+    <BaseOutputPath>$(TEMP)\ZinkBuild\bin\</BaseOutputPath>
+    <BaseIntermediateOutputPath>$(TEMP)\ZinkBuild\obj\$(MSBuildProjectName)\</BaseIntermediateOutputPath>
     <MSBuildProjectExtensionsPath>$(BaseIntermediateOutputPath)</MSBuildProjectExtensionsPath>
     <DefaultItemExcludes>$(DefaultItemExcludes);obj\**;bin\**</DefaultItemExcludes>
   </PropertyGroup>

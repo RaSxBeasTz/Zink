@@ -9,16 +9,27 @@ namespace Zink.ViewModels
     {
         private readonly AppPlaybackService _s = AppPlaybackService.Instance;
         private readonly DispatcherQueue _ui;
+        private Uri? _lastArtworkOrLogo;
 
         public RadioWidgetViewModel()
         {
             // Capture the UI thread's DispatcherQueue
             _ui = DispatcherQueue.GetForCurrentThread();
+            _lastArtworkOrLogo = _s.ArtworkOrLogo;
 
             // Forward service changes to the ViewModel, but marshal to UI thread
             _s.PropertyChanged += (_, e) =>
             {
                 if (e is null) return;
+
+                if (e.PropertyName == nameof(AppPlaybackService.ArtworkOrLogo))
+                {
+                    var artworkOrLogo = _s.ArtworkOrLogo;
+                    if (Equals(_lastArtworkOrLogo, artworkOrLogo))
+                        return;
+
+                    _lastArtworkOrLogo = artworkOrLogo;
+                }
 
                 if (_ui?.HasThreadAccess == true)
                 {

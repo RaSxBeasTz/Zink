@@ -143,6 +143,12 @@
                     </NavigationViewItem.Icon>
                 </NavigationViewItem>
 
+                <NavigationViewItem Content="Tools" Tag="Tools">
+                    <NavigationViewItem.Icon>
+                        <FontIcon Glyph="&#xE90F;" FontFamily="Segoe Fluent Icons"/>
+                    </NavigationViewItem.Icon>
+                </NavigationViewItem>
+
                 <NavigationViewItem Content="Music" SelectsOnInvoked="False">
                     <NavigationViewItem.Icon>
                         <FontIcon Glyph="&#xE8D6;" FontFamily="Segoe Fluent Icons"/>
@@ -282,47 +288,7 @@
                             </NavigationViewItem.Icon>
                         </NavigationViewItem>
 
-                        <NavigationViewItem Content="Streaming" Tag="Streaming">
-                            <NavigationViewItem.Icon>
-                                <FontIcon Glyph="&#xE93E;" FontFamily="Segoe Fluent Icons"/>
-                            </NavigationViewItem.Icon>
-                        </NavigationViewItem>
-
-                        <NavigationViewItem Content="YouTube" Tag="YouTubeStreaming">
-                            <NavigationViewItem.Icon>
-                                <FontIcon Glyph="&#xE93E;" FontFamily="Segoe Fluent Icons"/>
-                            </NavigationViewItem.Icon>
-                        </NavigationViewItem>
-
-                        <NavigationViewItem Content="Kick" Tag="KickStreaming">
-                            <NavigationViewItem.Icon>
-                                <FontIcon Glyph="&#xE93E;" FontFamily="Segoe Fluent Icons"/>
-                            </NavigationViewItem.Icon>
-                        </NavigationViewItem>
-
-                        <NavigationViewItem Content="Instagram" Tag="InstagramStreaming">
-                            <NavigationViewItem.Icon>
-                                <FontIcon Glyph="&#xE93E;" FontFamily="Segoe Fluent Icons"/>
-                            </NavigationViewItem.Icon>
-                        </NavigationViewItem>
-
-                        <NavigationViewItem Content="TikTok" Tag="TikTokStreaming">
-                            <NavigationViewItem.Icon>
-                                <FontIcon Glyph="&#xE93E;" FontFamily="Segoe Fluent Icons"/>
-                            </NavigationViewItem.Icon>
-                        </NavigationViewItem>
-
-                        <NavigationViewItem Content="Facebook Live" Tag="FacebookStreaming">
-                            <NavigationViewItem.Icon>
-                                <FontIcon Glyph="&#xE93E;" FontFamily="Segoe Fluent Icons"/>
-                            </NavigationViewItem.Icon>
-                        </NavigationViewItem>
-
-                        <NavigationViewItem Content="X Live" Tag="XStreaming">
-                            <NavigationViewItem.Icon>
-                                <FontIcon Glyph="&#xE93E;" FontFamily="Segoe Fluent Icons"/>
-                            </NavigationViewItem.Icon>
-                        </NavigationViewItem>
+                        <!-- Streaming pages moved to top-level 'Streaming' group -->
                     </NavigationViewItem.MenuItems>
                 </NavigationViewItem>
 
@@ -428,7 +394,7 @@
                     </NavigationViewItem.MenuItems>
                 </NavigationViewItem>
 
-                <NavigationViewItem Content="Zink Social" Tag="ZinkSocialLocked" SelectsOnInvoked="True" Tapped="ZinkSocialLocked_Tapped">
+                <NavigationViewItem Content="Zink Social" Tag="ZinkSocial" SelectsOnInvoked="True">
                     <NavigationViewItem.Icon>
                         <FontIcon Glyph="&#xE125;" FontFamily="Segoe Fluent Icons"/>
                     </NavigationViewItem.Icon>
@@ -587,6 +553,55 @@
                             </NavigationViewItem.Icon>
                         </NavigationViewItem>
 
+                    </NavigationViewItem.MenuItems>
+                </NavigationViewItem>
+
+                <NavigationViewItem Content="Streaming" SelectsOnInvoked="False">
+                    <NavigationViewItem.Icon>
+                        <FontIcon Glyph="&#xE7E5;" FontFamily="Segoe Fluent Icons"/>
+                    </NavigationViewItem.Icon>
+                    <NavigationViewItem.MenuItems>
+                        <NavigationViewItem Content="Twitch Streaming" Tag="Streaming">
+                            <NavigationViewItem.Icon>
+                                <FontIcon Glyph="&#xE714;" FontFamily="Segoe Fluent Icons"/>
+                            </NavigationViewItem.Icon>
+                        </NavigationViewItem>
+
+                        <NavigationViewItem Content="YouTube" Tag="YouTubeStreaming">
+                            <NavigationViewItem.Icon>
+                                <FontIcon Glyph="&#xE774;" FontFamily="Segoe Fluent Icons"/>
+                            </NavigationViewItem.Icon>
+                        </NavigationViewItem>
+
+                        <NavigationViewItem Content="Kick" Tag="KickStreaming">
+                            <NavigationViewItem.Icon>
+                                <FontIcon Glyph="&#xE714;" FontFamily="Segoe Fluent Icons"/>
+                            </NavigationViewItem.Icon>
+                        </NavigationViewItem>
+
+                        <NavigationViewItem Content="Instagram" Tag="InstagramStreaming">
+                            <NavigationViewItem.Icon>
+                                <FontIcon Glyph="&#xE722;" FontFamily="Segoe Fluent Icons"/>
+                            </NavigationViewItem.Icon>
+                        </NavigationViewItem>
+
+                        <NavigationViewItem Content="TikTok" Tag="TikTokStreaming">
+                            <NavigationViewItem.Icon>
+                                <FontIcon Glyph="&#xE714;" FontFamily="Segoe Fluent Icons"/>
+                            </NavigationViewItem.Icon>
+                        </NavigationViewItem>
+
+                        <NavigationViewItem Content="Facebook" Tag="FacebookStreaming">
+                            <NavigationViewItem.Icon>
+                                <FontIcon Glyph="&#xE77B;" FontFamily="Segoe Fluent Icons"/>
+                            </NavigationViewItem.Icon>
+                        </NavigationViewItem>
+
+                        <NavigationViewItem Content="X" Tag="XStreaming">
+                            <NavigationViewItem.Icon>
+                                <FontIcon Glyph="&#xE774;" FontFamily="Segoe Fluent Icons"/>
+                            </NavigationViewItem.Icon>
+                        </NavigationViewItem>
                     </NavigationViewItem.MenuItems>
                 </NavigationViewItem>
 

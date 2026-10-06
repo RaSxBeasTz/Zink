@@ -37,6 +37,7 @@ namespace Zink.Windows
         {
             Title = "Connect Twitch";
             Content = BuildUi();
+            Zink.Services.LocalizationService.RegisterWindow(this);
             Closed += (_, _) =>
             {
                 if (!_completed)

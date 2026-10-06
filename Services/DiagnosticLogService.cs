@@ -3,9 +3,12 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Globalization;
 using System.IO;
+using System.Linq;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
+using Windows.ApplicationModel;
 using Windows.Storage;
 
 namespace Zink.Services
@@ -22,6 +25,9 @@ namespace Zink.Services
 
         private static FileStream? _deviceFileStream;
         private static StreamWriter? _deviceWriter;
+        private static FileStream? _screenShareSessionFileStream;
+        private static StreamWriter? _screenShareSessionWriter;
+        private static string? _screenShareSessionLogPath;
         private static ZinkTraceListener? _traceListener;
         private static TextWriter? _originalConsoleOut;
         private static TextWriter? _originalConsoleError;
@@ -46,11 +52,52 @@ namespace Zink.Services
             }
         }
 
+        public static void WriteLaunchContext(string stage, string? activationArguments = null)
+        {
+            try
+            {
+                var process = Process.GetCurrentProcess();
+                var packageName = "unpackaged";
+                var packageFamily = "unpackaged";
+                try
+                {
+                    packageName = Package.Current.Id.Name;
+                    packageFamily = Package.Current.Id.FamilyName;
+                }
+                catch
+                {
+                }
+
+                WriteLine(
+                    $"[Launch] stage={stage}; utc={DateTimeOffset.UtcNow:O}; pid={process.Id}; " +
+                    $"processArch={RuntimeInformation.ProcessArchitecture}; osArch={RuntimeInformation.OSArchitecture}; " +
+                    $"is64Bit={Environment.Is64BitProcess}; framework={System.Runtime.InteropServices.RuntimeInformation.FrameworkDescription}; " +
+                    $"os={Environment.OSVersion}; machine={Environment.MachineName}; user={Environment.UserName}; " +
+                    $"package={packageName}; family={packageFamily}; base='{AppContext.BaseDirectory}'; " +
+                    $"current='{Environment.CurrentDirectory}'; args='{activationArguments ?? ""}'; " +
+                    $"commandLine='{Environment.CommandLine}'");
+                Flush();
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"[Diagnostics] Launch context logging failed: {ex}");
+            }
+        }
+
         public static string DeviceName => SanitizeFileName(Environment.MachineName, "unknown-device");
 
         public static string CurrentLogPath => CurrentDeviceLogPath;
 
         public static string CurrentDeviceLogPath => Path.Combine(LogDirectoryPath, $"zink-diagnostics-{DeviceName}-latest.txt");
+
+        public static string? CurrentScreenShareSessionLogPath
+        {
+            get
+            {
+                lock (SyncRoot)
+                    return _screenShareSessionLogPath;
+            }
+        }
 
         public static event EventHandler? StateChanged;
 
@@ -154,11 +201,52 @@ namespace Zink.Services
                 {
                     _deviceWriter?.Flush();
                     _deviceFileStream?.Flush(true);
+                    _screenShareSessionWriter?.Flush();
+                    _screenShareSessionFileStream?.Flush(true);
                     PublishLogSnapshotsLocked(force: true);
                 }
                 catch
                 {
                 }
+            }
+        }
+
+        public static string StartScreenShareSession(string? reason = null)
+        {
+            lock (SyncRoot)
+            {
+                InitializeFromSettings();
+                if (_screenShareSessionWriter != null && _screenShareSessionLogPath != null)
+                {
+                    WriteScreenShareSessionLineLocked(
+                        $"{Timestamp()} [{DeviceName}] [T{Environment.CurrentManagedThreadId}] Screen-share start signal ignored; session already active; reason={reason ?? "unspecified"}.");
+                    return _screenShareSessionLogPath;
+                }
+
+                CloseScreenShareSessionLocked();
+
+                var sessionName = $"zink-screen-share-{DeviceName}-{DateTimeOffset.Now:yyyyMMdd-HHmmss-fff}.txt";
+                var sessionPath = Path.Combine(LogDirectoryPath, sessionName);
+                _screenShareSessionFileStream = new FileStream(sessionPath, FileMode.CreateNew, FileAccess.Write, FileShare.Read);
+                _screenShareSessionWriter = new StreamWriter(_screenShareSessionFileStream, Utf8NoBom)
+                {
+                    AutoFlush = false
+                };
+                _screenShareSessionLogPath = sessionPath;
+                WriteScreenShareSessionLineLocked($"=== Screen-share diagnostic session started; device={DeviceName}; pid={Environment.ProcessId}; reason={reason ?? "unspecified"} ===");
+                return sessionPath;
+            }
+        }
+
+        public static void StopScreenShareSession(string? reason = null)
+        {
+            lock (SyncRoot)
+            {
+                if (_screenShareSessionWriter == null)
+                    return;
+
+                WriteScreenShareSessionLineLocked($"=== Screen-share diagnostic session stopped; reason={reason ?? "unspecified"} ===");
+                CloseScreenShareSessionLocked();
             }
         }
 
@@ -198,6 +286,7 @@ namespace Zink.Services
                 WriteLineLocked("Device: " + Environment.MachineName);
                 WriteLineLocked("Log file: " + CurrentLogPath);
                 WriteLineLocked("App base: " + AppContext.BaseDirectory);
+                WriteLineLocked("Build identifier: " + GetBuildIdentifier());
                 WriteLineLocked("Log directory: " + LogDirectoryPath);
                 WriteLineLocked("Log mirrors: " + string.Join(" | ", GetLogDirectoryCandidates()));
                 WriteLineLocked("User: " + Environment.UserName);
@@ -255,6 +344,8 @@ namespace Zink.Services
                 {
                     _deviceWriter.Flush();
                     _deviceFileStream?.Flush(false);
+                    _screenShareSessionWriter?.Flush();
+                    _screenShareSessionFileStream?.Flush(false);
                     PublishLogSnapshotsLocked(force: false);
                 }
                 catch
@@ -323,6 +414,8 @@ namespace Zink.Services
                 }
             }
 
+            Add(GetSharedProjectLogDirectory());
+
             try
             {
                 Add(Path.Combine(ApplicationData.Current.LocalFolder.Path, "Logs"));
@@ -337,6 +430,22 @@ namespace Zink.Services
                 Add(mirror);
 
             return candidates;
+        }
+
+        private static string? GetSharedProjectLogDirectory()
+        {
+            foreach (var oneDriveRoot in GetOneDriveRoots())
+            {
+                try
+                {
+                    return Path.Combine(oneDriveRoot, "App Projects", "ZINK", "Main file", "Logs");
+                }
+                catch
+                {
+                }
+            }
+
+            return null;
         }
 
         private static void CloseWriterLocked()
@@ -368,6 +477,38 @@ namespace Zink.Services
 
             _deviceWriter = null;
             _deviceFileStream = null;
+        }
+
+        private static void CloseScreenShareSessionLocked()
+        {
+            try
+            {
+                _screenShareSessionWriter?.Flush();
+                _screenShareSessionFileStream?.Flush(true);
+            }
+            catch
+            {
+            }
+
+            try
+            {
+                _screenShareSessionWriter?.Dispose();
+            }
+            catch
+            {
+            }
+
+            try
+            {
+                _screenShareSessionFileStream?.Dispose();
+            }
+            catch
+            {
+            }
+
+            _screenShareSessionWriter = null;
+            _screenShareSessionFileStream = null;
+            _screenShareSessionLogPath = null;
         }
 
         private static void InstallListenersLocked()
@@ -484,9 +625,21 @@ namespace Zink.Services
                 {
                     var entry = $"{Timestamp()} [{DeviceName}] [T{Environment.CurrentManagedThreadId}] {line}";
                     _deviceWriter?.WriteLine(entry);
+                    WriteScreenShareSessionLineLocked(entry);
                 }
 
                 PublishLogSnapshotsLocked(force: false);
+            }
+            catch
+            {
+            }
+        }
+
+        private static void WriteScreenShareSessionLineLocked(string line)
+        {
+            try
+            {
+                _screenShareSessionWriter?.WriteLine(line);
             }
             catch
             {
@@ -674,6 +827,29 @@ namespace Zink.Services
         private static string Timestamp()
         {
             return DateTimeOffset.Now.ToString("yyyy-MM-dd HH:mm:ss.fff zzz", CultureInfo.InvariantCulture);
+        }
+
+        private static string GetBuildIdentifier()
+        {
+            try
+            {
+                var assembly = typeof(DiagnosticLogService).Assembly;
+                var assemblyName = assembly.GetName().Version?.ToString() ?? "unknown";
+                var filePath = assembly.Location;
+                var fileVersion = string.IsNullOrWhiteSpace(filePath)
+                    ? "unknown"
+                    : FileVersionInfo.GetVersionInfo(filePath).FileVersion ?? "unknown";
+                var informationalVersion = assembly
+                    .GetCustomAttributes(typeof(System.Reflection.AssemblyInformationalVersionAttribute), false)
+                    .OfType<System.Reflection.AssemblyInformationalVersionAttribute>()
+                    .FirstOrDefault()?.InformationalVersion ?? "unknown";
+
+                return $"assembly={assemblyName}; file={fileVersion}; informational={informationalVersion}; path='{filePath}'";
+            }
+            catch (Exception ex)
+            {
+                return $"unavailable:{ex.GetType().Name}";
+            }
         }
 
         private sealed class ZinkTraceListener : TraceListener

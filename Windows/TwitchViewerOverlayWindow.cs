@@ -41,6 +41,7 @@ namespace Zink.Windows
             Title = "Twitch Viewers";
             (_shell, _viewerText, _statusText) = BuildUi();
             Content = _shell;
+            Zink.Services.LocalizationService.RegisterWindow(this);
             ExtendsContentIntoTitleBar = true;
             SetTitleBar(_shell);
             Activated += (_, _) => MakeTopMost();

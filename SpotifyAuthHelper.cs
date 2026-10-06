@@ -46,6 +46,7 @@ namespace Zink
 
         public sealed class SpotifyPlaybackState
         {
+            public string TrackId { get; set; } = "";
             public string Title { get; set; } = "";
             public string Artist { get; set; } = "";
             public string Album { get; set; } = "";
@@ -537,6 +538,7 @@ namespace Zink
 
             return new SpotifyPlaybackState
             {
+                TrackId = item.TryGetProperty("id", out var idEl) ? idEl.GetString() ?? "" : "",
                 Title = item.TryGetProperty("name", out var nameEl) ? nameEl.GetString() ?? "" : "",
                 Artist = ReadArtists(item),
                 Album = ReadAlbumName(item),
@@ -888,6 +890,31 @@ namespace Zink
             using var http = CreateAuthorizedClient();
             var response = await http.PutAsync("https://api.spotify.com/v1/me/player/pause", new StringContent(""));
             return response.IsSuccessStatusCode || response.StatusCode == System.Net.HttpStatusCode.NoContent;
+        }
+
+        public static async Task<bool> RemoveTrackFromLikedSongsAsync(string trackId)
+        {
+            if (string.IsNullOrWhiteSpace(trackId))
+                return false;
+
+            if (!await EnsureAccessTokenAsync())
+                return false;
+
+            string url = $"https://api.spotify.com/v1/me/tracks?ids={Uri.EscapeDataString(trackId)}";
+            using var http = CreateAuthorizedClient();
+            var response = await http.DeleteAsync(url);
+
+            if (response.StatusCode == System.Net.HttpStatusCode.Unauthorized)
+            {
+                await RefreshAccessTokenAsync();
+                if (string.IsNullOrWhiteSpace(AccessToken))
+                    return false;
+
+                using var retryHttp = CreateAuthorizedClient();
+                response = await retryHttp.DeleteAsync(url);
+            }
+
+            return response.IsSuccessStatusCode;
         }
 
         public static Task<bool> NextTrackAsync()

@@ -271,8 +271,8 @@
                       Grid.Row="1"
                       ColumnSpacing="18">
                     <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="*"/>
-                        <ColumnDefinition Width="0"/>
+                        <ColumnDefinition Width="2.1*"/>
+                        <ColumnDefinition Width="1*"/>
                     </Grid.ColumnDefinitions>
 
                     <StackPanel Spacing="14">
@@ -431,6 +431,47 @@
                                             <TextBlock Text="Open folder"/>
                                         </StackPanel>
                                     </Button>
+
+                                    <StackPanel x:Name="SpotifyPlaybackControls"
+                                                Orientation="Horizontal"
+                                                Spacing="10"
+                                                Visibility="Collapsed">
+                                        <Button Style="{StaticResource PillButtonStyle}"
+                                                Click="SpotifyLikeButton_Click"
+                                                ToolTipService.ToolTip="Add to Spotify Liked Songs">
+                                            <StackPanel Orientation="Horizontal" Spacing="8">
+                                                <FontIcon Glyph="&#xE8E1;" FontFamily="Segoe Fluent Icons" FontSize="15"/>
+                                                <TextBlock Text="Like"/>
+                                            </StackPanel>
+                                        </Button>
+
+                                        <Button Style="{StaticResource PillButtonStyle}"
+                                                Click="SpotifyNextButton_Click"
+                                                ToolTipService.ToolTip="Play the next Spotify track">
+                                            <StackPanel Orientation="Horizontal" Spacing="8">
+                                                <FontIcon Glyph="&#xE893;" FontFamily="Segoe Fluent Icons" FontSize="15"/>
+                                                <TextBlock Text="Next"/>
+                                            </StackPanel>
+                                        </Button>
+
+                                        <Button Style="{StaticResource PillButtonStyle}"
+                                                Click="SpotifyStopButton_Click"
+                                                ToolTipService.ToolTip="Stop Spotify playback">
+                                            <StackPanel Orientation="Horizontal" Spacing="8">
+                                                <FontIcon Glyph="&#xE71A;" FontFamily="Segoe Fluent Icons" FontSize="15"/>
+                                                <TextBlock Text="Stop"/>
+                                            </StackPanel>
+                                        </Button>
+
+                                        <Button Style="{StaticResource PillButtonStyle}"
+                                                Click="SpotifyDislikeButton_Click"
+                                                ToolTipService.ToolTip="Remove from Spotify Liked Songs">
+                                            <StackPanel Orientation="Horizontal" Spacing="8">
+                                                <FontIcon Glyph="&#xE8E0;" FontFamily="Segoe Fluent Icons" FontSize="15"/>
+                                                <TextBlock Text="Dislike"/>
+                                            </StackPanel>
+                                        </Button>
+                                    </StackPanel>
                                 </StackPanel>
 
                                 <Border x:Name="HomeRadioVolumePanel"
@@ -446,6 +487,7 @@
                                             <ColumnDefinition Width="Auto"/>
                                             <ColumnDefinition Width="*"/>
                                             <ColumnDefinition Width="Auto"/>
+                                                                <ColumnDefinition Width="Auto"/>
                                         </Grid.ColumnDefinitions>
 
                                         <FontIcon Glyph="&#xE15D;"
@@ -478,9 +520,9 @@
 
                     <Border x:Name="QuickStartSection"
                             Style="{StaticResource GlassPanelStyle}"
-                            Padding="18"
+                            Padding="12"
                             Background="#64131D28">
-                        <Grid ColumnSpacing="16" RowSpacing="14">
+                        <Grid ColumnSpacing="12" RowSpacing="10">
                             <Grid.RowDefinitions>
                                 <RowDefinition Height="Auto"/>
                                 <RowDefinition Height="Auto"/>
@@ -518,11 +560,11 @@
                                         Grid.ColumnSpan="2"
                                         Orientation="Horizontal"
                                         Spacing="10">
-                                <Button x:Name="QuickStartPrimaryButton"
+                                 <Button x:Name="QuickStartPrimaryButton"
                                         Style="{StaticResource PulseButtonStyle}"
-                                        Width="170"
+                                         Width="150"
                                         Click="QuickStartPrimary_Click">
-                                    <StackPanel Padding="15" Spacing="6">
+                                    <StackPanel Padding="11" Spacing="4">
                                         <FontIcon x:Name="QuickStartPrimaryIcon"
                                                   Glyph="&#xE7F6;"
                                                   FontFamily="Segoe Fluent Icons"
@@ -538,11 +580,11 @@
                                     </StackPanel>
                                 </Button>
 
-                                <Button x:Name="QuickStartSecondaryButton"
+                                 <Button x:Name="QuickStartSecondaryButton"
                                         Style="{StaticResource PulseButtonStyle}"
-                                        Width="170"
+                                         Width="150"
                                         Click="QuickStartSecondary_Click">
-                                    <StackPanel Padding="15" Spacing="6">
+                                    <StackPanel Padding="11" Spacing="4">
                                         <FontIcon x:Name="QuickStartSecondaryIcon"
                                                   Glyph="&#xE722;"
                                                   FontFamily="Segoe Fluent Icons"
@@ -560,9 +602,9 @@
 
                                 <Button x:Name="QuickStartThirdButton"
                                         Style="{StaticResource PulseButtonStyle}"
-                                        Width="170"
+                                        Width="150"
                                         Click="QuickStartThird_Click">
-                                    <StackPanel Padding="15" Spacing="6">
+                                    <StackPanel Padding="11" Spacing="4">
                                         <FontIcon x:Name="QuickStartThirdIcon"
                                                   Glyph="&#xE774;"
                                                   FontFamily="Segoe Fluent Icons"
@@ -625,16 +667,17 @@
                             </Grid>
                         </Button>
 
-                        <Button x:Name="TileBtn_Spotify" Grid.Column="3" Style="{StaticResource GlassTileButtonStyle}" Click="Spotify_Click">
-                            <Grid Padding="16" RowSpacing="10">
+                        <Button x:Name="TileBtn_Spotify" Grid.Column="3" Style="{StaticResource GlassTileButtonStyle}" Height="78" MinHeight="0" Click="Spotify_Click">
+                            <Grid Padding="12" RowSpacing="6">
                                 <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
-                                <FontIcon Style="{StaticResource GlassTileIconStyle}" Glyph="&#xE768;" FontFamily="Segoe Fluent Icons" FontSize="26" Foreground="{StaticResource GreenBrush}"/>
+                                <FontIcon Style="{StaticResource GlassTileIconStyle}" Width="28" Height="28" Glyph="&#xE768;" FontFamily="Segoe Fluent Icons" FontSize="22" Foreground="{StaticResource GreenBrush}"/>
                                 <StackPanel Grid.Row="1" Spacing="3">
                                     <TextBlock Text="Spotify" Foreground="White" FontWeight="SemiBold"/>
                                     <TextBlock Text="Now playing" Style="{StaticResource ZinkSubText}"/>
                                 </StackPanel>
                             </Grid>
                         </Button>
+
                     </StackPanel>
 
                     <StackPanel Orientation="Horizontal" Spacing="10">
@@ -816,7 +859,223 @@
                     <StackPanel Grid.Column="1"
                                 x:Name="RightRailSection"
                                 Spacing="14"
-                                Visibility="Collapsed">
+                                Visibility="Visible">
+                        <Border Style="{StaticResource GlassPanelStyle}"
+                                Padding="14"
+                                Background="#80131D28">
+                            <StackPanel Spacing="10">
+                                <StackPanel Spacing="3">
+                                    <TextBlock Text="Zink Social"
+                                               FontSize="24"
+                                               FontWeight="SemiBold"
+                                               Foreground="White"/>
+                                    <TextBlock Text="Friends, messages, calls, and profiles."
+                                               FontSize="13"
+                                               Foreground="{StaticResource MutedTextBrush}"
+                                               TextWrapping="WrapWholeWords"/>
+                                </StackPanel>
+
+                                <Border CornerRadius="16"
+                                        Padding="12"
+                                        Background="#321F5561"
+                                        BorderBrush="#405AE8E0"
+                                        BorderThickness="1">
+                                    <Grid ColumnSpacing="10">
+                                        <FontIcon Glyph="&#xE716;"
+                                                  FontFamily="Segoe Fluent Icons"
+                                                  FontSize="20"
+                                                  Foreground="{StaticResource GreenBrush}"
+                                                  VerticalAlignment="Center"/>
+                                        <StackPanel Grid.Column="1" Spacing="2">
+                                            <TextBlock x:Name="OnlineFriendsText"
+                                                       Text="Sign in to see friends online"
+                                                       Foreground="White"
+                                                       FontWeight="SemiBold"
+                                                       TextTrimming="CharacterEllipsis"/>
+                                            <TextBlock x:Name="SocialStatusText"
+                                                       Text="Your social hub is ready"
+                                                       Style="{StaticResource ZinkSubText}"
+                                                       TextTrimming="CharacterEllipsis"/>
+                                        </StackPanel>
+                                    </Grid>
+                                </Border>
+
+                                <StackPanel Spacing="6">
+                                    <TextBlock Text="Online now"
+                                               Foreground="White"
+                                               FontWeight="SemiBold"/>
+                                    <TextBlock x:Name="OnlineFriendsEmptyText"
+                                               Text="No friends are online right now."
+                                               Style="{StaticResource ZinkSubText}"
+                                               Visibility="Visible"/>
+                                    <ScrollViewer MaxHeight="176"
+                                                  VerticalScrollBarVisibility="Auto"
+                                                  HorizontalScrollBarVisibility="Disabled">
+                                        <ItemsControl x:Name="OnlineFriendsList">
+                                            <ItemsControl.ItemTemplate>
+                                                <DataTemplate>
+                                                    <Border Margin="0,0,0,6"
+                                                            Padding="8"
+                                                            CornerRadius="12"
+                                                            Background="#261F303A">
+                                                        <Grid ColumnSpacing="8">
+                                                            <Grid.ColumnDefinitions>
+                                                                <ColumnDefinition Width="Auto"/>
+                                                                <ColumnDefinition Width="*"/>
+                                                                <ColumnDefinition Width="Auto"/>
+                                                                <ColumnDefinition Width="Auto"/>
+                                                                <ColumnDefinition Width="Auto"/>
+                                                                <ColumnDefinition Width="Auto"/>
+                                                            </Grid.ColumnDefinitions>
+                                                            <Grid Width="34" Height="34">
+                                                                <Ellipse Fill="#263846"/>
+                                                                <FontIcon Glyph="&#xE77B;"
+                                                                          FontFamily="Segoe Fluent Icons"
+                                                                          FontSize="15"
+                                                                          Foreground="White"
+                                                                          HorizontalAlignment="Center"
+                                                                          VerticalAlignment="Center"/>
+                                                                <Image Source="{Binding AvatarUrl}"
+                                                                       Width="34"
+                                                                       Height="34"
+                                                                       Stretch="UniformToFill"/>
+                                                            </Grid>
+                                                            <StackPanel Grid.Column="1"
+                                                                        VerticalAlignment="Center"
+                                                                        Spacing="1">
+                                                                <TextBlock Text="{Binding DisplayName}"
+                                                                           Foreground="White"
+                                                                           FontWeight="SemiBold"
+                                                                           TextTrimming="CharacterEllipsis"/>
+                                                                <TextBlock Text="{Binding Username}"
+                                                                           Style="{StaticResource ZinkSubText}"
+                                                                           TextTrimming="CharacterEllipsis"/>
+                                                            </StackPanel>
+                                                            <Button Grid.Column="2"
+                                                                    Width="32"
+                                                                    Height="32"
+                                                                    Padding="0"
+                                                                    CornerRadius="16"
+                                                                    Background="#263947"
+                                                                    BorderBrush="#7CBFEFFF"
+                                                                    BorderThickness="1"
+                                                                    Foreground="White"
+                                                                    Tag="{Binding UserId}"
+                                                                    Click="OnlineFriendMessage_Click"
+                                                                    ToolTipService.ToolTip="Message">
+                                                                <FontIcon Glyph="&#xE8BD;"
+                                                                          FontFamily="Segoe Fluent Icons"
+                                                                          FontSize="14"/>
+                                                            </Button>
+                                                            <Button Grid.Column="3"
+                                                                    Width="32"
+                                                                    Height="32"
+                                                                    Padding="0"
+                                                                    CornerRadius="16"
+                                                                    Background="#263947"
+                                                                    BorderBrush="#7CBFEFFF"
+                                                                    BorderThickness="1"
+                                                                    Foreground="White"
+                                                                    Tag="{Binding UserId}"
+                                                                    Click="OnlineFriendVoiceCall_Click"
+                                                                    ToolTipService.ToolTip="Voice call">
+                                                                <FontIcon Glyph="&#xE717;"
+                                                                          FontFamily="Segoe Fluent Icons"
+                                                                          FontSize="14"/>
+                                                            </Button>
+                                                            <Button Grid.Column="4"
+                                                                    Width="32"
+                                                                    Height="32"
+                                                                    Padding="0"
+                                                                    CornerRadius="16"
+                                                                    Background="#263947"
+                                                                    BorderBrush="#7CBFEFFF"
+                                                                    BorderThickness="1"
+                                                                    Foreground="White"
+                                                                    Tag="{Binding UserId}"
+                                                                    Click="OnlineFriendProfile_Click"
+                                                                    ToolTipService.ToolTip="View profile">
+                                                                <FontIcon Glyph="&#xE77B;"
+                                                                          FontFamily="Segoe Fluent Icons"
+                                                                          FontSize="14"/>
+                                                            </Button>
+                                                            <StackPanel Grid.Column="5"
+                                                                        VerticalAlignment="Center"
+                                                                        Spacing="2">
+                                                                <Ellipse Width="8"
+                                                                         Height="8"
+                                                                         Fill="{StaticResource GreenBrush}"
+                                                                         HorizontalAlignment="Right"/>
+                                                                <TextBlock Text="{Binding StatusText}"
+                                                                           Foreground="{StaticResource GreenBrush}"
+                                                                           FontSize="11"
+                                                                           HorizontalAlignment="Right"/>
+                                                            </StackPanel>
+                                                        </Grid>
+                                                    </Border>
+                                                </DataTemplate>
+                                            </ItemsControl.ItemTemplate>
+                                        </ItemsControl>
+                                    </ScrollViewer>
+                                </StackPanel>
+
+                                <Grid ColumnSpacing="8" RowSpacing="8">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*"/>
+                                        <ColumnDefinition Width="*"/>
+                                    </Grid.ColumnDefinitions>
+                                    <Grid.RowDefinitions>
+                                        <RowDefinition Height="Auto"/>
+                                        <RowDefinition Height="Auto"/>
+                                        <RowDefinition Height="Auto"/>
+                                    </Grid.RowDefinitions>
+
+                                    <Button Style="{StaticResource PulseButtonStyle}" Click="PulseFriends_Click">
+                                        <StackPanel Padding="10" Spacing="4">
+                                            <FontIcon Glyph="&#xE716;" FontFamily="Segoe Fluent Icons" Foreground="{StaticResource GreenBrush}" FontSize="18"/>
+                                            <TextBlock Text="Friends online" Foreground="White" FontWeight="SemiBold"/>
+                                            <TextBlock Text="View status" Style="{StaticResource ZinkSubText}"/>
+                                        </StackPanel>
+                                    </Button>
+                                    <Button Grid.Column="1" Style="{StaticResource PulseButtonStyle}" Click="PulseMessages_Click">
+                                        <StackPanel Padding="10" Spacing="4">
+                                            <FontIcon Glyph="&#xE8BD;" FontFamily="Segoe Fluent Icons" Foreground="{StaticResource BlueBrush}" FontSize="18"/>
+                                            <TextBlock Text="Messages" Foreground="White" FontWeight="SemiBold"/>
+                                            <TextBlock Text="Open chats" Style="{StaticResource ZinkSubText}"/>
+                                        </StackPanel>
+                                    </Button>
+                                    <Button Grid.Row="1" Style="{StaticResource PulseButtonStyle}" Click="PulseCalls_Click">
+                                        <StackPanel Padding="10" Spacing="4">
+                                            <FontIcon Glyph="&#xE717;" FontFamily="Segoe Fluent Icons" Foreground="{StaticResource CyanBrush}" FontSize="18"/>
+                                            <TextBlock Text="Call" Foreground="White" FontWeight="SemiBold"/>
+                                            <TextBlock Text="Voice or video" Style="{StaticResource ZinkSubText}"/>
+                                        </StackPanel>
+                                    </Button>
+                                    <Button Grid.Row="1" Grid.Column="1" Style="{StaticResource PulseButtonStyle}" Click="PulseCalls_Click">
+                                        <StackPanel Padding="10" Spacing="4">
+                                            <FontIcon Glyph="&#xE8A1;" FontFamily="Segoe Fluent Icons" Foreground="{StaticResource YellowBrush}" FontSize="18"/>
+                                            <TextBlock Text="Video call" Foreground="White" FontWeight="SemiBold"/>
+                                            <TextBlock Text="Share your screen" Style="{StaticResource ZinkSubText}"/>
+                                        </StackPanel>
+                                    </Button>
+                                    <Button Grid.Row="2" Style="{StaticResource PulseButtonStyle}" Click="PulseProfile_Click">
+                                        <StackPanel Padding="10" Spacing="4">
+                                            <FontIcon Glyph="&#xE77B;" FontFamily="Segoe Fluent Icons" Foreground="{StaticResource CyanBrush}" FontSize="18"/>
+                                            <TextBlock Text="My profile" Foreground="White" FontWeight="SemiBold"/>
+                                            <TextBlock Text="View and edit" Style="{StaticResource ZinkSubText}"/>
+                                        </StackPanel>
+                                    </Button>
+                                    <Button Grid.Row="2" Grid.Column="1" Style="{StaticResource PulseButtonStyle}" Click="PulseFriends_Click">
+                                        <StackPanel Padding="10" Spacing="4">
+                                            <FontIcon Glyph="&#xE8FA;" FontFamily="Segoe Fluent Icons" Foreground="{StaticResource BlueBrush}" FontSize="18"/>
+                                            <TextBlock Text="Add friends" Foreground="White" FontWeight="SemiBold"/>
+                                            <TextBlock Text="Find people" Style="{StaticResource ZinkSubText}"/>
+                                        </StackPanel>
+                                    </Button>
+                                </Grid>
+                            </StackPanel>
+                        </Border>
+
                         <Border Style="{StaticResource GlassPanelStyle}"
                                 Padding="18"
                                 Background="#80131D28">

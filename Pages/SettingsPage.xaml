@@ -109,6 +109,46 @@
                                FontSize="15"/>
                 </StackPanel>
 
+                <Border Style="{StaticResource GlassPanelStyle}" Padding="20">
+                    <StackPanel Spacing="14">
+                        <StackPanel Spacing="4">
+                            <TextBlock Text="Language" FontSize="20" FontWeight="SemiBold" Foreground="White"/>
+                            <TextBlock Text="Zink follows your Windows language unless you choose another language here."
+                                       Foreground="{StaticResource MutedTextBrush}" FontSize="13" TextWrapping="WrapWholeWords"/>
+                        </StackPanel>
+                        <Border Style="{StaticResource GlassSettingRowStyle}">
+                            <Grid ColumnSpacing="18">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="280"/>
+                                </Grid.ColumnDefinitions>
+                                <StackPanel Spacing="6" VerticalAlignment="Center">
+                                    <TextBlock Text="App language" Foreground="White" FontWeight="SemiBold"/>
+                                    <TextBlock x:Name="LanguageStatusText" Foreground="{StaticResource MutedTextBrush}" TextWrapping="WrapWholeWords"/>
+                                </StackPanel>
+                                <StackPanel Grid.Column="1" Spacing="8">
+                                    <Grid ColumnSpacing="8">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="*"/>
+                                            <ColumnDefinition Width="Auto"/>
+                                        </Grid.ColumnDefinitions>
+                                        <TextBox x:Name="LanguageSearchBox"
+                                                 PlaceholderText="Search languages"
+                                                 TextChanged="LanguageSearchBox_TextChanged"
+                                                 KeyDown="LanguageSearchBox_KeyDown"/>
+                                        <Button Grid.Column="1"
+                                                Content="Search"
+                                                Style="{StaticResource GlassButtonStyle}"
+                                                Click="LanguageSearchButton_Click"/>
+                                    </Grid>
+                                    <ComboBox x:Name="LanguageComboBox" MinWidth="280"
+                                              DisplayMemberPath="DisplayName" SelectionChanged="LanguageComboBox_SelectionChanged"/>
+                                </StackPanel>
+                            </Grid>
+                        </Border>
+                    </StackPanel>
+                </Border>
+
                 <Border Style="{StaticResource GlassPanelStyle}"
                         Padding="20">
                     <StackPanel Spacing="14">
@@ -155,6 +195,31 @@
                                         </Border>
                                     </Grid>
                                 </primitives:ToggleButton>
+                            </Grid>
+                        </Border>
+
+                        <Border Style="{StaticResource GlassSettingRowStyle}">
+                            <Grid ColumnSpacing="18">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="Auto"/>
+                                </Grid.ColumnDefinitions>
+
+                                <StackPanel Spacing="6"
+                                            VerticalAlignment="Center">
+                                    <TextBlock Text="Background recording settings"
+                                               Foreground="White"
+                                               FontWeight="SemiBold"/>
+                                    <TextBlock Text="Choose how Zink records and saves activity in the background."
+                                               Foreground="{StaticResource MutedTextBrush}"
+                                               TextWrapping="WrapWholeWords"/>
+                                </StackPanel>
+
+                                <Button Grid.Column="1"
+                                        Content="Open"
+                                        Style="{StaticResource GlassButtonStyle}"
+                                        VerticalAlignment="Center"
+                                        Click="BackgroundRecordingSettingsButton_Click"/>
                             </Grid>
                         </Border>
 
@@ -442,7 +507,7 @@
                                        FontSize="20"
                                        FontWeight="SemiBold"
                                        Foreground="White"/>
-                            <TextBlock Text="Restore defaults or check for a Store update."
+                            <TextBlock Text="Restore this page back to the defaults or check for an app update"
                                        Foreground="{StaticResource MutedTextBrush}"
                                        FontSize="13"/>
                         </StackPanel>

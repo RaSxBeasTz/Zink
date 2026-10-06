@@ -16,8 +16,8 @@ namespace Zink
 {
     public sealed class MiniRadioWidgetWindow : Window
     {
-        private const int WidgetWidth = 760;
-        private const int WidgetHeight = 360;
+        private const int WidgetWidth = 480;
+        private const int WidgetHeight = 190;
         private const int WmNcButtonDown = 0x00A1;
         private const int HtCaption = 2;
 
@@ -25,28 +25,32 @@ namespace Zink
 
         private readonly TextBlock _txtStation = new()
         {
-            FontSize = 36,
+            FontSize = 18,
             FontWeight = FontWeights.SemiBold,
-            TextTrimming = TextTrimming.CharacterEllipsis
+            TextTrimming = TextTrimming.CharacterEllipsis,
+            MaxLines = 1
         };
 
         private readonly TextBlock _txtArtist = new()
         {
-            FontSize = 22,
+            FontSize = 12,
             Opacity = 0.95,
-            TextTrimming = TextTrimming.CharacterEllipsis
+            TextTrimming = TextTrimming.CharacterEllipsis,
+            MaxLines = 1
         };
 
         private readonly TextBlock _txtTitle = new()
         {
-            FontSize = 22,
+            FontSize = 13,
             Opacity = 0.9,
-            TextTrimming = TextTrimming.CharacterEllipsis
+            TextTrimming = TextTrimming.CharacterEllipsis,
+            MaxLines = 1
         };
 
-        private readonly TextBlock _txtElapsed = new() { FontSize = 24 };
-        private readonly TextBlock _txtDuration = new() { FontSize = 24, Opacity = 0.9 };
-        private readonly Image _img = new() { Stretch = Stretch.UniformToFill };
+        private readonly TextBlock _txtElapsed = new() { FontSize = 12 };
+        private readonly TextBlock _txtDuration = new() { FontSize = 12, Opacity = 0.9 };
+        private readonly Button _liveButton = new();
+        private readonly Image _img = new() { Stretch = Stretch.Uniform };
         private readonly DispatcherTimer _tick = new() { Interval = TimeSpan.FromSeconds(1) };
 
         private IntPtr _hwnd;
@@ -59,6 +63,7 @@ namespace Zink
         {
             Title = "Radio Widget";
             Content = BuildUI();
+            LocalizationService.RegisterWindow(this);
             TryUseCustomChrome();
 
             RefreshAll();
@@ -89,7 +94,7 @@ namespace Zink
                 Height = WidgetHeight
             };
 
-            root.RowDefinitions.Add(new RowDefinition { Height = new GridLength(56) });
+            root.RowDefinitions.Add(new RowDefinition { Height = new GridLength(32) });
             root.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
             root.Background = new LinearGradientBrush
             {
@@ -108,9 +113,9 @@ namespace Zink
 
             var shell = new Border
             {
-                Margin = new Thickness(18, 0, 18, 18),
-                Padding = new Thickness(26),
-                CornerRadius = new CornerRadius(34),
+                Margin = new Thickness(8, 0, 8, 8),
+                Padding = new Thickness(10),
+                CornerRadius = new CornerRadius(18),
                 Background = GlassBrush(0xC8, 0x12, 0x1B, 0x24),
                 BorderBrush = GlassBrush(0x4D, 0xFF, 0xFF, 0xFF),
                 BorderThickness = new Thickness(1.25)
@@ -120,9 +125,9 @@ namespace Zink
 
             var layout = new Grid
             {
-                ColumnSpacing = 30
+                ColumnSpacing = 12
             };
-            layout.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(244) });
+            layout.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(120) });
             layout.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
             shell.Child = layout;
 
@@ -134,9 +139,9 @@ namespace Zink
 
             var imgBorder = new Border
             {
-                CornerRadius = new CornerRadius(30),
-                Height = 244,
-                Width = 244,
+                CornerRadius = new CornerRadius(16),
+                Height = 120,
+                Width = 120,
                 HorizontalAlignment = HorizontalAlignment.Left,
                 VerticalAlignment = VerticalAlignment.Center,
                 Background = GlassBrush(0xFF, 0x25, 0x38, 0x46),
@@ -148,7 +153,7 @@ namespace Zink
 
             var stack = new StackPanel
             {
-                Spacing = 10,
+                Spacing = 0,
                 VerticalAlignment = VerticalAlignment.Center
             };
             Grid.SetColumn(stack, 1);
@@ -167,10 +172,10 @@ namespace Zink
         {
             var header = new Grid
             {
-                Height = 56,
+                Height = 26,
                 Background = GlassBrush(0x01, 0, 0, 0),
-                Margin = new Thickness(18, 10, 14, 8),
-                ColumnSpacing = 10
+                Margin = new Thickness(8, 3, 6, 3),
+                ColumnSpacing = 6
             };
             header.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
             header.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
@@ -179,16 +184,16 @@ namespace Zink
 
             var badge = new Border
             {
-                Width = 34,
-                Height = 34,
-                CornerRadius = new CornerRadius(11),
+                Width = 24,
+                Height = 24,
+                CornerRadius = new CornerRadius(8),
                 Background = GlassBrush(0xD0, 0x16, 0x2D, 0x35),
                 BorderBrush = GlassBrush(0x50, 0xB8, 0xFB, 0xFF),
                 BorderThickness = new Thickness(1),
                 Child = new TextBlock
                 {
                     Text = "z",
-                    FontSize = 18,
+                    FontSize = 13,
                     FontWeight = FontWeights.Bold,
                     Foreground = GlassBrush(0xFF, 0xDC, 0xFF, 0xF7),
                     HorizontalAlignment = HorizontalAlignment.Center,
@@ -200,7 +205,7 @@ namespace Zink
             var title = new TextBlock
             {
                 Text = "Radio Widget",
-                FontSize = 18,
+                FontSize = 13,
                 FontWeight = FontWeights.SemiBold,
                 Foreground = GlassBrush(0xE8, 0xF2, 0xF8, 0xFF),
                 VerticalAlignment = VerticalAlignment.Center
@@ -220,12 +225,22 @@ namespace Zink
             var timeRow = new StackPanel
             {
                 Orientation = Orientation.Horizontal,
-                Spacing = 10,
-                Margin = new Thickness(0, 14, 0, 0)
+                Spacing = 6,
+                Margin = new Thickness(0, 2, 0, 0)
             };
 
             timeRow.Children.Add(CreatePill(_txtElapsed, 0x3A, 0x2E, 0x8D, 0xFF, 0x70, 0x7C, 0xC7, 0xFF));
-            timeRow.Children.Add(CreatePill(_txtDuration, 0x28, 0xFF, 0xFF, 0xFF, 0x26, 0xFF, 0xFF, 0xFF));
+            _liveButton.MinWidth = 0;
+            _liveButton.MinHeight = 0;
+            _liveButton.Padding = new Thickness(8, 2, 8, 3);
+            _liveButton.CornerRadius = new CornerRadius(999);
+            _liveButton.BorderThickness = new Thickness(1);
+            _liveButton.Foreground = GlassBrush(0xFF, 0xFF, 0xFF, 0xFF);
+            _liveButton.Content = _txtDuration;
+            _liveButton.Command = new RelayAction(() => AppPlaybackService.Instance.RequestLive());
+            ToolTipService.SetToolTip(_liveButton, "Back to live");
+            timeRow.Children.Add(_liveButton);
+            RefreshLiveButton();
             return timeRow;
         }
 
@@ -234,13 +249,13 @@ namespace Zink
             var buttons = new StackPanel
             {
                 Orientation = Orientation.Horizontal,
-                Spacing = 14,
-                Margin = new Thickness(0, 18, 0, 0)
+                Spacing = 6,
+                Margin = new Thickness(0)
             };
 
-            buttons.Children.Add(CreateGlassButton(Symbol.Play, () => AppPlaybackService.Instance.RequestPlay(), "Play", primary: true, size: 64));
-            buttons.Children.Add(CreateGlassButton(Symbol.Pause, () => AppPlaybackService.Instance.RequestPause(), "Pause", size: 58));
-            buttons.Children.Add(CreateGlassButton(Symbol.Stop, () => AppPlaybackService.Instance.RequestStop(), "Stop", size: 58));
+            buttons.Children.Add(CreateGlassButton(Symbol.Play, () => AppPlaybackService.Instance.RequestPlay(), "Play", primary: true, size: 27));
+            buttons.Children.Add(CreateGlassButton(Symbol.Pause, () => AppPlaybackService.Instance.RequestPause(), "Pause", size: 25));
+            buttons.Children.Add(CreateGlassButton(Symbol.Stop, () => AppPlaybackService.Instance.RequestWidgetStop(), "Stop", size: 25));
             return buttons;
         }
 
@@ -258,7 +273,7 @@ namespace Zink
             return new Border
             {
                 CornerRadius = new CornerRadius(999),
-                Padding = new Thickness(18, 8, 18, 9),
+                Padding = new Thickness(8, 2, 8, 3),
                 Background = GlassBrush(backgroundAlpha, backgroundRed, backgroundGreen, backgroundBlue),
                 BorderBrush = GlassBrush(borderAlpha, borderRed, borderGreen, borderBlue),
                 BorderThickness = new Thickness(1),
@@ -272,12 +287,25 @@ namespace Zink
             {
                 Width = size,
                 Height = size,
+                MinWidth = 0,
+                MinHeight = 0,
+                Padding = new Thickness(0),
                 CornerRadius = new CornerRadius(size / 2),
                 BorderThickness = new Thickness(1),
                 BorderBrush = primary ? GlassBrush(0x8A, 0xD8, 0xF0, 0xFF) : GlassBrush(0x34, 0xFF, 0xFF, 0xFF),
                 Background = primary ? GlassBrush(0xDC, 0x2E, 0x8D, 0xFF) : GlassBrush(0x34, 0xFF, 0xFF, 0xFF),
                 Foreground = GlassBrush(0xFF, 0xFF, 0xFF, 0xFF),
-                Content = new SymbolIcon(symbol),
+                Content = new FontIcon
+                {
+                    Glyph = symbol switch
+                    {
+                        Symbol.Play => "\uE768",
+                        Symbol.Pause => "\uE769",
+                        Symbol.Stop => "\uE71A",
+                        _ => "\uE10C"
+                    },
+                    FontSize = 13
+                },
                 Command = new RelayAction(action)
             };
             ToolTipService.SetToolTip(button, tooltip);
@@ -288,17 +316,20 @@ namespace Zink
         {
             var button = new Button
             {
-                Width = 38,
-                Height = 34,
-                CornerRadius = new CornerRadius(17),
+                Width = 26,
+                Height = 24,
+                MinWidth = 0,
+                MinHeight = 0,
+                Padding = new Thickness(0),
+                CornerRadius = new CornerRadius(12),
                 Background = GlassBrush(0x24, 0xFF, 0xFF, 0xFF),
                 BorderBrush = GlassBrush(0x28, 0xFF, 0xFF, 0xFF),
                 BorderThickness = new Thickness(1),
                 Foreground = GlassBrush(0xE8, 0xF2, 0xF8, 0xFF),
                 Content = new TextBlock
                 {
-                    Text = text,
-                    FontSize = 18,
+                    Text = "\u00D7",
+                    FontSize = 13,
                     FontWeight = FontWeights.SemiBold,
                     HorizontalAlignment = HorizontalAlignment.Center,
                     VerticalAlignment = VerticalAlignment.Center
@@ -324,7 +355,9 @@ namespace Zink
                     return;
 
                 appWindow.Title = "Radio Widget";
-                appWindow.Resize(new global::Windows.Graphics.SizeInt32(WidgetWidth, WidgetHeight));
+                appWindow.Resize(new global::Windows.Graphics.SizeInt32(
+                    DipsToPixels(WidgetWidth),
+                    DipsToPixels(WidgetHeight)));
 
                 if (appWindow.Presenter is OverlappedPresenter presenter)
                 {
@@ -341,6 +374,8 @@ namespace Zink
 
         private void CenterAndShow()
         {
+            Activate();
+
             var hwnd = _hwnd == IntPtr.Zero
                 ? WinRT.Interop.WindowNative.GetWindowHandle(this)
                 : _hwnd;
@@ -350,7 +385,9 @@ namespace Zink
             try
             {
                 appWindow?.SetPresenter(AppWindowPresenterKind.Overlapped);
-                appWindow?.Resize(new global::Windows.Graphics.SizeInt32(WidgetWidth, WidgetHeight));
+                int widgetWidthPixels = DipsToPixels(WidgetWidth);
+                int widgetHeightPixels = DipsToPixels(WidgetHeight);
+                appWindow?.Resize(new global::Windows.Graphics.SizeInt32(widgetWidthPixels, widgetHeightPixels));
 
                 if (appWindow?.Presenter is OverlappedPresenter presenter)
                 {
@@ -361,15 +398,14 @@ namespace Zink
 
                 var da = DisplayArea.GetFromWindowId(id, DisplayAreaFallback.Primary);
                 var wa = da.WorkArea;
-                int x = wa.X + (wa.Width - WidgetWidth) / 2;
-                int y = wa.Y + (wa.Height - WidgetHeight) / 2;
+                int x = wa.X + (wa.Width - widgetWidthPixels) / 2;
+                int y = wa.Y + (wa.Height - widgetHeightPixels) / 2;
                 appWindow?.Move(new global::Windows.Graphics.PointInt32(x, y));
             }
             catch
             {
             }
 
-            Activate();
         }
 
         private void BeginDragMove(object sender, PointerRoutedEventArgs e)
@@ -397,6 +433,7 @@ namespace Zink
             _txtTitle.Text = string.IsNullOrWhiteSpace(ViewModel.SongTitle) ? "-" : ViewModel.SongTitle;
             _txtElapsed.Text = FormatClock(ViewModel.Elapsed);
             _txtDuration.Text = ViewModel.Duration is TimeSpan d ? FormatClock(d) : "Live";
+            RefreshLiveButton();
             _img.Source = ViewModel.ArtworkOrLogo != null ? new BitmapImage(ViewModel.ArtworkOrLogo) : null;
         }
 
@@ -416,15 +453,47 @@ namespace Zink
                 case nameof(AppPlaybackService.Duration):
                     _txtDuration.Text = ViewModel.Duration is TimeSpan d ? FormatClock(d) : "Live";
                     break;
+                case nameof(AppPlaybackService.IsPlaying):
+                    RefreshLiveButton();
+                    break;
                 case nameof(AppPlaybackService.ArtworkOrLogo):
                     _img.Source = ViewModel.ArtworkOrLogo != null ? new BitmapImage(ViewModel.ArtworkOrLogo) : null;
                     break;
             }
         }
 
+        private void RefreshLiveButton()
+        {
+            bool isLive = ViewModel.IsPlaying;
+            _liveButton.Background = isLive
+                ? GlassBrush(0xE8, 0xD9, 0x1E, 0x2B)
+                : GlassBrush(0x28, 0xFF, 0xFF, 0xFF);
+            _liveButton.BorderBrush = isLive
+                ? GlassBrush(0xFF, 0xFF, 0x68, 0x72)
+                : GlassBrush(0x26, 0xFF, 0xFF, 0xFF);
+        }
+
         private static SolidColorBrush GlassBrush(byte alpha, byte red, byte green, byte blue)
         {
             return new SolidColorBrush(Color.FromArgb(alpha, red, green, blue));
+        }
+
+        private int DipsToPixels(int dips)
+        {
+            try
+            {
+                if (Content?.XamlRoot is { RasterizationScale: > 0 } xamlRoot)
+                    return Math.Max(1, (int)Math.Round(dips * xamlRoot.RasterizationScale));
+
+                if (_hwnd == IntPtr.Zero)
+                    _hwnd = WinRT.Interop.WindowNative.GetWindowHandle(this);
+
+                return Math.Max(1, (int)Math.Round(dips * GetDpiForWindow(_hwnd) / 96.0));
+            }
+            catch
+            {
+                return dips;
+            }
         }
 
         private static string FormatClock(TimeSpan ts) => $"{(int)ts.TotalMinutes:00}:{ts.Seconds:00}";
@@ -434,6 +503,9 @@ namespace Zink
 
         [DllImport("user32.dll")]
         private static extern IntPtr SendMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
+
+        [DllImport("user32.dll")]
+        private static extern uint GetDpiForWindow(IntPtr hwnd);
 
         private sealed class RelayAction : System.Windows.Input.ICommand
         {

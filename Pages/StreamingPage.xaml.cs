@@ -19,10 +19,12 @@ namespace Zink.Pages
     public sealed partial class StreamingPage : Page
     {
         private readonly NativeTwitchStreamingService _streamingService = NativeTwitchStreamingService.Instance;
-        private readonly NativeScreenShareStreamingService _obsCaptureService = NativeScreenShareStreamingService.Instance;
+        private readonly StreamingVideoCapturePipeline _obsCaptureService = StreamingVideoCapturePipeline.Instance;
         private const string StreamKeySettingKey = "Zink.Streaming.TwitchStreamKey";
         private const string EncoderFamilySettingKey = "Zink.Streaming.TwitchEncoderFamily";
         private const string QualitySettingKey = "Zink.Streaming.TwitchQuality";
+        private const string IncludeDiscordSoundSettingKey = "Zink.Streaming.TwitchIncludeDiscordSound";
+        private const string IncludeSpotifySoundSettingKey = "Zink.Streaming.TwitchIncludeSpotifySound";
         private DateTimeOffset _lastPreviewUiUpdateUtc = DateTimeOffset.MinValue;
         private byte[]? _lastPreviewFrameData;
         private readonly object _previewFrameSync = new();
@@ -93,7 +95,9 @@ namespace Zink.Pages
                     GetSelectedAudioDeviceId(MicrophoneComboBox),
                     MicrophoneVolumeSlider.Value / 100.0,
                     MuteMicrophoneButton.IsChecked == true,
-                    LowLatencyToggle.IsOn);
+                    LowLatencyToggle.IsOn,
+                    IncludeDiscordSoundToggle.IsOn,
+                    IncludeSpotifySoundToggle.IsOn);
             }
             catch (Exception ex)
             {
@@ -153,6 +157,8 @@ namespace Zink.Pages
             DesktopAudioComboBox.IsEnabled = !isStreaming;
             MicrophoneComboBox.IsEnabled = !isStreaming;
             SelectCaptureSourceButton.IsEnabled = !isStreaming;
+            IncludeDiscordSoundToggle.IsEnabled = !isStreaming;
+            IncludeSpotifySoundToggle.IsEnabled = !isStreaming;
 
             try
             {
@@ -364,6 +370,34 @@ namespace Zink.Pages
                 : "Low-latency tune disabled for the next stream.";
         }
 
+        private void IncludeDiscordSoundToggle_Toggled(object sender, RoutedEventArgs e)
+        {
+            if (StatusText is null || IncludeDiscordSoundToggle is null)
+                return;
+
+            if (!IncludeDiscordSoundToggle.IsOn && IncludeSpotifySoundToggle is not null && !IncludeSpotifySoundToggle.IsOn)
+                IncludeSpotifySoundToggle.IsOn = true;
+
+            ApplicationData.Current.LocalSettings.Values[IncludeDiscordSoundSettingKey] = IncludeDiscordSoundToggle.IsOn;
+            StatusText.Text = IncludeDiscordSoundToggle.IsOn
+                ? "Discord sound will be included in the next stream."
+                : "Discord sound will be excluded from the next stream.";
+        }
+
+        private void IncludeSpotifySoundToggle_Toggled(object sender, RoutedEventArgs e)
+        {
+            if (StatusText is null || IncludeSpotifySoundToggle is null)
+                return;
+
+            if (!IncludeSpotifySoundToggle.IsOn && IncludeDiscordSoundToggle is not null && !IncludeDiscordSoundToggle.IsOn)
+                IncludeDiscordSoundToggle.IsOn = true;
+
+            ApplicationData.Current.LocalSettings.Values[IncludeSpotifySoundSettingKey] = IncludeSpotifySoundToggle.IsOn;
+            StatusText.Text = IncludeSpotifySoundToggle.IsOn
+                ? "Spotify sound will be included in the next stream."
+                : "Spotify sound will be excluded from the next stream.";
+        }
+
         private void StreamQualityComboBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
         {
             if (StatusText is null)
@@ -540,6 +574,21 @@ namespace Zink.Pages
                     StreamQualityComboBox.SelectedIndex = string.Equals(quality, "1080p", StringComparison.OrdinalIgnoreCase) ? 1 : 0;
                 }
 
+                if (ApplicationData.Current.LocalSettings.Values.TryGetValue(IncludeDiscordSoundSettingKey, out var discordSoundValue) &&
+                    discordSoundValue is bool includeDiscordSound)
+                {
+                    IncludeDiscordSoundToggle.IsOn = includeDiscordSound;
+                }
+
+                if (ApplicationData.Current.LocalSettings.Values.TryGetValue(IncludeSpotifySoundSettingKey, out var spotifySoundValue) &&
+                    spotifySoundValue is bool includeSpotifySound)
+                {
+                    IncludeSpotifySoundToggle.IsOn = includeSpotifySound;
+                }
+
+                if (!IncludeDiscordSoundToggle.IsOn && !IncludeSpotifySoundToggle.IsOn)
+                    IncludeSpotifySoundToggle.IsOn = true;
+
                 ApplySelectedEncoderFamily();
 
                 UpdateTwitchViewerStatus();
@@ -563,6 +612,8 @@ namespace Zink.Pages
                     GetSelectedEncoderFamily() == ScreenShareH264EncoderFamily.Intel ? "Intel" : "Nvidia";
                 ApplicationData.Current.LocalSettings.Values[QualitySettingKey] =
                     GetSelectedQualityPreset() == ScreenShareQualityPreset.FullHd1080p ? "1080p" : "720p";
+                ApplicationData.Current.LocalSettings.Values[IncludeDiscordSoundSettingKey] = IncludeDiscordSoundToggle.IsOn;
+                ApplicationData.Current.LocalSettings.Values[IncludeSpotifySoundSettingKey] = IncludeSpotifySoundToggle.IsOn;
             }
             catch
             {

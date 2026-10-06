@@ -17,7 +17,7 @@ namespace Zink.Pages
     public sealed partial class KickStreamingPage : Page
     {
         private readonly NativeTwitchStreamingService _streamingService = NativeTwitchStreamingService.KickInstance;
-        private readonly NativeScreenShareStreamingService _obsCaptureService = NativeScreenShareStreamingService.Instance;
+        private readonly StreamingVideoCapturePipeline _obsCaptureService = StreamingVideoCapturePipeline.Instance;
         private const string StreamKeySettingKey = "Zink.Streaming.KickStreamKey";
         private DateTimeOffset _lastPreviewUiUpdateUtc = DateTimeOffset.MinValue;
         private byte[]? _lastPreviewFrameData;

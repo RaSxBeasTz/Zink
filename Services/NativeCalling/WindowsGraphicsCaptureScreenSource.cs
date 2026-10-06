@@ -27,6 +27,9 @@ namespace Zink.Services.NativeCalling
         private GraphicsCaptureSession? _session;
         private GraphicsCaptureItem? _captureItem;
         private Texture2D? _stagingTexture;
+        private ZinkHdrToSdrGpuConverter? _previewHdrConverter;
+        private Texture2D? _previewSdrTexture;
+        private bool _loggedHdrPreviewConversion;
         private Bitmap? _latestFrame;
         private CapturedGpuFrame? _latestGpuFrame;
         private long _frameArrivedCount;
@@ -69,7 +72,7 @@ namespace Zink.Services.NativeCalling
                 DiagnosticLogService.Flush();
 
                 var hwnd = App.MainWindow?.GetWindowHandle() ?? IntPtr.Zero;
-                var captureMode = NativeScreenShareStreamingService.Instance.PreferredCaptureSourceMode;
+                var captureMode = ScreenShareCapturePipeline.Instance.PreferredCaptureSourceMode;
                 if (!await TryRequestProgrammaticCaptureAccessAsync())
                 {
                     DiagnosticLogService.WriteLine("[ScreenShare:WGC] Programmatic capture access was not granted for the Zink source picker.");
@@ -159,7 +162,7 @@ namespace Zink.Services.NativeCalling
                     if (frame == null)
                         return;
 
-                    var quality = NativeScreenShareStreamingService.Instance.CurrentQuality;
+                    var quality = ScreenShareCapturePipeline.Instance.CurrentQuality;
                     using var sourceTexture = Direct3D11Helpers.CreateSharpDXTexture2D(frame.Surface);
                     var description = sourceTexture.Description;
                     var gpuFrame = CaptureGpuFrame(sourceTexture, description);
@@ -172,7 +175,7 @@ namespace Zink.Services.NativeCalling
                             gpuFrame = null;
                         }
 
-                        var streamingService = NativeScreenShareStreamingService.Instance;
+                        var streamingService = ScreenShareCapturePipeline.Instance;
                         var streamingPerformanceMode = streamingService.PrioritizeStreamingPerformance;
                         var requiresRealtimeBitmapFrames = streamingService.RequiresRealtimeBitmapFrames;
                         var sample = streamingPerformanceMode
@@ -211,7 +214,7 @@ namespace Zink.Services.NativeCalling
                     return;
                 }
 
-                    if (NativeScreenShareStreamingService.EnableDirectGpuTexturePath)
+                    if (ScreenShareCapturePipeline.EnableDirectGpuTexturePath)
                     {
                         DiagnosticLogService.WriteLine("[ScreenShare:WGC] GPU frame copy returned no texture; bitmap readback fallback is disabled.");
                         return;
@@ -267,6 +270,21 @@ namespace Zink.Services.NativeCalling
         {
             try
             {
+                var previewSize = GetPreviewBitmapSize(quality);
+                if (description.Format == Format.R16G16B16A16_Float)
+                {
+                    if (!_loggedHdrPreviewConversion)
+                    {
+                        _loggedHdrPreviewConversion = true;
+                        DiagnosticLogService.WriteLine($"[ScreenShare:HDR:Preview] conversion active; source={description.Width}x{description.Height}/{description.Format}; preview={previewSize.Width}x{previewSize.Height}/{Format.B8G8R8A8_UNorm}; encoderFamily={ScreenShareCapturePipeline.Instance.PreferredH264EncoderFamily}; toneMap='{ZinkHdrToSdrGpuConverter.ToneMapDescription}'.");
+                        DiagnosticLogService.Flush();
+                    }
+                    EnsureHdrPreviewResources(sourceTexture, previewSize.Width, previewSize.Height);
+                    _previewHdrConverter!.Convert(sourceTexture, _previewSdrTexture!);
+                    sourceTexture = _previewSdrTexture!;
+                    description = sourceTexture.Description;
+                }
+
                 EnsureStagingTexture(description);
                 if (_stagingTexture == null || _sharpDxDevice == null)
                     return null;
@@ -276,7 +294,6 @@ namespace Zink.Services.NativeCalling
                 var dataBox = _sharpDxDevice.ImmediateContext.MapSubresource(_stagingTexture, 0, MapMode.Read, SharpDX.Direct3D11.MapFlags.None);
                 try
                 {
-                    var previewSize = GetPreviewBitmapSize(quality);
                     return CreateScaledBitmapFromBgra(
                         dataBox.DataPointer,
                         dataBox.RowPitch,
@@ -297,9 +314,37 @@ namespace Zink.Services.NativeCalling
             }
         }
 
+        private void EnsureHdrPreviewResources(Texture2D sourceTexture, int width, int height)
+        {
+            if (_previewSdrTexture != null &&
+                _previewSdrTexture.Description.Width == width &&
+                _previewSdrTexture.Description.Height == height &&
+                _previewSdrTexture.Device.NativePointer == sourceTexture.Device.NativePointer)
+            {
+                return;
+            }
+
+            _previewSdrTexture?.Dispose();
+            _previewHdrConverter?.Dispose();
+            _previewHdrConverter = new ZinkHdrToSdrGpuConverter(sourceTexture.Device);
+            _previewSdrTexture = new Texture2D(sourceTexture.Device, new Texture2DDescription
+            {
+                CpuAccessFlags = CpuAccessFlags.None,
+                BindFlags = BindFlags.RenderTarget | BindFlags.ShaderResource,
+                Format = Format.B8G8R8A8_UNorm,
+                Width = width,
+                Height = height,
+                OptionFlags = ResourceOptionFlags.None,
+                MipLevels = 1,
+                ArraySize = 1,
+                SampleDescription = new SampleDescription(1, 0),
+                Usage = ResourceUsage.Default
+            });
+        }
+
         private static (int Width, int Height) GetPreviewBitmapSize(ScreenShareQualityProfile quality)
         {
-            var streamingPerformanceMode = NativeScreenShareStreamingService.Instance.PrioritizeStreamingPerformance;
+            var streamingPerformanceMode = ScreenShareCapturePipeline.Instance.PrioritizeStreamingPerformance;
             var maxPreviewWidth = streamingPerformanceMode
                 ? Math.Min(quality.PreviewMaxWidth, quality.Height >= 1080 ? 960 : 854)
                 : quality.PreviewMaxWidth;
@@ -310,7 +355,7 @@ namespace Zink.Services.NativeCalling
 
         private CapturedGpuFrame? CaptureGpuFrame(Texture2D sourceTexture, Texture2DDescription sourceDescription)
         {
-            if (!NativeScreenShareStreamingService.EnableDirectGpuTexturePath)
+            if (!ScreenShareCapturePipeline.EnableDirectGpuTexturePath)
                 return null;
 
             if (_sharpDxDevice == null)
@@ -407,14 +452,24 @@ namespace Zink.Services.NativeCalling
             DiagnosticLogService.WriteLine("[ScreenShare:WGC] WinRT Direct3D device created.");
             DiagnosticLogService.Flush();
 
-            var framePoolBufferCount = NativeScreenShareStreamingService.Instance.PrioritizeStreamingPerformance ? 8 : 4;
+            var framePoolBufferCount = ScreenShareCapturePipeline.Instance.PrioritizeStreamingPerformance ? 12 : 4;
+            var hdr = HDR.GetDisplayState();
+            // H.264 is an SDR transport in this calling stack. When Windows HDR
+            // is active, preserve the desktop as FP16 scRGB until the encoder's
+            // GPU tone mapper converts it once to Rec.709/NV12. SDR displays stay
+            // BGRA and the viewing device must not tone-map the result again.
+            var capturePixelFormat = hdr.IsEnabled &&
+                ScreenShareCapturePipeline.Instance.PreferredVideoCodec == ScreenShareVideoCodec.H264
+                ? DirectXPixelFormat.R16G16B16A16Float
+                : DirectXPixelFormat.B8G8R8A8UIntNormalized;
             var framePool = Direct3D11CaptureFramePool.CreateFreeThreaded(
                 winRtDevice,
-                DirectXPixelFormat.B8G8R8A8UIntNormalized,
+                capturePixelFormat,
                 framePoolBufferCount,
                 item.Size);
 
-            DiagnosticLogService.WriteLine($"[ScreenShare:WGC] Free-threaded frame pool created with {framePoolBufferCount} buffers.");
+            DiagnosticLogService.WriteLine($"[ScreenShare:HDR] supported={hdr.IsSupported}; enabled={hdr.IsEnabled}; kind={hdr.Kind}; captureFormat={capturePixelFormat}; conversion={(hdr.IsEnabled ? "sender HDR-to-SDR before H.264" : "off (native SDR)")}; viewerConversion=off; detectionError='{hdr.Error ?? ""}'.");
+            DiagnosticLogService.WriteLine($"[ScreenShare:WGC] Free-threaded frame pool created with {framePoolBufferCount} buffers; format={capturePixelFormat}.");
             DiagnosticLogService.Flush();
 
             DiagnosticLogService.WriteLine("[ScreenShare:WGC] Creating capture session.");
@@ -539,7 +594,9 @@ namespace Zink.Services.NativeCalling
             if (_stagingTexture != null)
             {
                 var current = _stagingTexture.Description;
-                if (current.Width == sourceDescription.Width && current.Height == sourceDescription.Height)
+                if (current.Width == sourceDescription.Width &&
+                    current.Height == sourceDescription.Height &&
+                    current.Format == sourceDescription.Format)
                     return;
 
                 _stagingTexture.Dispose();
@@ -804,6 +861,11 @@ namespace Zink.Services.NativeCalling
                 _session = null;
                 _stagingTexture?.Dispose();
                 _stagingTexture = null;
+                _previewSdrTexture?.Dispose();
+                _previewSdrTexture = null;
+                _previewHdrConverter?.Dispose();
+                _previewHdrConverter = null;
+                _loggedHdrPreviewConversion = false;
                 _sharpDxDevice?.Dispose();
                 _sharpDxDevice = null;
                 _winRtDevice = null;

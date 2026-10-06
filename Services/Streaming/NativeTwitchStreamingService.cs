@@ -41,9 +41,10 @@ namespace Zink.Services.Streaming
         public static NativeTwitchStreamingService FacebookInstance { get; } = new("Facebook Live", "rtmps://live-api-s.facebook.com:443/rtmp/");
         public static NativeTwitchStreamingService XInstance { get; } = new("X Live", string.Empty);
 
-        private readonly NativeScreenShareStreamingService _captureService = NativeScreenShareStreamingService.Instance;
+        private readonly StreamingVideoCapturePipeline _captureService = StreamingVideoCapturePipeline.Instance;
         private readonly NativeStreamingStats _currentStats = new();
         private readonly object _stateLock = new();
+        private readonly object _logLock = new();
         private readonly Process _process = Process.GetCurrentProcess();
         private readonly string _platformName;
         private readonly string _defaultServerUrl;
@@ -86,6 +87,7 @@ namespace Zink.Services.Streaming
         private int _lastStatsGen1Collections;
         private int _lastStatsGen2Collections;
         private DateTimeOffset _lastStatsPublishedAtUtc = DateTimeOffset.MinValue;
+        private int _configuredOutputFps = OutputFps;
 
         public event EventHandler<string>? StatusChanged;
         public event EventHandler<bool>? StreamingStateChanged;
@@ -112,7 +114,9 @@ namespace Zink.Services.Streaming
             string microphoneDeviceId,
             double microphoneVolume,
             bool microphoneMuted,
-            bool lowLatency)
+            bool lowLatency,
+            bool includeDiscordSound = true,
+            bool includeSpotifySound = true)
         {
             if (IsStreaming)
             {
@@ -136,8 +140,13 @@ namespace Zink.Services.Streaming
             {
                 var target = NativeRtmpTarget.From(serverUrl, streamKey, _defaultServerUrl);
                 _rtmpTarget = target;
-                var quality = ScreenShareQualityProfile.FromPreset(qualityPreset);
-                var videoQueueDepth = 1;
+                _captureService.SetQuality(qualityPreset);
+                var quality = _captureService.CurrentQuality;
+                _configuredOutputFps = OutputFps;
+                // Hardware MFTs can return several encoded frames in one event-pump
+                // callback. A one-frame queue discarded most of such a burst before the
+                // RTMP writer could consume it, producing uneven motion despite fast I/O.
+                var videoQueueDepth = Math.Max(4, _configuredOutputFps / 10);
                 var audioQueueDepth = qualityPreset == ScreenShareQualityPreset.FullHd1080p ? 80 : 240;
                 var videoBitrateKbps = GetVideoBitrateKbps(qualityPreset);
                 StartLog(target.SafeUrl, quality, videoBitrateKbps, lowLatency);
@@ -162,8 +171,7 @@ namespace Zink.Services.Streaming
                 await _rtmpClient.ConnectAndPublishAsync(target, _cts.Token);
                 WriteObsStylePipelineLog(quality, videoBitrateKbps);
 
-                _captureService.SetQuality(qualityPreset);
-                _captureService.SetTargetFpsOverride(OutputFps);
+                _captureService.SetTargetFpsOverride(_configuredOutputFps);
                 _captureService.SetBitrateOverride(videoBitrateKbps * 1000);
                 _captureService.SetAdaptiveLatencyMode(false);
                 _captureService.EnablePreviewFrames = false;
@@ -200,6 +208,7 @@ namespace Zink.Services.Streaming
                     desktopAudioEnabled: !desktopAudioMuted && !string.IsNullOrWhiteSpace(desktopAudioDeviceId),
                     desktopAudioDeviceId: desktopAudioDeviceId,
                     desktopVolume: desktopAudioVolume,
+                    excludedDesktopProcessName: !includeDiscordSound ? "Discord" : !includeSpotifySound ? "Spotify" : null,
                     microphoneEnabled: !microphoneMuted && !string.IsNullOrWhiteSpace(microphoneDeviceId),
                     microphoneDeviceId: microphoneDeviceId,
                     microphoneVolume: microphoneVolume,
@@ -437,7 +446,7 @@ namespace Zink.Services.Streaming
             await foreach (var frame in _videoFrames.Reader.ReadAllAsync(token))
             {
                 token.ThrowIfCancellationRequested();
-                var publishFrame = DrainToNewestVideoFrame(frame);
+                var publishFrame = frame;
 
                 var nalUnits = H264AnnexB.SplitNalUnits(publishFrame.FrameData);
                 if (nalUnits.Count == 0)
@@ -863,11 +872,12 @@ namespace Zink.Services.Streaming
                 _lastStatsPublishedAtUtc = now;
                 StatsChanged?.Invoke(this, _currentStats.Clone());
                 PublishStatus($"Native live: capture {_currentStats.CaptureFps:0.0} fps, encode {_currentStats.EncodedFps:0.0} fps, send {_currentStats.SendFps:0.0} fps.");
+                WriteLog($"FPS_MONITOR capture={_currentStats.CaptureFps:0.0} encode={_currentStats.EncodedFps:0.0} send={_currentStats.SendFps:0.0} target={GetActiveOutputFps()} queue={queueDepth} encodeMs={_currentStats.EncodeMilliseconds:0.0} captureMs={_currentStats.CaptureMilliseconds:0.0} rtmpSendMs={rtmpLastSendMilliseconds:0.0} rtmpMaxMs={rtmpMaxSendMilliseconds:0.0} rtmpSlow={rtmpSlowSends} dropped={_currentStats.DroppedFrames} bottleneck={bottleneck}");
                 WriteLog($"stats capture={_currentStats.CaptureFps:0.0}fps encode={_currentStats.EncodedFps:0.0}fps send={_currentStats.SendFps:0.0}fps target={GetActiveOutputFps()}fps bitrate={_currentStats.Bitrate} quality={_captureService.CurrentQuality.Name} encodeMs={_currentStats.EncodeMilliseconds:0.0} captureMs={_currentStats.CaptureMilliseconds:0.0} previewMs={_currentStats.PreviewMilliseconds:0.0} queue={queueDepth} repeated={Interlocked.Read(ref _repeatedEncodedFrames)} keyframes={Interlocked.Read(ref _videoKeyFramesSent)} headers={Interlocked.Read(ref _sequenceHeadersSent)} dropped={_currentStats.DroppedFrames} bottleneck={bottleneck} perf cpu={processCpuPercent:0.0}% threads={_process.Threads.Count} workingSet={workingSetMegabytes:0}MB private={privateMegabytes:0}MB managed={managedMegabytes:0}MB gc={gen0Delta}/{gen1Delta}/{gen2Delta} videoMbps={videoMegabitsPerSecond:0.00} rtmpSendMs={rtmpLastSendMilliseconds:0.0} rtmpMaxMs={rtmpMaxSendMilliseconds:0.0} rtmpSlow={rtmpSlowSends} rtmpBytes={rtmpSendBytes} encoderEvents=input:{_captureService.EncoderHardwareInputRequests} output:{_captureService.EncoderHardwareOutputRequests} pending:{_captureService.EncoderPendingHardwareInputs} pump:{_captureService.EncoderUsesHardwareEventPump} encoder='{_captureService.EncoderMode}' input='{_captureService.EncoderInputFormat}' gpu='{_captureService.EncoderGpuDeviceMode}'");
             }
         }
 
-        private static string ClassifyBottleneck(
+        private string ClassifyBottleneck(
             NativeStreamingStats stats,
             int queueDepth,
             double processCpuPercent,
@@ -875,7 +885,7 @@ namespace Zink.Services.Streaming
             double rtmpMaxSendMilliseconds,
             long rtmpSlowSends)
         {
-            var targetFps = Math.Max(1, OutputFps);
+            var targetFps = Math.Max(1, GetActiveOutputFps());
             if (rtmpLastSendMilliseconds >= 80 || rtmpMaxSendMilliseconds >= 200 || queueDepth > 0 || stats.SendFps < targetFps * 0.75 && rtmpSlowSends > 0)
                 return "rtmp/network";
 
@@ -948,7 +958,7 @@ namespace Zink.Services.Streaming
 
         private void StartLog(
             string safeUrl,
-            ScreenShareQualityProfile quality,
+            StreamingQualityProfile quality,
             int videoBitrateKbps,
             bool lowLatency)
         {
@@ -957,14 +967,28 @@ namespace Zink.Services.Streaming
             var logFolder = ResolveStreamingLogFolder();
             Directory.CreateDirectory(logFolder);
             _currentLogPath = Path.Combine(logFolder, $"native-streaming-{DateTimeOffset.Now:yyyyMMdd-HHmmss}.txt");
-            _logWriter = new StreamWriter(new FileStream(_currentLogPath, FileMode.Create, FileAccess.Write, FileShare.ReadWrite), Encoding.UTF8)
+            lock (_logLock)
             {
-                AutoFlush = true
-            };
+                _logWriter = new StreamWriter(
+                    new FileStream(
+                        _currentLogPath,
+                        FileMode.Create,
+                        FileAccess.Write,
+                        FileShare.ReadWrite,
+                        bufferSize: 64 * 1024,
+                        options: FileOptions.SequentialScan),
+                    Encoding.UTF8,
+                    bufferSize: 16 * 1024)
+                {
+                    // Do not force a disk/OneDrive write from capture, encoder, and RTMP
+                    // threads for every diagnostic line. CloseLog still flushes the buffer.
+                    AutoFlush = false
+                };
+            }
 
             WriteLog("Zink Native Streaming Log");
             WriteLog("Started: " + DateTimeOffset.Now);
-            WriteLog($"Output request: {quality.Width}x{quality.Height} @ {OutputFps}fps; quality={quality.Name}; bitrate={videoBitrateKbps}k; lowLatency={lowLatency}");
+            WriteLog($"Output request: {quality.Width}x{quality.Height} @ {_configuredOutputFps}fps; quality={quality.Name}; bitrate={videoBitrateKbps}k; lowLatency={lowLatency}");
             WriteLog("Capture: Windows Graphics Capture");
             WriteLog("Encoder: Media Foundation H.264");
             WriteLog("Transport: native RTMP publisher");
@@ -972,14 +996,14 @@ namespace Zink.Services.Streaming
         }
 
         private void WriteObsStylePipelineLog(
-            ScreenShareQualityProfile quality,
+            StreamingQualityProfile quality,
             int videoBitrateKbps)
         {
             var pipeline = new ObsStyleStreamingPipeline(new ObsStyleStreamingPipelineOptions
             {
                 Width = quality.Width,
                 Height = quality.Height,
-                Fps = OutputFps,
+                Fps = _configuredOutputFps,
                 VideoBitrateKbps = videoBitrateKbps,
                 VideoEncoder = "GPU H.264 hardware MFT",
                 CaptureMode = "Strict Windows Graphics Capture GPU desktop source",
@@ -1001,7 +1025,8 @@ namespace Zink.Services.Streaming
         {
             try
             {
-                _logWriter?.WriteLine($"[{DateTimeOffset.Now:O}] {message}");
+                lock (_logLock)
+                    _logWriter?.WriteLine($"[{DateTimeOffset.Now:O}] {message}");
             }
             catch
             {
@@ -1012,15 +1037,15 @@ namespace Zink.Services.Streaming
         {
             try
             {
-                _logWriter?.Flush();
-                _logWriter?.Dispose();
+                lock (_logLock)
+                {
+                    _logWriter?.Flush();
+                    _logWriter?.Dispose();
+                    _logWriter = null;
+                }
             }
             catch
             {
-            }
-            finally
-            {
-                _logWriter = null;
             }
         }
 
@@ -1124,7 +1149,7 @@ namespace Zink.Services.Streaming
 
     internal sealed class NativeRtmpClient : IDisposable
     {
-        private const int DefaultChunkSize = 4096;
+        private const int DefaultChunkSize = 65536;
         private readonly SemaphoreSlim _sendLock = new(1, 1);
         private readonly Dictionary<int, RtmpHeader> _receiveHeaders = new();
         private TcpClient? _tcpClient;
@@ -1149,7 +1174,7 @@ namespace Zink.Services.Streaming
             _tcpClient = new TcpClient
             {
                 NoDelay = true,
-                SendBufferSize = 256 * 1024,
+                SendBufferSize = 1024 * 1024,
                 ReceiveBufferSize = 64 * 1024
             };
             await _tcpClient.ConnectAsync(target.Host, target.Port, token);
@@ -2264,9 +2289,10 @@ namespace Zink.Services.Streaming
         private readonly string? _desktopAudioDeviceId;
         private readonly string? _microphoneDeviceId;
         private readonly double _desktopVolume;
+        private readonly string? _excludedDesktopProcessName;
         private readonly double _microphoneVolume;
         private readonly Action<NativeAudioFrame> _frameReady;
-        private readonly SystemLoopbackCaptureService? _desktopCapture;
+        private readonly IAudioCaptureService? _desktopCapture;
         private readonly MicrophoneCaptureService? _microphoneCapture;
         private readonly object _syncRoot = new();
         private readonly Channel<AudioCaptureWorkItem> _captureQueue = Channel.CreateBounded<AudioCaptureWorkItem>(
@@ -2284,6 +2310,7 @@ namespace Zink.Services.Streaming
             bool desktopAudioEnabled,
             string? desktopAudioDeviceId,
             double desktopVolume,
+            string? excludedDesktopProcessName,
             bool microphoneEnabled,
             string? microphoneDeviceId,
             double microphoneVolume,
@@ -2294,11 +2321,14 @@ namespace Zink.Services.Streaming
             _desktopAudioDeviceId = desktopAudioDeviceId;
             _microphoneDeviceId = microphoneDeviceId;
             _desktopVolume = Math.Clamp(desktopVolume, 0, 1);
+            _excludedDesktopProcessName = excludedDesktopProcessName;
             _microphoneVolume = Math.Clamp(microphoneVolume, 0, 1);
             _frameReady = frameReady;
 
             if (_desktopAudioEnabled)
-                _desktopCapture = new SystemLoopbackCaptureService();
+                _desktopCapture = !string.IsNullOrWhiteSpace(_excludedDesktopProcessName)
+                    ? ProcessExcludingLoopbackCaptureService.CreateForApplicationOrSystemLoopback(_excludedDesktopProcessName)
+                    : new SystemLoopbackCaptureService();
 
             if (_microphoneEnabled)
                 _microphoneCapture = new MicrophoneCaptureService();

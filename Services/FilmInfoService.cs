@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
+using System.Net;
 using System.Net.Http;
 using System.Text.Json;
 using System.Text.RegularExpressions;
@@ -47,12 +48,12 @@ namespace Zink.Services
                     return cached;
 
                 var result = await TryFindFilmInfoAsync(searchTitle);
-                Cache[searchTitle] = result;
+                if (result != null)
+                    Cache[searchTitle] = result;
                 return result;
             }
             catch
             {
-                Cache[searchTitle] = null;
                 return null;
             }
             finally
@@ -72,6 +73,15 @@ namespace Zink.Services
             };
 
             var wiki = await TryFindWikipediaSummaryAsync(result.Title, imdb?.Year);
+            if (wiki == null && !string.Equals(result.Title, searchTitle, StringComparison.OrdinalIgnoreCase))
+                wiki = await TryFindWikipediaSummaryAsync(searchTitle, imdb?.Year);
+
+            if (wiki == null || string.IsNullOrWhiteSpace(wiki.Extract))
+                wiki = await TryFindWikidataLinkedWikipediaSummaryAsync(result.Title, searchTitle, imdb?.Year);
+
+            if (wiki == null || string.IsNullOrWhiteSpace(wiki.Extract))
+                wiki = await TryFindWikipediaSearchSnippetSummaryAsync(result.Title, searchTitle, imdb?.Year);
+
             if (wiki != null)
             {
                 result.Title = string.IsNullOrWhiteSpace(wiki.Title) ? result.Title : wiki.Title;
@@ -146,11 +156,85 @@ namespace Zink.Services
 
         private static async Task<WikipediaSummary?> TryFindWikipediaSummaryAsync(string title, int? year)
         {
-            var pageTitle = await TryFindWikipediaPageTitleAsync(title, year);
-            if (string.IsNullOrWhiteSpace(pageTitle))
+            var page = await TryFindWikipediaPageAsync(title, year);
+            if (page == null || string.IsNullOrWhiteSpace(page.Title))
                 return null;
 
-            var url = $"https://en.wikipedia.org/api/rest_v1/page/summary/{Uri.EscapeDataString(pageTitle)}";
+            string sourceUrl = "";
+            string titleFromSummary = page.Title;
+            string wikibaseItemId = "";
+            string extract = "";
+
+            var url = $"https://en.wikipedia.org/api/rest_v1/page/summary/{Uri.EscapeDataString(page.Title)}";
+            using (var response = await Http.GetAsync(url))
+            {
+                if (response.IsSuccessStatusCode)
+                {
+                    using var stream = await response.Content.ReadAsStreamAsync();
+                    using var doc = await JsonDocument.ParseAsync(stream);
+
+                    titleFromSummary = TryGetString(doc.RootElement, "title");
+                    if (string.IsNullOrWhiteSpace(titleFromSummary))
+                        titleFromSummary = page.Title;
+
+                    extract = TryGetString(doc.RootElement, "extract");
+
+                    if (doc.RootElement.TryGetProperty("content_urls", out var urls) &&
+                        urls.TryGetProperty("desktop", out var desktop))
+                    {
+                        sourceUrl = TryGetString(desktop, "page");
+                    }
+
+                    wikibaseItemId = TryGetString(doc.RootElement, "wikibase_item");
+                }
+            }
+
+            if (string.IsNullOrWhiteSpace(extract))
+                extract = await TryFindWikipediaExtractByPageIdAsync(page.PageId);
+
+            if (string.IsNullOrWhiteSpace(wikibaseItemId))
+                wikibaseItemId = await TryFindWikipediaWikibaseItemIdAsync(page.Title);
+
+            if (string.IsNullOrWhiteSpace(sourceUrl))
+                sourceUrl = "https://en.wikipedia.org/wiki/" + Uri.EscapeDataString(page.Title.Replace(' ', '_'));
+
+            return new WikipediaSummary(
+                titleFromSummary,
+                extract.Trim(),
+                sourceUrl,
+                wikibaseItemId);
+        }
+
+        private static async Task<WikipediaSummary?> TryFindWikidataLinkedWikipediaSummaryAsync(string title, string searchTitle, int? year)
+        {
+            foreach (var query in BuildFilmTitleVariants(title, searchTitle, year))
+            {
+                var entity = await TryFindWikidataFilmEntityAsync(query, year);
+                if (entity == null || string.IsNullOrWhiteSpace(entity.EnwikiTitle))
+                    continue;
+
+                var summary = await TryFindWikipediaSummaryByPageTitleAsync(entity.EnwikiTitle);
+                if (summary == null)
+                    continue;
+
+                if (string.IsNullOrWhiteSpace(summary.WikibaseItemId))
+                {
+                    summary = summary with { WikibaseItemId = entity.Id };
+                }
+
+                return summary;
+            }
+
+            return null;
+        }
+
+        private static async Task<WikidataFilmEntity?> TryFindWikidataFilmEntityAsync(string query, int? year)
+        {
+            if (string.IsNullOrWhiteSpace(query))
+                return null;
+
+            var url = "https://www.wikidata.org/w/api.php?action=wbsearchentities&language=en&format=json&limit=8&search=" +
+                      Uri.EscapeDataString(query);
             using var response = await Http.GetAsync(url);
             if (!response.IsSuccessStatusCode)
                 return null;
@@ -158,26 +242,198 @@ namespace Zink.Services
             using var stream = await response.Content.ReadAsStreamAsync();
             using var doc = await JsonDocument.ParseAsync(stream);
 
-            var extract = TryGetString(doc.RootElement, "extract");
-            if (string.IsNullOrWhiteSpace(extract))
-                return null;
-
-            string sourceUrl = "";
-            if (doc.RootElement.TryGetProperty("content_urls", out var urls) &&
-                urls.TryGetProperty("desktop", out var desktop))
+            if (!doc.RootElement.TryGetProperty("search", out var results) ||
+                results.ValueKind != JsonValueKind.Array)
             {
-                sourceUrl = TryGetString(desktop, "page");
+                return null;
             }
 
-            var wikibaseItemId = TryGetString(doc.RootElement, "wikibase_item");
+            foreach (var result in results.EnumerateArray())
+            {
+                var id = TryGetString(result, "id");
+                var label = TryGetString(result, "label");
+                var description = TryGetString(result, "description");
+                if (string.IsNullOrWhiteSpace(id) || string.IsNullOrWhiteSpace(label))
+                    continue;
+
+                var isLikelyFilm =
+                    description.Contains("film", StringComparison.OrdinalIgnoreCase) ||
+                    description.Contains("movie", StringComparison.OrdinalIgnoreCase) ||
+                    (year > 0 && description.Contains(year.Value.ToString(CultureInfo.InvariantCulture), StringComparison.OrdinalIgnoreCase));
+
+                if (!isLikelyFilm)
+                    continue;
+
+                var enwikiTitle = await TryFindWikidataEnglishWikipediaTitleAsync(id);
+                if (!string.IsNullOrWhiteSpace(enwikiTitle))
+                    return new WikidataFilmEntity(id, label, enwikiTitle);
+            }
+
+            return null;
+        }
+
+        private static async Task<string> TryFindWikidataEnglishWikipediaTitleAsync(string wikibaseItemId)
+        {
+            if (string.IsNullOrWhiteSpace(wikibaseItemId))
+                return "";
+
+            var url = $"https://www.wikidata.org/wiki/Special:EntityData/{Uri.EscapeDataString(wikibaseItemId)}.json";
+            using var response = await Http.GetAsync(url);
+            if (!response.IsSuccessStatusCode)
+                return "";
+
+            using var stream = await response.Content.ReadAsStreamAsync();
+            using var doc = await JsonDocument.ParseAsync(stream);
+
+            if (!doc.RootElement.TryGetProperty("entities", out var entities) ||
+                !entities.TryGetProperty(wikibaseItemId, out var entity) ||
+                !entity.TryGetProperty("sitelinks", out var sitelinks) ||
+                !sitelinks.TryGetProperty("enwiki", out var enwiki))
+            {
+                return "";
+            }
+
+            return TryGetString(enwiki, "title");
+        }
+
+        private static async Task<WikipediaSummary?> TryFindWikipediaSummaryByPageTitleAsync(string pageTitle)
+        {
+            if (string.IsNullOrWhiteSpace(pageTitle))
+                return null;
+
+            var pageId = await TryFindWikipediaPageIdByTitleAsync(pageTitle);
+            string sourceUrl = "";
+            string titleFromSummary = pageTitle;
+            string wikibaseItemId = "";
+            string extract = "";
+
+            var url = $"https://en.wikipedia.org/api/rest_v1/page/summary/{Uri.EscapeDataString(pageTitle)}";
+            using (var response = await Http.GetAsync(url))
+            {
+                if (response.IsSuccessStatusCode)
+                {
+                    using var stream = await response.Content.ReadAsStreamAsync();
+                    using var doc = await JsonDocument.ParseAsync(stream);
+
+                    titleFromSummary = TryGetString(doc.RootElement, "title");
+                    if (string.IsNullOrWhiteSpace(titleFromSummary))
+                        titleFromSummary = pageTitle;
+
+                    extract = TryGetString(doc.RootElement, "extract");
+                    wikibaseItemId = TryGetString(doc.RootElement, "wikibase_item");
+
+                    if (doc.RootElement.TryGetProperty("content_urls", out var urls) &&
+                        urls.TryGetProperty("desktop", out var desktop))
+                    {
+                        sourceUrl = TryGetString(desktop, "page");
+                    }
+                }
+            }
+
+            if (string.IsNullOrWhiteSpace(extract))
+                extract = await TryFindWikipediaExtractByPageIdAsync(pageId);
+
             if (string.IsNullOrWhiteSpace(wikibaseItemId))
                 wikibaseItemId = await TryFindWikipediaWikibaseItemIdAsync(pageTitle);
 
-            return new WikipediaSummary(
-                TryGetString(doc.RootElement, "title"),
-                extract.Trim(),
-                sourceUrl,
-                wikibaseItemId);
+            if (string.IsNullOrWhiteSpace(sourceUrl))
+                sourceUrl = "https://en.wikipedia.org/wiki/" + Uri.EscapeDataString(pageTitle.Replace(' ', '_'));
+
+            return string.IsNullOrWhiteSpace(extract) && string.IsNullOrWhiteSpace(wikibaseItemId)
+                ? null
+                : new WikipediaSummary(titleFromSummary, extract.Trim(), sourceUrl, wikibaseItemId);
+        }
+
+        private static async Task<WikipediaSummary?> TryFindWikipediaSearchSnippetSummaryAsync(string title, string searchTitle, int? year)
+        {
+            foreach (var query in BuildFilmTitleVariants(title, searchTitle, year))
+            {
+                var url = "https://en.wikipedia.org/w/api.php?action=query&list=search&format=json&srlimit=8&srsearch=" +
+                          Uri.EscapeDataString(query);
+                using var response = await Http.GetAsync(url);
+                if (!response.IsSuccessStatusCode)
+                    continue;
+
+                using var stream = await response.Content.ReadAsStreamAsync();
+                using var doc = await JsonDocument.ParseAsync(stream);
+
+                if (!doc.RootElement.TryGetProperty("query", out var queryElement) ||
+                    !queryElement.TryGetProperty("search", out var results) ||
+                    results.ValueKind != JsonValueKind.Array)
+                {
+                    continue;
+                }
+
+                foreach (var result in results.EnumerateArray())
+                {
+                    var pageTitle = TryGetString(result, "title");
+                    var snippet = CleanWikipediaSnippet(TryGetString(result, "snippet"));
+                    if (string.IsNullOrWhiteSpace(pageTitle) || string.IsNullOrWhiteSpace(snippet))
+                        continue;
+
+                    if (!LooksLikeFilmSearchResult(pageTitle, snippet, title, searchTitle, year))
+                        continue;
+
+                    var sourceUrl = "https://en.wikipedia.org/wiki/" + Uri.EscapeDataString(pageTitle.Replace(' ', '_'));
+                    var wikibaseItemId = await TryFindWikipediaWikibaseItemIdAsync(pageTitle);
+
+                    return new WikipediaSummary(pageTitle, snippet, sourceUrl, wikibaseItemId);
+                }
+            }
+
+            return null;
+        }
+
+        private static async Task<int> TryFindWikipediaPageIdByTitleAsync(string pageTitle)
+        {
+            var url = "https://en.wikipedia.org/w/api.php?action=query&format=json&titles=" +
+                      Uri.EscapeDataString(pageTitle);
+            using var response = await Http.GetAsync(url);
+            if (!response.IsSuccessStatusCode)
+                return 0;
+
+            using var stream = await response.Content.ReadAsStreamAsync();
+            using var doc = await JsonDocument.ParseAsync(stream);
+
+            if (!doc.RootElement.TryGetProperty("query", out var query) ||
+                !query.TryGetProperty("pages", out var pages) ||
+                pages.ValueKind != JsonValueKind.Object)
+            {
+                return 0;
+            }
+
+            foreach (var page in pages.EnumerateObject())
+            {
+                var id = TryGetInt(page.Value, "pageid");
+                if (id > 0)
+                    return id;
+            }
+
+            return 0;
+        }
+
+        private static async Task<string> TryFindWikipediaExtractByPageIdAsync(int pageId)
+        {
+            if (pageId <= 0)
+                return "";
+
+            var url = "https://en.wikipedia.org/w/api.php?action=query&prop=extracts&exintro=1&explaintext=1&format=json&pageids=" +
+                      pageId.ToString(CultureInfo.InvariantCulture);
+            using var response = await Http.GetAsync(url);
+            if (!response.IsSuccessStatusCode)
+                return "";
+
+            using var stream = await response.Content.ReadAsStreamAsync();
+            using var doc = await JsonDocument.ParseAsync(stream);
+
+            if (!doc.RootElement.TryGetProperty("query", out var query) ||
+                !query.TryGetProperty("pages", out var pages) ||
+                !pages.TryGetProperty(pageId.ToString(CultureInfo.InvariantCulture), out var page))
+            {
+                return "";
+            }
+
+            return TryGetString(page, "extract").Trim();
         }
 
         private static async Task<string> TryFindWikipediaWikibaseItemIdAsync(string pageTitle)
@@ -248,7 +504,7 @@ namespace Zink.Services
             return "";
         }
 
-        private static async Task<string?> TryFindWikipediaPageTitleAsync(string title, int? year)
+        private static async Task<WikipediaPageMatch?> TryFindWikipediaPageAsync(string title, int? year)
         {
             var queries = new[]
             {
@@ -283,11 +539,26 @@ namespace Zink.Services
                     if (string.IsNullOrWhiteSpace(pageTitle))
                         continue;
 
-                    if (pageTitle.Contains("film", StringComparison.OrdinalIgnoreCase) ||
-                        NormalizeMovieTitleForMatch(pageTitle).Contains(NormalizeMovieTitleForMatch(title), StringComparison.OrdinalIgnoreCase))
-                    {
-                        return pageTitle;
-                    }
+                    var normalizedPageTitle = NormalizeMovieTitleForMatch(pageTitle);
+                    var normalizedTitle = NormalizeMovieTitleForMatch(title);
+                    if (string.Equals(normalizedPageTitle, normalizedTitle, StringComparison.OrdinalIgnoreCase))
+                        return new WikipediaPageMatch(pageTitle, TryGetInt(result, "pageid"));
+                }
+
+                foreach (var result in results.EnumerateArray())
+                {
+                    var pageTitle = TryGetString(result, "title");
+                    if (string.IsNullOrWhiteSpace(pageTitle))
+                        continue;
+
+                    var normalizedPageTitle = NormalizeMovieTitleForMatch(pageTitle);
+                    var normalizedTitle = NormalizeMovieTitleForMatch(title);
+                    var looksRelevant =
+                        normalizedPageTitle.Contains(normalizedTitle, StringComparison.OrdinalIgnoreCase) ||
+                        pageTitle.Contains("film", StringComparison.OrdinalIgnoreCase);
+
+                    if (looksRelevant)
+                        return new WikipediaPageMatch(pageTitle, TryGetInt(result, "pageid"));
                 }
             }
 
@@ -315,6 +586,86 @@ namespace Zink.Services
             normalized = Regex.Replace(normalized, @"[^a-zA-Z0-9]+", " ");
             normalized = Regex.Replace(normalized, @"\s+", " ").Trim();
             return normalized;
+        }
+
+        private static IEnumerable<string> BuildFilmTitleVariants(string title, string searchTitle, int? year)
+        {
+            var values = new List<string> { title, searchTitle };
+
+            foreach (var value in values.ToArray())
+            {
+                var trimmed = value?.Trim() ?? "";
+                if (string.IsNullOrWhiteSpace(trimmed))
+                    continue;
+
+                if (!trimmed.Contains(':') && trimmed.Count(char.IsWhiteSpace) >= 1)
+                {
+                    var lastSpace = trimmed.LastIndexOf(' ');
+                    if (lastSpace > 0 && lastSpace < trimmed.Length - 1)
+                        values.Add(trimmed[..lastSpace] + ": " + trimmed[(lastSpace + 1)..]);
+                }
+
+                if (year > 0)
+                    values.Add($"{trimmed} {year.Value.ToString(CultureInfo.InvariantCulture)} film");
+
+                values.Add($"{trimmed} film");
+            }
+
+            return values
+                .Where(v => !string.IsNullOrWhiteSpace(v))
+                .Distinct(StringComparer.OrdinalIgnoreCase);
+        }
+
+        private static bool LooksLikeFilmSearchResult(string pageTitle, string snippet, string title, string searchTitle, int? year)
+        {
+            var combined = $"{pageTitle} {snippet}";
+            var normalizedCombined = NormalizeMovieTitleForMatch(combined);
+            var normalizedTitle = NormalizeMovieTitleForMatch(title);
+            var normalizedSearchTitle = NormalizeMovieTitleForMatch(searchTitle);
+
+            var titleMatches =
+                (!string.IsNullOrWhiteSpace(normalizedTitle) && normalizedCombined.Contains(normalizedTitle, StringComparison.OrdinalIgnoreCase)) ||
+                (!string.IsNullOrWhiteSpace(normalizedSearchTitle) && normalizedCombined.Contains(normalizedSearchTitle, StringComparison.OrdinalIgnoreCase));
+
+            if (!titleMatches)
+                return false;
+
+            var filmish =
+                combined.Contains("film", StringComparison.OrdinalIgnoreCase) ||
+                combined.Contains("movie", StringComparison.OrdinalIgnoreCase) ||
+                combined.Contains("director", StringComparison.OrdinalIgnoreCase) ||
+                combined.Contains("starring", StringComparison.OrdinalIgnoreCase);
+
+            if (!filmish)
+                return false;
+
+            if (year == null || year <= 0)
+                return true;
+
+            return combined.Contains(year.Value.ToString(CultureInfo.InvariantCulture), StringComparison.OrdinalIgnoreCase) ||
+                   pageTitle.Contains("film", StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static string CleanWikipediaSnippet(string snippet)
+        {
+            if (string.IsNullOrWhiteSpace(snippet))
+                return "";
+
+            var text = Regex.Replace(snippet, "<.*?>", "");
+            text = WebUtility.HtmlDecode(text);
+            text = Regex.Replace(text, @"\s+", " ").Trim();
+
+            if (string.IsNullOrWhiteSpace(text))
+                return "";
+
+            if (!text.EndsWith(".", StringComparison.Ordinal) &&
+                !text.EndsWith("!", StringComparison.Ordinal) &&
+                !text.EndsWith("?", StringComparison.Ordinal))
+            {
+                text += ".";
+            }
+
+            return text;
         }
 
         private static string TryGetString(JsonElement element, string propertyName)
@@ -356,6 +707,8 @@ namespace Zink.Services
         }
 
         private sealed record ImdbSuggestion(string Title, int Year);
+        private sealed record WikidataFilmEntity(string Id, string Label, string EnwikiTitle);
+        private sealed record WikipediaPageMatch(string Title, int PageId);
         private sealed record WikipediaSummary(string Title, string Extract, string Url, string WikibaseItemId);
     }
 }

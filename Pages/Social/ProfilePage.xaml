@@ -93,15 +93,28 @@
                             BorderBrush="{StaticResource GlassPanelBorderBrush}"
                             BorderThickness="1">
                         <StackPanel Spacing="16">
-                            <Grid Width="112" Height="112"
+                            <Grid Width="180" Height="180"
                                   HorizontalAlignment="Center">
                                 <Ellipse Fill="#263746"/>
                                 <FontIcon Glyph="&#xE77B;"
-                                          FontSize="44"
+                                          FontSize="64"
                                           Foreground="White"
                                           HorizontalAlignment="Center"
                                           VerticalAlignment="Center"/>
+                                <Image x:Name="AvatarImage"
+                                       Width="180"
+                                       Height="180"
+                                       Stretch="UniformToFill"/>
                             </Grid>
+
+                            <Button Style="{StaticResource GlassButtonStyle}"
+                                    HorizontalAlignment="Center"
+                                    Click="ChooseAvatarButton_Click">
+                                <StackPanel Orientation="Horizontal" Spacing="8">
+                                    <FontIcon Glyph="&#xE8B9;" FontSize="15"/>
+                                    <TextBlock Text="Choose profile picture"/>
+                                </StackPanel>
+                            </Button>
 
                             <StackPanel Spacing="8">
                                 <Border Padding="14"
@@ -117,6 +130,9 @@
                                                    Foreground="{StaticResource MutedTextBrush}"
                                                    TextWrapping="Wrap"/>
                                         <TextBlock x:Name="EmailText"
+                                                   Foreground="{StaticResource MutedTextBrush}"
+                                                   TextWrapping="Wrap"/>
+                                        <TextBlock x:Name="SignedUpText"
                                                    Foreground="{StaticResource MutedTextBrush}"
                                                    TextWrapping="Wrap"/>
                                     </StackPanel>
@@ -165,6 +181,28 @@
                                          MinHeight="46"
                                          CornerRadius="14"
                                          PlaceholderText="Display name"/>
+                            </StackPanel>
+
+                            <StackPanel Spacing="10">
+                                <StackPanel Spacing="4">
+                                    <TextBlock Text="Social media links"
+                                               Foreground="White"
+                                               FontWeight="SemiBold"/>
+                                    <TextBlock Text="Add links friends can use to find you elsewhere."
+                                               Foreground="{StaticResource MutedTextBrush}"
+                                               TextWrapping="Wrap"/>
+                                </StackPanel>
+
+                                <StackPanel x:Name="SocialLinksPanel" Spacing="8"/>
+
+                                <Button Style="{StaticResource GlassButtonStyle}"
+                                        HorizontalAlignment="Left"
+                                        Click="AddSocialLinkButton_Click">
+                                    <StackPanel Orientation="Horizontal" Spacing="8">
+                                        <FontIcon Glyph="&#xE710;" FontSize="15"/>
+                                        <TextBlock Text="Add social link"/>
+                                    </StackPanel>
+                                </Button>
                             </StackPanel>
 
                             <Grid ColumnSpacing="10">

@@ -1,0 +1,15 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "zink-free",
+  "main": "src/index.js",
+  "compatibility_date": "2026-08-01",
+  "d1_databases": [{
+    "binding": "DB",
+    "database_name": "zink-free",
+    "database_id": "0ab49dad-2f31-4f2c-bf24-54968eef1211"
+  }],
+  "durable_objects": {
+    "bindings": [{ "name": "SIGNALING", "class_name": "SignalingHub" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["SignalingHub"] }]
+}

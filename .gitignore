@@ -362,3 +362,10 @@ MigrationBackup/
 
 # Fody - auto-generated XML schema
 FodyWeavers.xsd
+
+# Local development caches and generated media
+/.codex/
+/.codex-temp-video/
+.wrangler/
+/output/
+**/720P logs/

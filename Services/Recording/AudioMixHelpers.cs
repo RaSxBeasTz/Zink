@@ -91,18 +91,23 @@ namespace Zink.Services.Recording
             IReadOnlyList<AudioPacket>? systemPackets,
             IReadOnlyList<AudioPacket>? micPackets)
         {
-            var normalizedSystem = NormalizePackets(systemPackets);
-            var normalizedMic = NormalizePackets(micPackets);
+            int outputChannels = systemPackets?
+                .Where(packet => packet.Channels >= 1 && packet.Channels <= 8)
+                .Select(packet => packet.Channels)
+                .DefaultIfEmpty(TargetChannels)
+                .Max() ?? TargetChannels;
+            var normalizedSystem = NormalizePackets(systemPackets, outputChannels);
+            var normalizedMic = NormalizePackets(micPackets, outputChannels);
 
             if (normalizedSystem.Count == 0 && normalizedMic.Count == 0)
                 return new List<AudioPacket>();
 
             byte[]? systemTrack = normalizedSystem.Count > 0
-                ? BuildContinuousTrack(normalizedSystem)
+                ? BuildContinuousTrack(normalizedSystem, outputChannels)
                 : null;
 
             byte[]? micTrack = normalizedMic.Count > 0
-                ? BuildContinuousTrack(normalizedMic)
+                ? BuildContinuousTrack(normalizedMic, outputChannels)
                 : null;
 
             if (systemTrack is null || systemTrack.Length == 0)
@@ -114,7 +119,7 @@ namespace Zink.Services.Recording
                         Timestamp = TimeSpan.Zero,
                         PcmData = micTrack ?? Array.Empty<byte>(),
                         SampleRate = TargetSampleRate,
-                        Channels = TargetChannels,
+                        Channels = outputChannels,
                         BitsPerSample = TargetBitsPerSample
                     }
                 };
@@ -129,7 +134,7 @@ namespace Zink.Services.Recording
                         Timestamp = TimeSpan.Zero,
                         PcmData = systemTrack,
                         SampleRate = TargetSampleRate,
-                        Channels = TargetChannels,
+                        Channels = outputChannels,
                         BitsPerSample = TargetBitsPerSample
                     }
                 };
@@ -168,13 +173,29 @@ namespace Zink.Services.Recording
                     Timestamp = TimeSpan.Zero,
                     PcmData = mixed,
                     SampleRate = TargetSampleRate,
-                    Channels = TargetChannels,
+                    Channels = outputChannels,
                     BitsPerSample = TargetBitsPerSample
                 }
             };
         }
 
         public static AudioPacket NormalizePacket(AudioPacket packet)
+            => NormalizePacket(packet, TargetChannels);
+
+        private static List<AudioPacket> NormalizePackets(
+            IReadOnlyList<AudioPacket>? packets,
+            int targetChannels)
+        {
+            if (packets is null || packets.Count == 0)
+                return new List<AudioPacket>();
+
+            return packets
+                .OrderBy(packet => packet.Timestamp)
+                .Select(packet => NormalizePacket(packet, targetChannels))
+                .ToList();
+        }
+
+        private static AudioPacket NormalizePacket(AudioPacket packet, int targetChannels)
         {
             if (packet is null)
                 throw new ArgumentNullException(nameof(packet));
@@ -182,7 +203,22 @@ namespace Zink.Services.Recording
             short[] sourceSamples = ConvertToInt16Samples(packet);
             short[] channelNormalized;
 
-            if (TargetChannels == 2)
+            if (targetChannels < 1 || targetChannels > 8)
+                throw new InvalidOperationException($"Unsupported target channel count: {targetChannels}");
+
+            if (packet.Channels == targetChannels)
+            {
+                channelNormalized = sourceSamples;
+            }
+            else if (packet.Channels == 1)
+            {
+                channelNormalized = MonoToChannels(sourceSamples, targetChannels);
+            }
+            else if (packet.Channels == 2 && targetChannels > 2)
+            {
+                channelNormalized = StereoToMultichannel(sourceSamples, targetChannels);
+            }
+            else if (targetChannels == 2)
             {
                 if (packet.Channels == 1)
                 {
@@ -197,7 +233,7 @@ namespace Zink.Services.Recording
                     throw new InvalidOperationException($"Unsupported channel count: {packet.Channels}");
                 }
             }
-            else if (TargetChannels == 1)
+            else if (targetChannels == 1)
             {
                 if (packet.Channels == 1)
                 {
@@ -214,7 +250,7 @@ namespace Zink.Services.Recording
             }
             else
             {
-                throw new InvalidOperationException($"Unsupported target channel count: {TargetChannels}");
+                throw new InvalidOperationException($"Unsupported channel conversion: {packet.Channels} to {targetChannels}");
             }
 
             short[] resampled = packet.SampleRate == TargetSampleRate
@@ -223,24 +259,24 @@ namespace Zink.Services.Recording
                     channelNormalized,
                     packet.SampleRate,
                     TargetSampleRate,
-                    TargetChannels);
+                    targetChannels);
 
             return new AudioPacket
             {
                 Timestamp = packet.Timestamp,
                 PcmData = Int16ToBytes(resampled),
                 SampleRate = TargetSampleRate,
-                Channels = TargetChannels,
+                Channels = targetChannels,
                 BitsPerSample = TargetBitsPerSample
             };
         }
 
-        private static byte[] BuildContinuousTrack(IReadOnlyList<AudioPacket> packets)
+        private static byte[] BuildContinuousTrack(IReadOnlyList<AudioPacket> packets, int channels)
         {
             if (packets.Count == 0)
                 return Array.Empty<byte>();
 
-            int blockAlign = TargetChannels * (TargetBitsPerSample / 8);
+            int blockAlign = channels * (TargetBitsPerSample / 8);
             int byteRate = TargetSampleRate * blockAlign;
 
             long totalBytes = 0;
@@ -358,6 +394,7 @@ namespace Zink.Services.Recording
 
         private static short[] BytesFloat32ToInt16(byte[] data)
         {
+            const float conversionHeadroom = 0.7079458f; // -3 dB prevents hard clipping and AAC overshoot.
             int sampleCount = data.Length / 4;
             short[] samples = new short[sampleCount];
 
@@ -371,7 +408,7 @@ namespace Zink.Services.Recording
                 if (value > 1f) value = 1f;
                 if (value < -1f) value = -1f;
 
-                samples[i] = (short)Math.Round(value * short.MaxValue);
+                samples[i] = (short)Math.Round(value * conversionHeadroom * short.MaxValue);
             }
 
             return samples;
@@ -403,6 +440,35 @@ namespace Zink.Services.Recording
             }
 
             return stereo;
+        }
+
+        private static short[] MonoToChannels(short[] monoSamples, int channels)
+        {
+            if (monoSamples.Length == 0)
+                return Array.Empty<short>();
+
+            short[] output = new short[monoSamples.Length * channels];
+            for (int frame = 0; frame < monoSamples.Length; frame++)
+            {
+                // A microphone is a front-centre source. Duplicate it into the
+                // front pair while leaving spatial surround channels untouched.
+                output[frame * channels] = monoSamples[frame];
+                if (channels > 1)
+                    output[(frame * channels) + 1] = monoSamples[frame];
+            }
+            return output;
+        }
+
+        private static short[] StereoToMultichannel(short[] stereoSamples, int channels)
+        {
+            int frameCount = stereoSamples.Length / 2;
+            short[] output = new short[frameCount * channels];
+            for (int frame = 0; frame < frameCount; frame++)
+            {
+                output[frame * channels] = stereoSamples[frame * 2];
+                output[(frame * channels) + 1] = stereoSamples[(frame * 2) + 1];
+            }
+            return output;
         }
 
         private static short[] StereoToMono(short[] stereoSamples)

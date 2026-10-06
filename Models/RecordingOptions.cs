@@ -11,6 +11,7 @@
         public int OutputHeight { get; set; } = 0;
         public uint FrameRate { get; set; } = 60;
         public uint VideoBitrate { get; set; } = 0;
+        public bool AllowHighFrameRateCapture { get; set; } = false;
 
         public RecordingOptions Clone()
         {
@@ -24,7 +25,8 @@
                 OutputWidth = OutputWidth,
                 OutputHeight = OutputHeight,
                 FrameRate = FrameRate,
-                VideoBitrate = VideoBitrate
+                VideoBitrate = VideoBitrate,
+                AllowHighFrameRateCapture = AllowHighFrameRateCapture
             };
         }
     }

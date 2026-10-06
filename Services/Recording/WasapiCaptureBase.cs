@@ -27,10 +27,15 @@ namespace Zink.Services.Recording
         private DateTime _captureStartUtc;
         private long _packetCount;
         private long _totalBytes;
+        private int _nonZeroAudioPackets;
+        private float _largestObservedSample;
 
         // Stable audio-clock tracking.
         private long _capturedFrames;
         private int _bytesPerFrame;
+        private long _firstQpcPosition100ns;
+        private TimeSpan _nextPacketTimestamp;
+        private bool _hasNextPacketTimestamp;
 
         public event EventHandler<AudioPacket>? AudioPacketArrived;
 
@@ -39,6 +44,7 @@ namespace Zink.Services.Recording
 
         protected abstract bool UseLoopback { get; }
         protected abstract EDataFlow DataFlow { get; }
+        private protected virtual bool UsesFixedLoopbackFormat => false;
 
         public async Task StartAsync(string? deviceId = null)
         {
@@ -53,17 +59,26 @@ namespace Zink.Services.Recording
                 await RecorderLog.InfoAsync(GetType().Name,
                     $"Starting audio capture. DeviceId='{deviceId ?? "(default)"}', Loopback={UseLoopback}, DataFlow={DataFlow}");
 
-                InitializeAudioClient(deviceId);
+                await InitializeAudioClientAsync(deviceId);
 
                 var cts = new CancellationTokenSource();
                 _cts = cts;
                 _captureStartUtc = DateTime.UtcNow;
                 _packetCount = 0;
                 _totalBytes = 0;
+                _nonZeroAudioPackets = 0;
+                _largestObservedSample = 0;
                 _capturedFrames = 0;
                 _bytesPerFrame = _waveFormat.nBlockAlign;
+                _firstQpcPosition100ns = -1;
+                _nextPacketTimestamp = TimeSpan.Zero;
+                _hasNextPacketTimestamp = false;
 
-                _workerTask = Task.Run(() => CaptureLoop(cts.Token), cts.Token);
+                _workerTask = Task.Factory.StartNew(
+                    () => CaptureLoop(cts.Token),
+                    cts.Token,
+                    TaskCreationOptions.LongRunning,
+                    TaskScheduler.Default);
 
                 lock (_gate)
                 {
@@ -136,31 +151,53 @@ namespace Zink.Services.Recording
             DeviceId = null;
 
             await RecorderLog.InfoAsync(GetType().Name,
-                $"Audio capture stopped. Packets={_packetCount}, Bytes={_totalBytes}, CapturedFrames={_capturedFrames}");
+                $"Audio capture stopped. Packets={_packetCount}, Bytes={_totalBytes}, CapturedFrames={_capturedFrames}, NonZeroPackets={_nonZeroAudioPackets}, Peak={_largestObservedSample:F6}");
         }
 
-        private void InitializeAudioClient(string? deviceId)
+        private protected virtual Task<IAudioClient?> ActivateCustomAudioClientAsync()
         {
-            _enumerator = (IMMDeviceEnumerator)new MMDeviceEnumeratorComObject();
+            return Task.FromResult<IAudioClient?>(null);
+        }
 
-            _device = ResolveDevice(deviceId);
-
-            object audioClientObj;
-
-            Guid audioClientGuid = CoreAudioGuids.IID_IAudioClient;
-            HResult.Check(
-                _device!.Activate(ref audioClientGuid, CLSCTX.ALL, IntPtr.Zero, out audioClientObj),
-                "IMMDevice.Activate(IAudioClient)");
-
-            _audioClient = (IAudioClient)audioClientObj;
+        private async Task InitializeAudioClientAsync(string? deviceId)
+        {
+            _audioClient = await ActivateCustomAudioClientAsync();
+            if (_audioClient is null)
+            {
+                _enumerator = (IMMDeviceEnumerator)new MMDeviceEnumeratorComObject();
+                _device = ResolveDevice(deviceId);
+                Guid audioClientGuid = CoreAudioGuids.IID_IAudioClient;
+                HResult.Check(
+                    _device!.Activate(ref audioClientGuid, CLSCTX.ALL, IntPtr.Zero, out var audioClientObj),
+                    "IMMDevice.Activate(IAudioClient)");
+                _audioClient = (IAudioClient)audioClientObj;
+            }
 
             IntPtr mixFormatPtr = IntPtr.Zero;
 
             try
             {
-                HResult.Check(
-                    _audioClient.GetMixFormat(out mixFormatPtr),
-                    "IAudioClient.GetMixFormat");
+                if (UsesFixedLoopbackFormat)
+                {
+                    _waveFormat = new WAVEFORMATEX
+                    {
+                        wFormatTag = 3,
+                        nChannels = 2,
+                        nSamplesPerSec = 44100,
+                        wBitsPerSample = 32,
+                        nBlockAlign = 8,
+                        nAvgBytesPerSec = 44100 * 8,
+                        cbSize = 0
+                    };
+                    mixFormatPtr = Marshal.AllocCoTaskMem(Marshal.SizeOf<WAVEFORMATEX>());
+                    Marshal.StructureToPtr(_waveFormat, mixFormatPtr, false);
+                }
+                else
+                {
+                    HResult.Check(
+                        _audioClient.GetMixFormat(out mixFormatPtr),
+                        "IAudioClient.GetMixFormat");
+                }
 
                 _waveFormat = Marshal.PtrToStructure<WAVEFORMATEX>(mixFormatPtr);
                 _isFloatFormat = IsFloatWaveFormat(mixFormatPtr, _waveFormat);
@@ -241,18 +278,22 @@ namespace Zink.Services.Recording
                 }
             }
 
+            // Games, browsers and the Windows volume flyout follow the console
+            // render endpoint. eMultimedia can point at an idle device while
+            // WASAPI still returns non-SILENT zero-filled packets.
+            ERole role = UseLoopback ? ERole.eConsole : ERole.eCommunications;
             HResult.Check(
-                _enumerator.GetDefaultAudioEndpoint(DataFlow, ERole.eMultimedia, out IMMDevice defaultDevice),
+                _enumerator.GetDefaultAudioEndpoint(DataFlow, role, out IMMDevice defaultDevice),
                 "IMMDeviceEnumerator.GetDefaultAudioEndpoint");
 
             RecorderLog.InfoAsync(GetType().Name,
-                $"Using default endpoint for {DataFlow}.")
+                $"Using default endpoint for {DataFlow}, role={role}.")
                 .ConfigureAwait(false);
 
             return defaultDevice;
         }
 
-        private async Task CaptureLoop(CancellationToken token)
+        private void CaptureLoop(CancellationToken token)
         {
             var mmcssHandle = IntPtr.Zero;
             try
@@ -264,12 +305,12 @@ namespace Zink.Services.Recording
                     if (mmcssHandle != IntPtr.Zero)
                         CaptureNativeMethods.AvSetMmThreadPriority(mmcssHandle, AvrtPriority.Critical);
 
-                    await RecorderLog.InfoAsync(GetType().Name,
+                    _ = RecorderLog.InfoAsync(GetType().Name,
                         $"Audio capture MMCSS enabled. taskIndex={taskIndex}, eventCallback={_captureEvent is not null}");
                 }
                 catch (Exception ex)
                 {
-                    await RecorderLog.ErrorAsync(GetType().Name, ex, "Audio MMCSS setup failed");
+                    _ = RecorderLog.ErrorAsync(GetType().Name, ex, "Audio MMCSS setup failed");
                 }
 
                 while (!token.IsCancellationRequested)
@@ -284,7 +325,7 @@ namespace Zink.Services.Recording
                     }
                     catch (Exception ex)
                     {
-                        await RecorderLog.ErrorAsync(GetType().Name, ex, "GetNextPacketSize failed");
+                        _ = RecorderLog.ErrorAsync(GetType().Name, ex, "GetNextPacketSize failed");
                         _captureEvent?.WaitOne(5);
                         continue;
                     }
@@ -326,11 +367,53 @@ namespace Zink.Services.Recording
                             if (!isSilent && byteCount > 0 && dataPtr != IntPtr.Zero)
                             {
                                 Marshal.Copy(dataPtr, pcm, 0, byteCount);
+                                float packetPeak = MeasurePeak(pcm, _isFloatFormat, _waveFormat.wBitsPerSample);
+                                if (packetPeak > 0.000001f)
+                                {
+                                    _nonZeroAudioPackets++;
+                                    _largestObservedSample = Math.Max(_largestObservedSample, packetPeak);
+                                }
                             }
 
-                            // Use the audio sample clock, not wall-clock arrival time.
-                            TimeSpan packetTimestamp = TimeSpan.FromSeconds(
-                                _capturedFrames / (double)_waveFormat.nSamplesPerSec);
+                            // WASAPI supplies the QPC position of the first audio sample in
+                            // 100-nanosecond units. Unlike a packet counter, this clock keeps
+                            // advancing across a capture discontinuity, so the mixer can insert
+                            // silence for a lost interval instead of shifting all later audio.
+                            TimeSpan clockTimestamp;
+                            if (qpcPosition > 0)
+                            {
+                                if (_firstQpcPosition100ns < 0)
+                                    _firstQpcPosition100ns = qpcPosition;
+
+                                clockTimestamp = TimeSpan.FromTicks(
+                                    Math.Max(0, qpcPosition - _firstQpcPosition100ns));
+                            }
+                            else
+                            {
+                                clockTimestamp = TimeSpan.FromSeconds(
+                                    _capturedFrames / (double)_waveFormat.nSamplesPerSec);
+                            }
+
+                            // QPC contains small packet-to-packet timing jitter. Placing every
+                            // packet at that raw position can create tiny gaps or overlaps that
+                            // are heard as crackles. Keep normal packets sample-contiguous, but
+                            // retain genuine capture gaps so later audio remains synchronized.
+                            TimeSpan packetTimestamp;
+                            if (!_hasNextPacketTimestamp)
+                            {
+                                packetTimestamp = clockTimestamp;
+                                _hasNextPacketTimestamp = true;
+                            }
+                            else
+                            {
+                                TimeSpan clockDifference = clockTimestamp - _nextPacketTimestamp;
+                                packetTimestamp = Math.Abs(clockDifference.TotalMilliseconds) >= 20
+                                    ? clockTimestamp
+                                    : _nextPacketTimestamp;
+                            }
+
+                            _nextPacketTimestamp = packetTimestamp + TimeSpan.FromSeconds(
+                                framesRead / (double)_waveFormat.nSamplesPerSec);
 
                             _capturedFrames += framesRead;
                             _packetCount++;
@@ -338,8 +421,8 @@ namespace Zink.Services.Recording
 
                             if (_packetCount % 200 == 0)
                             {
-                                await RecorderLog.InfoAsync(GetType().Name,
-                                    $"Packets={_packetCount}, Bytes={_totalBytes}, FramesRead={framesRead}, Silent={isSilent}, Timestamp={packetTimestamp}, DevicePosition={devicePosition}, Qpc={qpcPosition}");
+                                _ = RecorderLog.InfoAsync(GetType().Name,
+                                    $"Packets={_packetCount}, Bytes={_totalBytes}, FramesRead={framesRead}, Silent={isSilent}, NonZeroPackets={_nonZeroAudioPackets}, Peak={_largestObservedSample:F6}, Timestamp={packetTimestamp}, DevicePosition={devicePosition}, Qpc={qpcPosition}");
                             }
 
                             AudioPacketArrived?.Invoke(this, new AudioPacket
@@ -355,7 +438,7 @@ namespace Zink.Services.Recording
                         }
                         catch (Exception ex)
                         {
-                            await RecorderLog.ErrorAsync(GetType().Name, ex, "Audio packet processing failed");
+                            _ = RecorderLog.ErrorAsync(GetType().Name, ex, "Audio packet processing failed");
                         }
                         finally
                         {
@@ -365,7 +448,7 @@ namespace Zink.Services.Recording
                             }
                             catch (Exception ex)
                             {
-                                await RecorderLog.ErrorAsync(GetType().Name, ex, "ReleaseBuffer failed");
+                                _ = RecorderLog.ErrorAsync(GetType().Name, ex, "ReleaseBuffer failed");
                             }
                         }
 
@@ -391,6 +474,26 @@ namespace Zink.Services.Recording
             catch
             {
             }
+        }
+
+        private static float MeasurePeak(byte[] data, bool isFloat, ushort bitsPerSample)
+        {
+            float peak = 0;
+            if (isFloat && bitsPerSample == 32)
+            {
+                for (int i = 0; i + 3 < data.Length; i += 4)
+                {
+                    float value = Math.Abs(BitConverter.ToSingle(data, i));
+                    if (!float.IsNaN(value) && !float.IsInfinity(value))
+                        peak = Math.Max(peak, value);
+                }
+            }
+            else if (bitsPerSample == 16)
+            {
+                for (int i = 0; i + 1 < data.Length; i += 2)
+                    peak = Math.Max(peak, Math.Abs(BitConverter.ToInt16(data, i)) / 32768f);
+            }
+            return peak;
         }
 
         private static bool IsFloatWaveFormat(IntPtr formatPtr, WAVEFORMATEX format)
@@ -434,7 +537,14 @@ namespace Zink.Services.Recording
 
             if (_audioClient is not null)
             {
-                try { Marshal.ReleaseComObject(_audioClient); } catch { }
+                try
+                {
+                    if (_audioClient is IDisposable disposable)
+                        disposable.Dispose();
+                    else
+                        Marshal.ReleaseComObject(_audioClient);
+                }
+                catch { }
                 _audioClient = null;
             }
 

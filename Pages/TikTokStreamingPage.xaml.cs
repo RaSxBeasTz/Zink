@@ -17,7 +17,7 @@ namespace Zink.Pages
     public sealed partial class TikTokStreamingPage : Page
     {
         private readonly NativeTwitchStreamingService _streamingService = NativeTwitchStreamingService.TikTokInstance;
-        private readonly NativeScreenShareStreamingService _obsCaptureService = NativeScreenShareStreamingService.Instance;
+        private readonly StreamingVideoCapturePipeline _obsCaptureService = StreamingVideoCapturePipeline.Instance;
         private const string StreamKeySettingKey = "Zink.Streaming.TikTokStreamKey";
         private DateTimeOffset _lastPreviewUiUpdateUtc = DateTimeOffset.MinValue;
         private byte[]? _lastPreviewFrameData;

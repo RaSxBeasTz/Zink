@@ -16,20 +16,42 @@ namespace Zink.Pages.Social
     public sealed partial class FriendsPage : Page
     {
         private List<FriendDto> _friends = new();
+        private readonly DispatcherTimer _presenceRefreshTimer = new()
+        {
+            Interval = TimeSpan.FromSeconds(10)
+        };
+        private bool _isLoadingFriends;
 
         public FriendsPage()
         {
             this.InitializeComponent();
             Loaded += FriendsPage_Loaded;
+            Unloaded += FriendsPage_Unloaded;
+            _presenceRefreshTimer.Tick += PresenceRefreshTimer_Tick;
         }
 
         private async void FriendsPage_Loaded(object sender, RoutedEventArgs e)
+        {
+            await LoadFriendsAsync();
+            _presenceRefreshTimer.Start();
+        }
+
+        private void FriendsPage_Unloaded(object sender, RoutedEventArgs e)
+        {
+            _presenceRefreshTimer.Stop();
+        }
+
+        private async void PresenceRefreshTimer_Tick(object? sender, object e)
         {
             await LoadFriendsAsync();
         }
 
         private async Task LoadFriendsAsync()
         {
+            if (_isLoadingFriends)
+                return;
+
+            _isLoadingFriends = true;
             try
             {
                 StatusText.Text = "";
@@ -44,6 +66,10 @@ namespace Zink.Pages.Social
             catch (Exception ex)
             {
                 StatusText.Text = ex.Message;
+            }
+            finally
+            {
+                _isLoadingFriends = false;
             }
         }
 

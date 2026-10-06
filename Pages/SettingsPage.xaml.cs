@@ -3,8 +3,10 @@ using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Xaml.Media.Animation;
 using Microsoft.UI.Xaml.Navigation;
+using Microsoft.UI.Xaml.Input;
 using System;
 using System.IO;
+using System.Linq;
 using Windows.ApplicationModel;
 using Windows.Services.Store;
 using Windows.Storage;
@@ -22,6 +24,7 @@ namespace Zink.Pages
         private bool _isLoadingReplayState;
         private bool _isLoadingHotkeyClipRecordingState;
         private bool _isLoadingDiagnosticLogState;
+        private bool _isLoadingLanguage;
         private string? _latestHealthReportPath;
         private string? _latestSupportBundlePath;
 
@@ -32,6 +35,13 @@ namespace Zink.Pages
         public SettingsPage()
         {
             this.InitializeComponent();
+
+            _isLoadingLanguage = true;
+            LanguageComboBox.ItemsSource = LocalizationService.Languages;
+            LanguageComboBox.SelectedItem = LocalizationService.Languages.FirstOrDefault(x => x.Tag == LocalizationService.Preference)
+                ?? LocalizationService.Languages[0];
+            UpdateLanguageStatus();
+            _isLoadingLanguage = false;
 
             // Create the StoreContext
             _store = StoreContext.GetDefault();
@@ -62,6 +72,52 @@ namespace Zink.Pages
             LoadHotkeyClipRecordingSettingState();
             LoadDiagnosticLogSettingState();
             _ = LoadStartupTaskStateAsync();
+        }
+
+        private void LanguageComboBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
+        {
+            if (_isLoadingLanguage || LanguageComboBox.SelectedItem is not AppLanguage language) return;
+            LocalizationService.SetLanguage(language.Tag);
+            UpdateLanguageStatus();
+        }
+
+        private void LanguageSearchButton_Click(object sender, RoutedEventArgs e) => FilterLanguages();
+
+        private void LanguageSearchBox_TextChanged(object sender, TextChangedEventArgs e) => FilterLanguages(false);
+
+        private void LanguageSearchBox_KeyDown(object sender, KeyRoutedEventArgs e)
+        {
+            if (e.Key != global::Windows.System.VirtualKey.Enter) return;
+            FilterLanguages();
+            e.Handled = true;
+        }
+
+        private void FilterLanguages(bool openResults = true)
+        {
+            var query = LanguageSearchBox.Text?.Trim() ?? "";
+            var filtered = string.IsNullOrEmpty(query)
+                ? LocalizationService.Languages.ToList()
+                : LocalizationService.Languages
+                    .Where(language => LocalizationService.LanguageMatchesQuery(language, query))
+                    .ToList();
+
+            _isLoadingLanguage = true;
+            LanguageComboBox.ItemsSource = filtered;
+            LanguageComboBox.SelectedItem = filtered.FirstOrDefault(language => language.Tag == LocalizationService.Preference);
+            _isLoadingLanguage = false;
+
+            LanguageStatusText.Text = filtered.Count == 0
+                ? "No languages match your search."
+                : $"{filtered.Count} language(s) found.";
+            if (openResults) LanguageComboBox.IsDropDownOpen = filtered.Count > 0;
+        }
+
+        private void UpdateLanguageStatus()
+        {
+            var active = LocalizationService.Languages.FirstOrDefault(x => x.Tag == LocalizationService.CurrentLanguageTag)?.DisplayName ?? "English";
+            LanguageStatusText.Text = LocalizationService.Preference == LocalizationService.SystemLanguageTag
+                ? $"Using Windows language ({active})."
+                : $"Using {active}.";
         }
 
         private async System.Threading.Tasks.Task LoadStartupTaskStateAsync()
@@ -243,7 +299,7 @@ namespace Zink.Pages
                 HotkeyClipRecordingToggle.IsChecked = enabled;
                 UpdateHotkeyClipRecordingToggleVisual(enabled, false);
                 HotkeyClipRecordingStatusText.Text = enabled
-                    ? "The clip hotkey can save the last 45 seconds."
+                    ? $"The clip hotkey can save the last {RecordingPreferences.BackgroundReplayDurationSeconds} seconds."
                     : "The clip hotkey is off and will not save game clips.";
             }
             finally
@@ -297,6 +353,11 @@ namespace Zink.Pages
             _ = ApplyBackgroundReplayToggleAsync(enabled);
         }
 
+        private void BackgroundRecordingSettingsButton_Click(object sender, RoutedEventArgs e)
+        {
+            Frame.Navigate(typeof(BackgroundRecordingSettingsPage));
+        }
+
         private void HotkeyClipRecordingToggle_Toggled(object sender, RoutedEventArgs e)
         {
             if (_isLoadingHotkeyClipRecordingState)
@@ -305,7 +366,7 @@ namespace Zink.Pages
             bool enabled = HotkeyClipRecordingToggle.IsChecked == true;
             UpdateHotkeyClipRecordingToggleVisual(enabled, true);
             HotkeyClipRecordingStatusText.Text = enabled
-                ? "The clip hotkey can save the last 45 seconds."
+                ? $"The clip hotkey can save the last {RecordingPreferences.BackgroundReplayDurationSeconds} seconds."
                 : "The clip hotkey is off and will not save game clips.";
             RecordingPreferences.SetHotkeyGameClipRecordingEnabled(enabled);
             StatusText.Text = "Game clip hotkey setting saved.";

@@ -120,6 +120,7 @@ namespace Zink
         public ZinkConnectWindow()
         {
             InitializeComponent();
+            Zink.Services.LocalizationService.RegisterWindow(this);
             Title = "Zink Connect";
             ConfigureWindow();
             _fullScreenStateTimer.Interval = TimeSpan.FromMilliseconds(150);

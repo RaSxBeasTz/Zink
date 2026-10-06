@@ -1,4 +1,4 @@
-using Microsoft.UI.Xaml;
+ï»¿using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media.Imaging;
 using System;
@@ -42,7 +42,7 @@ namespace Zink
         private Uri? _lastArtworkUri = null;
         private DateTime _lastMetaPushUtc = DateTime.MinValue;
 
-        private string _currentStationTitle = "—";
+        private string _currentStationTitle = "â€”";
         private string _currentStreamQuality = "Unknown";
         private static MediaPlayer _mp;
         private static WeakReference<RadioPage>? _lastInstance;
@@ -51,6 +51,14 @@ namespace Zink
         private int _switchVersion = 0;
         private CancellationTokenSource _directReconnectCts;
         private int _directReconnectAttempts;
+        private bool _directReconnectPending;
+        private global::Windows.Foundation.TypedEventHandler<MediaPlayer, object> _directMediaOpenedHandler;
+        private global::Windows.Foundation.TypedEventHandler<MediaPlayer, MediaPlayerFailedEventArgs> _directMediaFailedHandler;
+        private global::Windows.Foundation.TypedEventHandler<MediaPlayer, object> _directMediaEndedHandler;
+        private global::Windows.Foundation.TypedEventHandler<MediaPlaybackSession, object> _directPlaybackStateChangedHandler;
+        private DispatcherTimer _radioDiagnosticTimer;
+        private string _diagnosticStationTitle = "";
+        private string _diagnosticStreamUrl = "";
 
         private const double META_MIN_INTERVAL_SECONDS = 1.5;
         private static readonly Encoding IcyEncoding = Encoding.GetEncoding("ISO-8859-1");
@@ -232,17 +240,21 @@ namespace Zink
                 var s = AppPlaybackService.Instance;
                 s.PlayRequested += () => TryEnqueueOnUi(() =>
                 {
+                    RadioLog("service-play-request", flush: true);
                     _mp?.Play();
                     ApplyCurrentVolumeToAllPlayback(updateSlider: false);
                     s.SetIsPlaying(true);
                 });
                 s.PauseRequested += () => TryEnqueueOnUi(() =>
                 {
+                    RadioLog("service-pause-request", flush: true);
                     _mp?.Pause();
                     s.SetIsPlaying(false);
                 });
                 s.StopRequested += () => TryEnqueueOnUi(() =>
                 {
+                    RadioLog("service-stop-request", flush: true);
+                    StopDirectPlaybackRecovery();
                     if (_mp != null)
                     {
                         _mp.Pause();
@@ -326,6 +338,7 @@ namespace Zink
         protected override void OnNavigatedTo(NavigationEventArgs e)
         {
             base.OnNavigatedTo(e);
+            RadioLog("page-navigated-to", $"parameter={e.Parameter}");
 
             try
             {
@@ -359,6 +372,7 @@ namespace Zink
         protected override void OnNavigatedFrom(NavigationEventArgs e)
         {
             base.OnNavigatedFrom(e);
+            RadioLog("page-navigated-from", $"backgroundKeepAlive={RadioBackgroundKeepAlive.Enabled}; widgetKeepAlive={RadioWidgetKeepAlive.IsOpen}", flush: true);
             SaveCurrentVolume();
             StopElapsedTimer();
             StopServicePollTimer();
@@ -383,6 +397,8 @@ namespace Zink
             if (sender is not Button button || button.DataContext is not RadioStation station)
                 return;
 
+            RadioLog("station-selected", $"title={station.Title}; mode={(WebViewStations.Contains(station.Title) || station.Title.StartsWith("BBC", StringComparison.OrdinalIgnoreCase) ? "webview" : "native")}; url={station.StreamUrl}", flush: true);
+
             int myVersion;
 
             await _stationSwitchLock.WaitAsync();
@@ -405,7 +421,7 @@ namespace Zink
                 _everHadMeta = false;
                 _lastImageShownUri = null;
 
-                SetCurrentStationLabel(station.Title ?? "—");
+                SetCurrentStationLabel(station.Title ?? "â€”");
                 SetStreamQuality("Detecting...");
                 PushStationToService(station, isPlaying: false);
                 UpdateLikeButtonState();
@@ -458,7 +474,7 @@ namespace Zink
                 {
                     NowPlayingText.Text = "BBC station cancelled.";
                     TrySetPlaying(false);
-                    SetCurrentStationLabel("—");
+                    SetCurrentStationLabel("â€”");
                     ResetStreamQuality();
                 }
 
@@ -511,7 +527,7 @@ namespace Zink
                 {
                     NowPlayingText.Text = "Magic Radio cancelled.";
                     TrySetPlaying(false);
-                    SetCurrentStationLabel("—");
+                    SetCurrentStationLabel("â€”");
                     ResetStreamQuality();
                 }
 
@@ -564,7 +580,7 @@ namespace Zink
                 {
                     NowPlayingText.Text = "Hits Radio cancelled.";
                     TrySetPlaying(false);
-                    SetCurrentStationLabel("—");
+                    SetCurrentStationLabel("â€”");
                     ResetStreamQuality();
                 }
 
@@ -617,7 +633,7 @@ namespace Zink
                 {
                     NowPlayingText.Text = "Greatest Hits cancelled.";
                     TrySetPlaying(false);
-                    SetCurrentStationLabel("—");
+                    SetCurrentStationLabel("â€”");
                     ResetStreamQuality();
                 }
 
@@ -672,18 +688,19 @@ namespace Zink
                 return;
             }
 
-            try { _mp.MediaOpened -= OnOpened; _mp.MediaFailed -= OnFailed; _mp.MediaEnded -= OnEnded; } catch { }
+            CancelPendingDirectReconnect();
+            _directReconnectAttempts = 0;
 
-            _mp.Source = MediaSource.CreateFromUri(new Uri(url));
-            ApplyCurrentVolumeToAllPlayback(updateSlider: false);
-            _mp.Play();
-
-            NotificationService.Instance.Show("Radio Started", $"Now playing: {station.Title}");
-            TryPushNowPlaying(station, "", station.Title);
+            DetachDirectPlaybackHandlers();
+            _diagnosticStationTitle = station.Title ?? "";
+            _diagnosticStreamUrl = url;
+            RadioLog("native-start-request", $"version={versionGuard}", flush: true);
 
             void OnOpened(MediaPlayer sender, object args)
             {
                 if (versionGuard != _switchVersion) return;
+
+                RadioLog("media-opened", $"version={versionGuard}; attempts={_directReconnectAttempts}", flush: true);
 
                 TryEnqueueOnUi(() =>
                 {
@@ -698,6 +715,7 @@ namespace Zink
                     UpdateLikeButtonState();
                     ApplyCurrentVolumeToAllPlayback(updateSlider: false);
                     _directReconnectAttempts = 0;
+                    _directReconnectPending = false;
 
                     try
                     {
@@ -715,40 +733,59 @@ namespace Zink
 
                 StartIcyWatcher(url, station);
                 _ = DetectAndSetDirectStreamQualityAsync(station, url, versionGuard);
-                try { _mp.MediaOpened -= OnOpened; } catch { }
             }
 
             void OnFailed(MediaPlayer sender, MediaPlayerFailedEventArgs args)
             {
                 if (versionGuard != _switchVersion) return;
 
+                var hr = args.ExtendedErrorCode?.HResult ?? 0;
+                RadioLog("media-failed", $"error={args.Error}; message={args.ErrorMessage}; hresult=0x{hr:X8}; attempts={_directReconnectAttempts}", flush: true);
+
                 if (TryScheduleDirectReconnect(station, url, versionGuard, $"failed: {args.Error}"))
                     return;
 
                 TryEnqueueOnUi(() =>
                 {
-                    var hr = args.ExtendedErrorCode?.HResult ?? 0;
                     NowPlayingText.Text = $"Failed: {args.Error} (0x{hr:X8})";
                     LoadingRing.IsActive = false;
                     LoadingRing.Visibility = Visibility.Collapsed;
                     TrySetPlaying(false);
-                    SetCurrentStationLabel("—");
+                    SetCurrentStationLabel("â€”");
                     ResetStreamQuality();
                     UpdateLikeButtonState();
                 });
 
-                try { _mp.MediaOpened -= OnOpened; _mp.MediaFailed -= OnFailed; _mp.MediaEnded -= OnEnded; } catch { }
+                StopDirectPlaybackRecovery();
             }
 
             void OnEnded(MediaPlayer sender, object args)
             {
                 if (versionGuard != _switchVersion) return;
+                RadioLog("media-ended", $"attempts={_directReconnectAttempts}", flush: true);
                 TryScheduleDirectReconnect(station, url, versionGuard, "stream ended");
             }
 
-            _mp.MediaOpened += OnOpened;
-            _mp.MediaFailed += OnFailed;
-            _mp.MediaEnded += OnEnded;
+            _directMediaOpenedHandler = OnOpened;
+            _directMediaFailedHandler = OnFailed;
+            _directMediaEndedHandler = OnEnded;
+            _directPlaybackStateChangedHandler = (session, args) =>
+                RadioLog("playback-state-changed", $"newState={session.PlaybackState}", flush: true);
+            _mp.MediaOpened += _directMediaOpenedHandler;
+            _mp.MediaFailed += _directMediaFailedHandler;
+            _mp.MediaEnded += _directMediaEndedHandler;
+            _mp.PlaybackSession.PlaybackStateChanged += _directPlaybackStateChangedHandler;
+
+            // Subscribe before assigning the source. Some radio endpoints open or fail
+            // quickly enough that subscribing afterwards can miss the only recovery event.
+            _mp.Source = MediaSource.CreateFromUri(new Uri(url));
+            ApplyCurrentVolumeToAllPlayback(updateSlider: false);
+            _mp.Play();
+            StartRadioDiagnosticHeartbeat();
+            RadioLog("native-play-called", $"version={versionGuard}", flush: true);
+
+            NotificationService.Instance.Show("Radio Started", $"Now playing: {station.Title}");
+            TryPushNowPlaying(station, "", station.Title);
 
             void FinalFail(string msg)
             {
@@ -758,7 +795,7 @@ namespace Zink
                     LoadingRing.IsActive = false;
                     LoadingRing.Visibility = Visibility.Collapsed;
                     TrySetPlaying(false);
-                    SetCurrentStationLabel("—");
+                    SetCurrentStationLabel("â€”");
                     ResetStreamQuality();
                     UpdateLikeButtonState();
                 });
@@ -770,19 +807,15 @@ namespace Zink
             if (station == null || string.IsNullOrWhiteSpace(url) || versionGuard != _switchVersion)
                 return false;
 
-            if (_directReconnectAttempts >= 5)
-                return false;
+            if (_directReconnectPending)
+                return true;
 
-            try
-            {
-                _directReconnectCts?.Cancel();
-                _directReconnectCts?.Dispose();
-            }
-            catch { }
-
+            CancelPendingDirectReconnect();
             _directReconnectCts = new CancellationTokenSource();
+            _directReconnectPending = true;
             var token = _directReconnectCts.Token;
             var attempt = ++_directReconnectAttempts;
+            RadioLog("reconnect-scheduled", $"attempt={attempt}; reason={reason}", flush: true);
 
             TryEnqueueOnUi(() =>
             {
@@ -801,7 +834,9 @@ namespace Zink
         {
             try
             {
-                await Task.Delay(TimeSpan.FromMilliseconds(750 * attempt), token);
+                var delaySeconds = Math.Min(30, Math.Max(1, attempt * 2));
+                RadioLog("reconnect-waiting", $"attempt={attempt}; delaySeconds={delaySeconds}; reason={reason}");
+                await Task.Delay(TimeSpan.FromSeconds(delaySeconds), token);
                 if (token.IsCancellationRequested || versionGuard != _switchVersion)
                     return;
 
@@ -809,6 +844,8 @@ namespace Zink
                 {
                     try
                     {
+                        _directReconnectPending = false;
+                        RadioLog("reconnect-source-replace", $"attempt={attempt}; reason={reason}", flush: true);
                         _mp.Source = MediaSource.CreateFromUri(new Uri(url));
                         ApplyCurrentVolumeToAllPlayback(updateSlider: false);
                         _mp.Play();
@@ -822,13 +859,99 @@ namespace Zink
                     }
                     catch
                     {
+                        RadioLog("reconnect-source-replace-threw", $"attempt={attempt}; reason={reason}", flush: true);
                         TryScheduleDirectReconnect(station, url, versionGuard, reason);
                     }
                 });
             }
             catch (OperationCanceledException)
             {
+                RadioLog("reconnect-cancelled", $"attempt={attempt}; reason={reason}");
             }
+        }
+
+        private void CancelPendingDirectReconnect()
+        {
+            try
+            {
+                _directReconnectCts?.Cancel();
+                _directReconnectCts?.Dispose();
+            }
+            catch { }
+
+            _directReconnectCts = null;
+            _directReconnectPending = false;
+        }
+
+        private void DetachDirectPlaybackHandlers()
+        {
+            try
+            {
+                if (_directMediaOpenedHandler != null) _mp.MediaOpened -= _directMediaOpenedHandler;
+                if (_directMediaFailedHandler != null) _mp.MediaFailed -= _directMediaFailedHandler;
+                if (_directMediaEndedHandler != null) _mp.MediaEnded -= _directMediaEndedHandler;
+                if (_directPlaybackStateChangedHandler != null) _mp.PlaybackSession.PlaybackStateChanged -= _directPlaybackStateChangedHandler;
+            }
+            catch { }
+
+            _directMediaOpenedHandler = null;
+            _directMediaFailedHandler = null;
+            _directMediaEndedHandler = null;
+            _directPlaybackStateChangedHandler = null;
+        }
+
+        private void StopDirectPlaybackRecovery()
+        {
+            CancelPendingDirectReconnect();
+            DetachDirectPlaybackHandlers();
+            try { _radioDiagnosticTimer?.Stop(); } catch { }
+        }
+
+        private void StartRadioDiagnosticHeartbeat()
+        {
+            if (_radioDiagnosticTimer == null)
+            {
+                _radioDiagnosticTimer = new DispatcherTimer { Interval = TimeSpan.FromMinutes(1) };
+                _radioDiagnosticTimer.Tick += (_, __) => RadioLog("heartbeat");
+            }
+
+            _radioDiagnosticTimer.Start();
+        }
+
+        private void RadioLog(string eventName, string details = null, bool flush = false)
+        {
+            try
+            {
+                DiagnosticLogService.EnsureLogFile();
+
+                var state = "unavailable";
+                var source = "unknown";
+                var position = "unknown";
+                try
+                {
+                    state = _mp?.PlaybackSession?.PlaybackState.ToString() ?? "no-player";
+                    source = _mp?.Source == null ? "null" : _mp.Source.GetType().Name;
+                    position = _mp?.PlaybackSession?.Position.ToString() ?? "unknown";
+                }
+                catch { }
+
+                var connectivity = "unknown";
+                try
+                {
+                    connectivity = global::Windows.Networking.Connectivity.NetworkInformation
+                        .GetInternetConnectionProfile()?.GetNetworkConnectivityLevel().ToString() ?? "no-profile";
+                }
+                catch { }
+
+                var message = $"[Radio] event={eventName}; station={_diagnosticStationTitle}; state={state}; source={source}; position={position}; reconnectPending={_directReconnectPending}; reconnectAttempts={_directReconnectAttempts}; switchVersion={_switchVersion}; servicePlaying={AppPlaybackService.Instance.IsPlaying}; widgetKeepAlive={RadioWidgetKeepAlive.IsOpen}; backgroundKeepAlive={RadioBackgroundKeepAlive.Enabled}; connectivity={connectivity}; url={_diagnosticStreamUrl}";
+                if (!string.IsNullOrWhiteSpace(details))
+                    message += "; " + details;
+
+                DiagnosticLogService.WriteLine(message);
+                if (flush)
+                    DiagnosticLogService.Flush();
+            }
+            catch { }
         }
         private void VolumeSlider_ValueChanged(object sender, Microsoft.UI.Xaml.Controls.Primitives.RangeBaseValueChangedEventArgs e)
         {
@@ -992,7 +1115,7 @@ namespace Zink
             LoadingRing.IsActive = false;
             LoadingRing.Visibility = Visibility.Collapsed;
             TrySetPlaying(false);
-            SetCurrentStationLabel("—");
+            SetCurrentStationLabel("â€”");
             ResetStreamQuality();
             ClearDiscordPresence();
             UpdateLikeButtonState();
@@ -1028,7 +1151,7 @@ namespace Zink
 
                 var album = "";
                 var artUrl = _lastArtworkUri?.ToString() ?? "";
-                var stationName = _currentStationTitle ?? "—";
+                var stationName = _currentStationTitle ?? "â€”";
 
                 await LikedRadioLikesService.Instance.AddOrUpdateAsync(title, artist, album, artUrl, stationName);
 
@@ -1066,7 +1189,7 @@ namespace Zink
 
         private async void EnableBackgroundButton_Click(object sender, RoutedEventArgs e)
         {
-            var hasStation = !string.IsNullOrWhiteSpace(_currentStationTitle) && _currentStationTitle != "—";
+            var hasStation = !string.IsNullOrWhiteSpace(_currentStationTitle) && _currentStationTitle != "â€”";
             var isPlaying = false;
             try { isPlaying = AppPlaybackService.Instance.IsPlaying; } catch { }
             if (!isPlaying)
@@ -1128,25 +1251,6 @@ namespace Zink
                 var wnd = MiniRadioWidgetWindow.Current;
                 if (wnd != null)
                 {
-                    try
-                    {
-                        var hwnd = WindowNative.GetWindowHandle(wnd);
-                        var winId = Microsoft.UI.Win32Interop.GetWindowIdFromWindow(hwnd);
-                        var appWnd = AppWindow.GetFromWindowId(winId);
-                        if (appWnd != null)
-                        {
-                            var displayArea = DisplayArea.GetFromWindowId(winId, DisplayAreaFallback.Nearest);
-                            var work = displayArea.WorkArea;
-
-                            int desiredW = (int)(work.Width * 0.30);
-                            int desiredH = (int)(work.Height * 0.30);
-                            int x = work.X + (work.Width - desiredW) / 2;
-                            int y = work.Y + (work.Height - desiredH) / 2;
-
-                            appWnd.MoveAndResize(new WinGraphics.RectInt32(x, y, desiredW, desiredH));
-                        }
-                    }
-                    catch { }
 
                     wnd.Closed -= MiniClosed;
                     wnd.Closed += MiniClosed;
@@ -1169,7 +1273,7 @@ namespace Zink
                 RadioWidgetKeepAlive.IsOpen = false;
                 try { AppPlaybackService.Instance.RequestStop(); } catch { }
                 try { StopPlayback(); } catch { }
-                SetCurrentStationLabel("—");
+                SetCurrentStationLabel("â€”");
                 ResetStreamQuality();
                 UpdateLikeButtonState();
             }
@@ -1177,8 +1281,14 @@ namespace Zink
 
         private void StopPlayback()
         {
-            if (RadioWidgetKeepAlive.IsOpen || RadioBackgroundKeepAlive.Enabled) return;
+            if (RadioWidgetKeepAlive.IsOpen || RadioBackgroundKeepAlive.Enabled)
+            {
+                RadioLog("stop-playback-skipped", "keep-alive is active", flush: true);
+                return;
+            }
 
+            RadioLog("stop-playback", "page stop path clearing native source", flush: true);
+            StopDirectPlaybackRecovery();
             try { _mp?.Pause(); } catch { }
             try { if (_mp != null) _mp.Source = null; } catch { }
             try { webViewWindow?.StopStream(); } catch { }
@@ -1191,12 +1301,15 @@ namespace Zink
             _everHadMeta = false;
             _lastImageShownUri = null;
 
-            SetCurrentStationLabel("—");
+            SetCurrentStationLabel("â€”");
             ResetStreamQuality();
         }
 
         private void ForceStopAllPlayback()
         {
+            RadioLog("force-stop-all", "station switch path clearing all playback", flush: true);
+            StopDirectPlaybackRecovery();
+            _directReconnectAttempts = 0;
             try { RadioWidgetKeepAlive.IsOpen = false; } catch { }
             try { MiniRadioWidgetWindow.Current?.Close(); } catch { }
             try { _mp?.Pause(); } catch { }
@@ -1252,7 +1365,7 @@ namespace Zink
         {
             var s = AppPlaybackService.Instance;
 
-            string station = s.CurrentStationTitle?.Trim() ?? "—";
+            string station = s.CurrentStationTitle?.Trim() ?? "â€”";
             string artist = s.CurrentArtist?.Trim() ?? "";
             string title = s.CurrentTitle?.Trim() ?? "";
             Uri? artUri = s.CurrentArtworkUri;
@@ -1373,15 +1486,90 @@ namespace Zink
                 _nowPlayingWatcher = new IcyNowPlayingWatcher(streamUrl);
                 _nowPlayingWatcher.NowPlayingChanged += (a, t) =>
                 {
-                    TryPushNowPlaying(station, a ?? "", t ?? "");
-
                     try { _artCts?.Cancel(); } catch { }
                     _artCts = new CancellationTokenSource();
-                    _ = LookupAndApplyArtworkAsync(a ?? "", t ?? "", station, _artCts.Token);
+
+                    string artist = a?.Trim() ?? "";
+                    string title = t?.Trim() ?? "";
+                    var segment = ClassifyRadioSegment(artist, title, station?.Title);
+
+                    if (segment == RadioSegment.Adverts)
+                    {
+                        artist = "";
+                        title = "Playing adverts";
+                    }
+                    else if (segment == RadioSegment.DjTalking)
+                    {
+                        artist = "";
+                        title = "DJ talking";
+                    }
+
+                    bool trackChanged =
+                        !string.Equals(artist, _lastArtist, StringComparison.OrdinalIgnoreCase) ||
+                        !string.Equals(title, _lastTitle, StringComparison.OrdinalIgnoreCase);
+
+                    if (trackChanged && segment != RadioSegment.DjTalking)
+                        _lastArtworkUri = null;
+
+                    var segmentArtwork = segment == RadioSegment.Adverts
+                        ? new Uri("ms-appx:///Assets/Radio/ad-break.png")
+                        : null;
+
+                    TryPushNowPlaying(station, artist, title, segmentArtwork);
+
+                    if (segment == RadioSegment.Song)
+                        _ = LookupAndApplyArtworkAsync(artist, title, station, _artCts.Token);
                 };
                 _nowPlayingWatcher.Start();
             }
             catch { }
+        }
+
+        private enum RadioSegment
+        {
+            Song,
+            DjTalking,
+            Adverts
+        }
+
+        private static RadioSegment ClassifyRadioSegment(string artist, string title, string stationTitle = null)
+        {
+            string metadata = $"{artist} {title}".Trim();
+
+            if (ContainsAny(metadata,
+                "advert", "commercial break", "ad break", "sponsored",
+                "sponsor message", "promotion", "promo break", "ad insertion",
+                "ad replacement", "advertising"))
+            {
+                return RadioSegment.Adverts;
+            }
+
+            if (!string.IsNullOrWhiteSpace(stationTitle) &&
+                string.Equals(metadata, stationTitle.Trim(), StringComparison.OrdinalIgnoreCase))
+            {
+                return RadioSegment.DjTalking;
+            }
+
+            if (ContainsAny(metadata,
+                "dj", "presenter", "in the studio", "the studio",
+                "breakfast show", "morning show", "drive time", "drivetime",
+                "radio show", "on air", "phone-in", "phone in",
+                "traffic update", "travel update", "weather update",
+                "news update", "headlines"))
+            {
+                return RadioSegment.DjTalking;
+            }
+
+            return RadioSegment.Song;
+        }
+
+        private static bool ContainsAny(string value, params string[] markers)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+                return false;
+
+            return markers.Any(marker =>
+                value.IndexOf(marker, StringComparison.OrdinalIgnoreCase) >= 0);
         }
 
         private async Task LookupAndApplyArtworkAsync(string artist, string title, RadioStation station, CancellationToken ct)
@@ -1409,6 +1597,11 @@ namespace Zink
                 var high = art100.Replace("100x100", "600x600");
                 var artUri = SafeUri(high) ?? SafeUri(art100);
                 if (artUri == null) return;
+
+                ct.ThrowIfCancellationRequested();
+                if (!string.Equals(artist, _lastArtist, StringComparison.OrdinalIgnoreCase) ||
+                    !string.Equals(title, _lastTitle, StringComparison.OrdinalIgnoreCase))
+                    return;
 
                 _lastArtworkUri = artUri;
 
@@ -1715,7 +1908,7 @@ namespace Zink
         {
             try
             {
-                _currentStationTitle = string.IsNullOrWhiteSpace(text) ? "—" : text;
+                _currentStationTitle = string.IsNullOrWhiteSpace(text) ? "â€”" : text;
                 UpdateStationAndQualityText();
             }
             catch { }
@@ -1774,7 +1967,7 @@ namespace Zink
             try
             {
                 if (LikeSongButton == null) return;
-                bool hasStation = !string.IsNullOrWhiteSpace(_currentStationTitle) && _currentStationTitle != "—";
+                bool hasStation = !string.IsNullOrWhiteSpace(_currentStationTitle) && _currentStationTitle != "â€”";
                 bool hasMeta = _everHadMeta || !string.IsNullOrWhiteSpace(_lastArtist) || !string.IsNullOrWhiteSpace(_lastTitle);
                 LikeSongButton.IsEnabled = hasStation && (hasMeta || !string.IsNullOrWhiteSpace(NowPlayingText?.Text));
             }
@@ -1796,7 +1989,7 @@ namespace Zink
                     {
                         try
                         {
-                            if (string.IsNullOrWhiteSpace(_currentStationTitle) || _currentStationTitle == "—")
+                            if (string.IsNullOrWhiteSpace(_currentStationTitle) || _currentStationTitle == "â€”")
                                 return;
 
                             AppPlaybackService.Instance.UpdateNowPlaying(
@@ -1907,12 +2100,32 @@ namespace Zink
                                 read += n;
                             }
 
-                            var meta = IcyEncoding.GetString(metaBuf);
-                            var title = ParseStreamTitle(meta);
-                            if (!string.IsNullOrWhiteSpace(title))
+                            var meta = IcyEncoding.GetString(metaBuf).TrimEnd('\0');
+
+                            // Advert systems often put their marker in StreamUrl or another
+                            // field while leaving StreamTitle unchanged or empty.
+                            if (ContainsAny(meta,
+                                "advert", "commercial break", "ad break", "sponsored",
+                                "ad insertion", "ad replacement", "advertising"))
                             {
-                                var (artist, song) = SplitArtistTitle(title);
-                                NowPlayingChanged?.Invoke(artist, song);
+                                NowPlayingChanged?.Invoke("", "Playing adverts");
+                                continue;
+                            }
+
+                            var title = ParseStreamTitle(meta, out bool streamTitleWasPresent);
+                            if (streamTitleWasPresent)
+                            {
+                                if (string.IsNullOrWhiteSpace(title))
+                                {
+                                    // An explicitly cleared title is different from a zero-length
+                                    // ICY block (which only means "no metadata change").
+                                    NowPlayingChanged?.Invoke("", "DJ talking");
+                                }
+                                else
+                                {
+                                    var (artist, song) = SplitArtistTitle(title);
+                                    NowPlayingChanged?.Invoke(artist, song);
+                                }
                             }
                         }
                     }
@@ -1923,11 +2136,12 @@ namespace Zink
                 }
             }
 
-            private static string ParseStreamTitle(string meta)
+            private static string ParseStreamTitle(string meta, out bool wasPresent)
             {
                 const string key = "StreamTitle='";
                 var i = meta.IndexOf(key, StringComparison.OrdinalIgnoreCase);
-                if (i < 0) return null;
+                wasPresent = i >= 0;
+                if (!wasPresent) return null;
                 i += key.Length;
                 var j = meta.IndexOf("';", i, StringComparison.Ordinal);
                 if (j < 0) j = meta.Length;

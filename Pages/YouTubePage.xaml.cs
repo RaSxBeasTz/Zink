@@ -8,6 +8,7 @@ using Microsoft.UI.Xaml.Navigation;
 using System.Threading.Tasks;
 using Microsoft.UI.Xaml.Media.Animation;
 using System.Text.Json;
+using System.Threading;
 using Zink.Models;
 using Zink.Services;
 
@@ -24,6 +25,7 @@ namespace Zink.Pages
         private bool _adBlockAttached;
         private LikedRadioSong _pendingSong;
         private string _resolvedVideoUrl;
+        private CancellationTokenSource? _navigationCts;
 
         public YouTubePage()
         {
@@ -34,6 +36,10 @@ namespace Zink.Pages
         protected override void OnNavigatedTo(NavigationEventArgs e)
         {
             base.OnNavigatedTo(e);
+
+            _navigationCts?.Cancel();
+            _navigationCts?.Dispose();
+            _navigationCts = new CancellationTokenSource();
 
             _pendingSong = null;
             _pendingSearchQuery = null;
@@ -70,7 +76,6 @@ namespace Zink.Pages
 
             var env = await CoreWebView2Environment.CreateWithOptionsAsync(null, userDataFolder, null);
             await YouTubeWebView.EnsureCoreWebView2Async(env);
-            await ConfigureYouTubeAdBlockAsync();
 
             YouTubeWebView.CoreWebView2.ContainsFullScreenElementChanged += CoreWebView2_ContainsFullScreenElementChanged;
             YouTubeWebView.CoreWebView2.WebMessageReceived += YouTubeWebView_WebMessageReceived;
@@ -415,6 +420,10 @@ namespace Zink.Pages
             if (YouTubeWebView?.CoreWebView2 == null)
                 return;
 
+            var navigationToken = _navigationCts?.Token ?? CancellationToken.None;
+            if (navigationToken.IsCancellationRequested)
+                return;
+
             _hasShownCurrentLoad = false;
 
             YouTubeWebView.Visibility = Visibility.Collapsed;
@@ -422,10 +431,12 @@ namespace Zink.Pages
             YouTubeLoader.Opacity = 1;
             YouTubeLoader.Visibility = Visibility.Visible;
 
-            if (!string.IsNullOrWhiteSpace(_resolvedVideoUrl))
+            string? videoUrl = NormalizeYouTubeVideoUrl(_resolvedVideoUrl);
+            if (videoUrl != null)
             {
                 _isResolvingBestMatch = false;
-                YouTubeWebView.Source = new Uri(_resolvedVideoUrl);
+                _resolvedVideoUrl = videoUrl;
+                YouTubeWebView.Source = new Uri(videoUrl);
                 return;
             }
 
@@ -446,7 +457,30 @@ namespace Zink.Pages
 
         private async void YouTubeWebView_NavigationCompleted(CoreWebView2 sender, CoreWebView2NavigationCompletedEventArgs args)
         {
-            await WaitForReadyStateAsync();
+            var navigationToken = _navigationCts?.Token ?? CancellationToken.None;
+            if (navigationToken.IsCancellationRequested)
+                return;
+
+            if (!args.IsSuccess)
+            {
+                _isResolvingBestMatch = false;
+                ShowWebViewOnce();
+                return;
+            }
+
+            ShowWebViewOnce();
+
+            try
+            {
+                await WaitForReadyStateAsync(navigationToken);
+            }
+            catch (OperationCanceledException)
+            {
+                return;
+            }
+
+            if (navigationToken.IsCancellationRequested)
+                return;
 
             string currentUrl = "";
             try
@@ -464,16 +498,16 @@ namespace Zink.Pages
                     return;
             }
 
-            if (!string.IsNullOrWhiteSpace(currentUrl) &&
-                currentUrl.Contains("watch?v=", StringComparison.OrdinalIgnoreCase))
+            string? videoUrl = NormalizeYouTubeVideoUrl(currentUrl);
+            if (videoUrl != null)
             {
-                _resolvedVideoUrl = currentUrl;
+                _resolvedVideoUrl = videoUrl;
 
                 if (_pendingSong != null && _pendingSong.Id != Guid.Empty)
                 {
                     try
                     {
-                        await LikedRadioLikesService.Instance.MarkYouTubeMatchAsync(_pendingSong.Id, currentUrl);
+                        await LikedRadioLikesService.Instance.MarkYouTubeMatchAsync(_pendingSong.Id, videoUrl);
                     }
                     catch { }
                 }
@@ -482,10 +516,14 @@ namespace Zink.Pages
             ShowWebViewOnce();
         }
 
-        private async Task WaitForReadyStateAsync()
+        private async Task WaitForReadyStateAsync(CancellationToken cancellationToken)
         {
-            while (true)
+            const int maxAttempts = 20;
+
+            for (int attempt = 0; attempt < maxAttempts; attempt++)
             {
+                cancellationToken.ThrowIfCancellationRequested();
+
                 try
                 {
                     string result = await YouTubeWebView.CoreWebView2.ExecuteScriptAsync("document.readyState");
@@ -494,13 +532,13 @@ namespace Zink.Pages
                 }
                 catch { }
 
-                await Task.Delay(200);
+                await Task.Delay(200, cancellationToken);
             }
         }
 
         private async Task<bool> TryNavigateToBestVideoWithRetriesAsync(string query)
         {
-            for (int i = 0; i < 15; i++)
+            for (int i = 0; i < 8; i++)
             {
                 bool navigated = await TryNavigateToBestVideoAsync(query);
                 if (navigated)
@@ -509,7 +547,7 @@ namespace Zink.Pages
                     return true;
                 }
 
-                await Task.Delay(350);
+                await Task.Delay(200);
             }
 
             _isResolvingBestMatch = false;
@@ -572,7 +610,8 @@ namespace Zink.Pages
         'official audio','official video','audio','topic','vevo','visualizer','lyrics'
     ];
 
-    var anchors = Array.from(document.querySelectorAll('a#video-title[href*=""watch?v=""]'));
+    var anchors = Array.from(document.querySelectorAll(
+        'a#video-title[href*=""watch?v=""], a#video-title-link[href*=""watch?v=""], a[href*=""/watch?v=""]'));
 
     if (!anchors || anchors.length === 0)
         return JSON.stringify({{ found: false, reason: 'no-results' }});
@@ -583,6 +622,7 @@ namespace Zink.Pages
     for (var i = 0; i < anchors.length; i++) {{
         var a = anchors[i];
         var titleText = normalize(a.textContent || a.title || '');
+        if (!titleText) continue;
         var container = a.closest('ytd-video-renderer,ytd-rich-item-renderer,ytd-compact-video-renderer') || a.parentElement || document;
         var channelAnchor = container.querySelector('#channel-name a, ytd-channel-name a');
         var channelText = normalize(channelAnchor ? channelAnchor.textContent : '');
@@ -692,6 +732,35 @@ namespace Zink.Pages
             return "";
         }
 
+        private static string? NormalizeYouTubeVideoUrl(string? rawUrl)
+        {
+            if (string.IsNullOrWhiteSpace(rawUrl))
+                return null;
+
+            if (!Uri.TryCreate(rawUrl.Trim(), UriKind.Absolute, out var uri) ||
+                !string.Equals(uri.Scheme, Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase))
+            {
+                return null;
+            }
+
+            if (uri.Host.Equals("youtu.be", StringComparison.OrdinalIgnoreCase))
+            {
+                string id = uri.AbsolutePath.Trim('/');
+                return string.IsNullOrWhiteSpace(id)
+                    ? null
+                    : $"https://www.youtube.com/watch?v={Uri.EscapeDataString(id)}";
+            }
+
+            if (!uri.Host.EndsWith("youtube.com", StringComparison.OrdinalIgnoreCase))
+                return null;
+
+            var query = System.Web.HttpUtility.ParseQueryString(uri.Query);
+            string? videoId = query["v"];
+            return string.IsNullOrWhiteSpace(videoId)
+                ? null
+                : $"https://www.youtube.com/watch?v={Uri.EscapeDataString(videoId)}";
+        }
+
         private void ShowWebViewOnce()
         {
             if (_hasShownCurrentLoad)
@@ -724,9 +793,24 @@ namespace Zink.Pages
             }
         }
 
+        public void StopWebView()
+        {
+            _navigationCts?.Cancel();
+
+            if (YouTubeWebView == null)
+                return;
+
+            try { YouTubeWebView.CoreWebView2?.Stop(); } catch { }
+            try { YouTubeWebView.CoreWebView2?.Navigate("about:blank"); } catch { }
+            YouTubeWebView.Visibility = Visibility.Collapsed;
+            YouTubeWebView.Opacity = 0;
+        }
+
         protected override void OnNavigatedFrom(NavigationEventArgs e)
         {
             base.OnNavigatedFrom(e);
+
+            StopWebView();
 
             _pendingSearchQuery = null;
             _isResolvingBestMatch = false;
@@ -734,10 +818,6 @@ namespace Zink.Pages
             _pendingSong = null;
             _resolvedVideoUrl = null;
 
-            if (YouTubeWebView != null)
-            {
-                YouTubeWebView.Source = new Uri("about:blank");
-            }
         }
     }
 }

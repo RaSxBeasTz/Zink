@@ -179,6 +179,33 @@ namespace Zink.Services.Recording
         [DllImport(DllName, EntryPoint = "znk_writer_destroy", CallingConvention = CallingConvention.Cdecl)]
         private static extern void ZnkWriterDestroy(IntPtr writerHandle);
 
+        [DllImport(DllName, EntryPoint = "znk_mux_replay_tracks", CharSet = CharSet.Unicode, CallingConvention = CallingConvention.Cdecl)]
+        private static extern int ZnkMuxReplayTracks(
+            string videoPath,
+            string? combinedWavePath,
+            string? desktopWavePath,
+            string? microphoneWavePath,
+            string outputPath,
+            int audioBitrateKbps);
+
+        public static void MuxReplayTracks(
+            string videoPath,
+            string? combinedWavePath,
+            string? desktopWavePath,
+            string? microphoneWavePath,
+            string outputPath,
+            int audioBitrateKbps)
+        {
+            int hr = ZnkMuxReplayTracks(
+                videoPath,
+                combinedWavePath,
+                desktopWavePath,
+                microphoneWavePath,
+                outputPath,
+                audioBitrateKbps);
+            ThrowIfFailed(hr, nameof(ZnkMuxReplayTracks));
+        }
+
         public static void ThrowIfFailed(int hr, string api)
         {
             if (hr < 0)

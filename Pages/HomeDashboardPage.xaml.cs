@@ -39,6 +39,15 @@ namespace Zink.Pages
             public string? Kind { get; set; }
         }
 
+        public sealed class OnlineFriendItem
+        {
+            public long UserId { get; set; }
+            public string DisplayName { get; set; } = "";
+            public string Username { get; set; } = "";
+            public string? AvatarUrl { get; set; }
+            public string StatusText { get; set; } = "Online";
+        }
+
         private sealed class MissedCallNotification
         {
             public string CallId { get; set; } = "";
@@ -47,8 +56,11 @@ namespace Zink.Pages
         }
 
         private readonly ObservableCollection<RecentItem> _recent = new();
+        private readonly ObservableCollection<OnlineFriendItem> _onlineFriends = new();
         private RecentItem? _lastPlayable;
         private readonly DispatcherTimer _nowPlayingTimer = new();
+        private readonly DispatcherTimer _socialPresenceTimer = new();
+        private bool _socialPresenceRefreshInFlight;
         private string _lastThumbIdentity = "";
         private string _lastSpotifyArtLookupIdentity = "";
         private GlobalSystemMediaTransportControlsSessionManager? _mediaSessionManager;
@@ -56,6 +68,8 @@ namespace Zink.Pages
         private string _lastSpotifyDesktopDisplay = "";
         private DateTimeOffset _lastSpotifyDiagnosticAtUtc;
         private DateTimeOffset _lastSpotifyDesktopRefreshQueuedUtc = DateTimeOffset.MinValue;
+        private GlobalSystemMediaTransportControlsSession? _activeSpotifyDesktopSession;
+        private DateTimeOffset _spotifyControllerPositionSampledUtc = DateTimeOffset.UtcNow;
         private readonly List<MissedCallNotification> _missedCalls = new();
 
         private static readonly HashSet<string> MusicExt = new(StringComparer.OrdinalIgnoreCase)
@@ -91,6 +105,7 @@ namespace Zink.Pages
             InitializeComponent();
 
             RecentList.ItemsSource = _recent;
+            OnlineFriendsList.ItemsSource = _onlineFriends;
 
             ActivityHub.EnsureLoaded();
             ActivityHub.Changed -= ActivityHub_Changed;
@@ -120,6 +135,8 @@ namespace Zink.Pages
 
             _nowPlayingTimer.Interval = TimeSpan.FromSeconds(1);
             _nowPlayingTimer.Tick += NowPlayingTimer_Tick;
+            _socialPresenceTimer.Interval = TimeSpan.FromSeconds(10);
+            _socialPresenceTimer.Tick += SocialPresenceTimer_Tick;
 
             ApplyDashboardCustomisation();
 
@@ -130,6 +147,7 @@ namespace Zink.Pages
             RefreshFromActivityHub();
             RefreshNowPlayingFromServices();
             RefreshNotifications();
+            _ = RefreshSocialSummaryAsync();
         }
 
         protected override void OnNavigatedTo(NavigationEventArgs e)
@@ -142,6 +160,7 @@ namespace Zink.Pages
             RefreshFromActivityHub();
             RefreshNowPlayingFromServices();
             RefreshNotifications();
+            _ = RefreshSocialSummaryAsync();
         }
 
         private void HomeDashboardPage_Loaded(object sender, RoutedEventArgs e)
@@ -149,11 +168,125 @@ namespace Zink.Pages
             try
             {
                 _nowPlayingTimer.Start();
+                _socialPresenceTimer.Start();
                 InitializeHomeRadioVolumeUi();
                 RefreshNowPlayingFromServices();
                 RefreshNotifications();
                 RefreshQuickStartMode();
+                _ = RefreshSocialSummaryAsync();
                 _ = ShowQuickStartDialogIfNeededAsync();
+            }
+            catch { }
+        }
+
+        private async Task RefreshSocialSummaryAsync()
+        {
+            if (_socialPresenceRefreshInFlight)
+                return;
+
+            _socialPresenceRefreshInFlight = true;
+            try
+            {
+                var friends = await SocialManager.Instance.Api.GetFriendsAsync();
+                var onlineFriends = friends
+                    .Where(friend => friend.IsOnline || string.Equals(friend.Presence?.Trim(), "online", StringComparison.OrdinalIgnoreCase))
+                    .OrderBy(friend => string.IsNullOrWhiteSpace(friend.DisplayName) ? friend.Username : friend.DisplayName)
+                    .ToList();
+
+                _onlineFriends.Clear();
+                foreach (var friend in onlineFriends)
+                {
+                    _onlineFriends.Add(new OnlineFriendItem
+                    {
+                        UserId = friend.UserId,
+                        DisplayName = string.IsNullOrWhiteSpace(friend.DisplayName) ? friend.Username : friend.DisplayName,
+                        Username = $"@{friend.Username}",
+                        AvatarUrl = friend.AvatarUrl,
+                        StatusText = string.IsNullOrWhiteSpace(friend.Presence) ? "Online" : friend.Presence.Trim()
+                    });
+                }
+
+                OnlineFriendsText.Text = onlineFriends.Count == 1
+                    ? "1 friend online"
+                    : $"{onlineFriends.Count} friends online";
+                OnlineFriendsEmptyText.Visibility = onlineFriends.Count == 0
+                    ? Visibility.Visible
+                    : Visibility.Collapsed;
+                SocialStatusText.Text = friends.Count == 0
+                    ? "Add friends to get started"
+                    : $"{friends.Count} friend{(friends.Count == 1 ? "" : "s")} in your circle";
+            }
+            catch
+            {
+                _onlineFriends.Clear();
+                OnlineFriendsEmptyText.Visibility = Visibility.Visible;
+                OnlineFriendsText.Text = "Sign in to see friends online";
+                SocialStatusText.Text = "Open Friends to connect";
+            }
+            finally
+            {
+                _socialPresenceRefreshInFlight = false;
+            }
+        }
+
+        private async void SocialPresenceTimer_Tick(object? sender, object e)
+        {
+            await RefreshSocialSummaryAsync();
+        }
+
+        private async void OnlineFriendVoiceCall_Click(object sender, RoutedEventArgs e)
+        {
+            try
+            {
+                if (sender is not Button button || !long.TryParse(button.Tag?.ToString(), out var targetUserId) || targetUserId <= 0)
+                    return;
+
+                await NativeCallCoordinator.Instance.StartOutgoingAsync(targetUserId, false);
+                App.MainWindow.MainFrame.Navigate(typeof(Social.CallPage), new Social.CallPageArgs
+                {
+                    TargetUserId = targetUserId,
+                    IsScreenShare = false
+                });
+            }
+            catch { }
+        }
+
+        private void OnlineFriendMessage_Click(object sender, RoutedEventArgs e)
+        {
+            try
+            {
+                if (sender is not Button button || !long.TryParse(button.Tag?.ToString(), out var targetUserId) || targetUserId <= 0)
+                    return;
+
+                var friend = _onlineFriends.FirstOrDefault(item => item.UserId == targetUserId);
+                App.MainWindow.MainFrame.Navigate(typeof(Social.MessagesPage), new Social.MessagesPageArgs
+                {
+                    TargetUserId = targetUserId,
+                    Username = friend?.Username ?? $"@User {targetUserId}",
+                    DisplayName = friend?.DisplayName ?? ""
+                });
+            }
+            catch { }
+        }
+
+        private void OnlineFriendProfile_Click(object sender, RoutedEventArgs e)
+        {
+            try
+            {
+                if (sender is not Button button || !long.TryParse(button.Tag?.ToString(), out var targetUserId) || targetUserId <= 0)
+                    return;
+
+                var friend = _onlineFriends.FirstOrDefault(item => item.UserId == targetUserId);
+                if (friend == null)
+                    return;
+
+                App.MainWindow.MainFrame.Navigate(typeof(Social.FriendProfilePage), new Social.FriendProfilePageArgs
+                {
+                    UserId = friend.UserId,
+                    DisplayName = friend.DisplayName,
+                    Username = friend.Username,
+                    AvatarUrl = friend.AvatarUrl
+                });
             }
             catch { }
         }
@@ -163,6 +296,7 @@ namespace Zink.Pages
             try
             {
                 _nowPlayingTimer.Stop();
+                _socialPresenceTimer.Stop();
             }
             catch { }
 
@@ -251,6 +385,7 @@ namespace Zink.Pages
         {
             try
             {
+                _spotifyControllerPositionSampledUtc = DateTimeOffset.UtcNow;
                 DispatcherQueue?.TryEnqueue(() =>
                 {
                     RefreshNowPlayingFromServices();
@@ -263,6 +398,7 @@ namespace Zink.Pages
         {
             try
             {
+                _spotifyControllerPositionSampledUtc = DateTimeOffset.UtcNow;
                 DispatcherQueue?.TryEnqueue(() =>
                 {
                     RefreshNowPlayingFromServices();
@@ -329,8 +465,13 @@ namespace Zink.Pages
 
                 QueueSpotifyDesktopRefresh();
 
+                if (TryRefreshFromSpotifyDesktopSession())
+                    return;
+
                 if (TryRefreshFromAppPlaybackService())
                     return;
+
+                SpotifyPlaybackControls.Visibility = Visibility.Collapsed;
 
                 if (_lastPlayable != null)
                 {
@@ -400,14 +541,20 @@ namespace Zink.Pages
                 HeroKindText.Text = "Spotify";
                 HeroTypeValue.Text = "Spotify";
                 HeroPlaybackValue.Text = spotify.IsPlaying ? "Playing" : "Paused";
+                SpotifyPlaybackControls.Visibility = Visibility.Visible;
 
                 var duration = TimeSpan.FromSeconds(Math.Max(0, current.DurationSec));
-                var position = TimeSpan.FromSeconds(Math.Max(0, current.PositionSec));
+                var livePositionSeconds = Math.Max(0, current.PositionSec);
+                if (spotify.IsPlaying)
+                    livePositionSeconds += Math.Max(0, (DateTimeOffset.UtcNow - _spotifyControllerPositionSampledUtc).TotalSeconds);
+                if (current.DurationSec > 0)
+                    livePositionSeconds = Math.Min(livePositionSeconds, current.DurationSec);
+                var position = TimeSpan.FromSeconds(livePositionSeconds);
 
                 if (duration > TimeSpan.Zero)
                 {
                     HeroMetaText.Text = $"{FormatClock(position)} - {FormatClock(duration)}";
-                    HeroDurationValue.Text = FormatClock(duration);
+                    HeroDurationValue.Text = FormatClock(position);
                 }
                 else if (position > TimeSpan.Zero)
                 {
@@ -465,6 +612,7 @@ namespace Zink.Pages
 
                 if (spotifySession == null)
                 {
+                    _activeSpotifyDesktopSession = null;
                     DispatcherQueue?.TryEnqueue(() =>
                     {
                         TryRefreshFromSpotifyProcessFallback();
@@ -475,6 +623,7 @@ namespace Zink.Pages
                 var mediaProperties = await spotifySession.TryGetMediaPropertiesAsync();
                 var playbackInfo = spotifySession.GetPlaybackInfo();
                 var timeline = spotifySession.GetTimelineProperties();
+                _activeSpotifyDesktopSession = spotifySession;
 
                 DispatcherQueue?.TryEnqueue(async () =>
                 {
@@ -494,13 +643,14 @@ namespace Zink.Pages
                     HeroKindText.Text = "Spotify";
                     HeroTypeValue.Text = "Spotify";
                     HeroPlaybackValue.Text = status;
+                    SpotifyPlaybackControls.Visibility = Visibility.Visible;
 
                     var duration = timeline.EndTime - timeline.StartTime;
-                    var position = timeline.Position - timeline.StartTime;
+                    var position = GetLiveSpotifyPosition(timeline, playbackInfo.PlaybackStatus);
                     if (duration > TimeSpan.Zero)
                     {
                         HeroMetaText.Text = $"{FormatClock(position)} - {FormatClock(duration)}";
-                        HeroDurationValue.Text = FormatClock(duration);
+                        HeroDurationValue.Text = FormatClock(position);
                     }
                     else
                     {
@@ -541,6 +691,53 @@ namespace Zink.Pages
             {
                 _spotifyDesktopRefreshInFlight = false;
             }
+        }
+
+        private bool TryRefreshFromSpotifyDesktopSession()
+        {
+            try
+            {
+                var session = _activeSpotifyDesktopSession;
+                if (session == null)
+                    return false;
+
+                var playbackInfo = session.GetPlaybackInfo();
+                var timeline = session.GetTimelineProperties();
+                var duration = timeline.EndTime - timeline.StartTime;
+                var position = GetLiveSpotifyPosition(timeline, playbackInfo.PlaybackStatus);
+
+                HeroPlaybackValue.Text = playbackInfo.PlaybackStatus == GlobalSystemMediaTransportControlsSessionPlaybackStatus.Playing
+                    ? "Playing"
+                    : playbackInfo.PlaybackStatus.ToString();
+                HeroMetaText.Text = duration > TimeSpan.Zero
+                    ? $"{FormatClock(position)} - {FormatClock(duration)}"
+                    : "Spotify desktop app";
+                HeroDurationValue.Text = duration > TimeSpan.Zero ? FormatClock(position) : "-";
+                SpotifyPlaybackControls.Visibility = Visibility.Visible;
+                RefreshHomeRadioVolumeUi(false);
+                return true;
+            }
+            catch
+            {
+                _activeSpotifyDesktopSession = null;
+                return false;
+            }
+        }
+
+        private static TimeSpan GetLiveSpotifyPosition(
+            GlobalSystemMediaTransportControlsSessionTimelineProperties timeline,
+            GlobalSystemMediaTransportControlsSessionPlaybackStatus status)
+        {
+            var position = timeline.Position - timeline.StartTime;
+            if (status == GlobalSystemMediaTransportControlsSessionPlaybackStatus.Playing)
+                position += DateTimeOffset.UtcNow - timeline.LastUpdatedTime;
+
+            var duration = timeline.EndTime - timeline.StartTime;
+            if (position < TimeSpan.Zero)
+                return TimeSpan.Zero;
+            if (duration > TimeSpan.Zero && position > duration)
+                return duration;
+            return position;
         }
 
         private async Task<GlobalSystemMediaTransportControlsSession?> FindSpotifySessionAsync(
@@ -639,6 +836,7 @@ namespace Zink.Pages
                 HeroPlaybackValue.Text = "Playing";
                 HeroDurationValue.Text = "-";
                 HeroMetaText.Text = "Spotify desktop app";
+                SpotifyPlaybackControls.Visibility = Visibility.Visible;
                 ResumeButton.IsEnabled = true;
                 RefreshHomeRadioVolumeUi(false);
                 HeroThumb.Source = null;
@@ -1735,6 +1933,74 @@ namespace Zink.Pages
                 _lastPlayable.Kind = DetectKindFromPath(_lastPlayable.PayloadPath);
 
             NavigateFromRecent(_lastPlayable);
+        }
+
+        private async void SpotifyLikeButton_Click(object sender, RoutedEventArgs e)
+        {
+            try
+            {
+                var spotify = SpotifyControllerService.Instance;
+                if (spotify.IsAttached && !spotify.Current.IsLiked)
+                {
+                    await spotify.ToggleLikeAsync();
+                    return;
+                }
+
+                var current = await SpotifyAuthHelper.GetCurrentPlaybackAsync();
+                if (current != null && !string.IsNullOrWhiteSpace(current.TrackId))
+                    await SpotifyAuthHelper.AddTrackToLikedSongsAsync(current.TrackId);
+            }
+            catch { }
+        }
+
+        private async void SpotifyDislikeButton_Click(object sender, RoutedEventArgs e)
+        {
+            try
+            {
+                var spotify = SpotifyControllerService.Instance;
+                if (spotify.IsAttached && spotify.Current.IsLiked)
+                {
+                    await spotify.ToggleLikeAsync();
+                    return;
+                }
+
+                var current = await SpotifyAuthHelper.GetCurrentPlaybackAsync();
+                if (current != null && !string.IsNullOrWhiteSpace(current.TrackId))
+                    await SpotifyAuthHelper.RemoveTrackFromLikedSongsAsync(current.TrackId);
+            }
+            catch { }
+        }
+
+        private async void SpotifyNextButton_Click(object sender, RoutedEventArgs e)
+        {
+            try
+            {
+                var spotify = SpotifyControllerService.Instance;
+                if (spotify.IsAttached)
+                    await spotify.NextAsync();
+                else if (_activeSpotifyDesktopSession != null)
+                    await _activeSpotifyDesktopSession.TrySkipNextAsync();
+                else
+                    await SpotifyAuthHelper.NextTrackAsync();
+
+                _lastSpotifyDesktopRefreshQueuedUtc = DateTimeOffset.MinValue;
+            }
+            catch { }
+        }
+
+        private async void SpotifyStopButton_Click(object sender, RoutedEventArgs e)
+        {
+            try
+            {
+                var spotify = SpotifyControllerService.Instance;
+                if (spotify.IsAttached && spotify.IsPlaying)
+                    await spotify.PlayPauseAsync();
+                else if (_activeSpotifyDesktopSession != null)
+                    await _activeSpotifyDesktopSession.TryPauseAsync();
+                else
+                    await SpotifyAuthHelper.PausePlaybackAsync();
+            }
+            catch { }
         }
 
         private void ResetClearButton_Click(object sender, RoutedEventArgs e)

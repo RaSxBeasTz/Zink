@@ -54,6 +54,7 @@ namespace Zink.Windows
             Title = "Zink FPS Widget";
             _shell = BuildUi();
             Content = _shell;
+            Zink.Services.LocalizationService.RegisterWindow(this);
             ExtendsContentIntoTitleBar = true;
             SetTitleBar(_shell);
             Activated += (_, _) => MakeTopMost();

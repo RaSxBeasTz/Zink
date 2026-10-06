@@ -116,7 +116,12 @@ namespace Zink.Services.NativeCalling
             {
                 Bitrate = 16000,
                 Complexity = 10,
-                SignalType = OpusSignal.OPUS_SIGNAL_VOICE
+                SignalType = OpusSignal.OPUS_SIGNAL_VOICE,
+                // Keep sending 20 ms packets even during quiet moments so calls
+                // remain continuously open instead of sounding voice-activated.
+                UseDTX = false,
+                UseInbandFEC = true,
+                PacketLossPercent = 10
             };
             _encodeFailures = 0;
 
@@ -182,7 +187,7 @@ namespace Zink.Services.NativeCalling
             float max = 0f;
             for (int i = 0; i < pcmBytes.Length - 1; i += 2)
             {
-                short sample = BitConverter.ToInt16(pcmBytes, i);
+                short sample = (short)(pcmBytes[i] | (pcmBytes[i + 1] << 8));
                 float abs = Math.Abs((int)sample);
                 if (abs > max)
                     max = abs;
@@ -197,9 +202,10 @@ namespace Zink.Services.NativeCalling
                 if (gain < 1.0f) gain = 1.0f;
             }
 
+            double level = 0;
             for (int i = 0; i < pcmBytes.Length - 1; i += 2)
             {
-                short sample = BitConverter.ToInt16(pcmBytes, i);
+                short sample = (short)(pcmBytes[i] | (pcmBytes[i + 1] << 8));
 
                 float amplified = sample * gain;
 
@@ -207,10 +213,9 @@ namespace Zink.Services.NativeCalling
                 if (amplified < short.MinValue) amplified = short.MinValue;
 
                 short newSample = (short)amplified;
-                byte[] bytes = BitConverter.GetBytes(newSample);
-
-                pcmBytes[i] = bytes[0];
-                pcmBytes[i + 1] = bytes[1];
+                pcmBytes[i] = (byte)newSample;
+                pcmBytes[i + 1] = (byte)(newSample >> 8);
+                level += Math.Abs((int)newSample);
             }
 
             int sampleCount = pcmBytes.Length / 2;
@@ -252,13 +257,6 @@ namespace Zink.Services.NativeCalling
                 byte[] finalPacket = new byte[encodedLength];
                 Array.Copy(opusBuffer, finalPacket, encodedLength);
                 AudioCaptured?.Invoke(finalPacket);
-            }
-
-            double level = 0;
-            for (int i = 0; i < pcmBytes.Length - 1; i += 2)
-            {
-                short sample = BitConverter.ToInt16(pcmBytes, i);
-                level += Math.Abs((int)sample);
             }
 
             level /= sampleCount;

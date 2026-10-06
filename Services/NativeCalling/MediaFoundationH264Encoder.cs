@@ -11,6 +11,7 @@ using System.Drawing.Imaging;
 using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
+using Zink.Services.Recording;
 
 namespace Zink.Services.NativeCalling
 {
@@ -48,12 +49,13 @@ namespace Zink.Services.NativeCalling
         private static readonly int[] VFromB = BuildContributionTable(-10, 0);
         private static readonly Guid CodecApiInterfaceId = new("901DB4C7-31CE-41A2-85DC-8FA0BF41B8DA");
 
+
         private Transform _encoder = null!;
         private readonly int _width;
         private readonly int _height;
         private readonly int _frameRate;
         private readonly long _frameDuration100Ns;
-        private readonly int _recoveryKeyFrameIntervalFrames;
+        private int _recoveryKeyFrameIntervalFrames;
         private int _bitrate;
         private bool _useRgb32Input;
         private bool _useDxgiSurfaceInput;
@@ -67,6 +69,7 @@ namespace Zink.Services.NativeCalling
         private long _lastSubmittedSampleTime = -1;
         private int _frameIndex;
         private int _forceNextKeyFrame;
+        private int _recoveryKeyFrameRequestPending;
         private bool _loggedFirstOutputFrame;
         private bool _loggedOutputStreamMode;
         private bool _loggedForceKeyFrameUnavailable;
@@ -75,12 +78,27 @@ namespace Zink.Services.NativeCalling
         private SharpDX.Direct3D11.Device? _nativeMediaFoundationDevice;
         private readonly SharpDX.Direct3D11.Device? _preferredMediaFoundationDevice;
         private readonly ScreenShareH264EncoderFamily _preferredEncoderFamily;
+        private readonly bool _enableHdr10;
+        private Guid OutputSubtype => _enableHdr10 ? VideoFormatGuids.Hevc : VideoFormatGuids.H264;
+        private Guid InputSubtype => _enableHdr10 ? VideoFormatGuids.P010 : VideoFormatGuids.NV12;
+        private Format InputTextureFormat => _enableHdr10 ? Format.P010 : Format.NV12;
+        private string CodecName => _enableHdr10 ? "HEVC Main10" : "H.264";
         private SharpDX.Direct3D11.Device? _encoderD3D11Device;
         private Texture2D[]? _dxgiInputTextures;
         private Texture2D? _videoProcessorOutputTexture;
+        private Texture2D? _hdrReadbackTexture;
+        private bool _hasConvertedGpuFrame;
+        private Texture2D? _crossAdapterSourceTexture;
+        private KeyedMutex? _crossAdapterSourceMutex;
+        private IntPtr _crossAdapterSourceIdentity;
+        private Texture2D? _localEncoderSourceTexture;
         private VideoProcessorEnumerator? _videoProcessorEnumerator;
         private VideoProcessor? _videoProcessor;
         private VideoProcessorOutputView? _videoProcessorOutputView;
+        private ZinkHdrGpuConverter? _hdrGpuConverter;
+        private ZinkHdrToSdrGpuConverter? _streamHdrConverter;
+        private Texture2D? _streamSdrTexture;
+        private bool _loggedStreamHdrConversion;
         private int _videoProcessorSourceWidth;
         private int _videoProcessorSourceHeight;
         private int _dxgiInputTextureIndex;
@@ -104,6 +122,9 @@ namespace Zink.Services.NativeCalling
         private bool _loggedHardwareInputBackPressure;
         private bool _loggedUnreadableHardwareOutput;
         private bool _gpuTextureInputDisabled;
+        private bool _loggedFirstGpuConversion;
+        private bool _loggedFirstInputSubmission;
+        private bool _loggedFirstAcceptedInput;
         private DateTimeOffset _lastOutputStreamChangeLogUtc = DateTimeOffset.MinValue;
         private long _lastNonNvidiaFallbackOutputPollTicks;
         private long _lastNonNvidiaOpportunisticInputTicks;
@@ -127,18 +148,20 @@ namespace Zink.Services.NativeCalling
             bool preferHardware = true,
             bool requireHardware = false,
             SharpDX.Direct3D11.Device? preferredMediaFoundationDevice = null,
-            int frameRate = NativeScreenShareStreamingService.TargetFps,
-            ScreenShareH264EncoderFamily preferredEncoderFamily = ScreenShareH264EncoderFamily.Auto)
+            int frameRate = ScreenShareCapturePipeline.TargetFps,
+            ScreenShareH264EncoderFamily preferredEncoderFamily = ScreenShareH264EncoderFamily.Auto,
+            bool enableHdr10 = false)
         {
             _width = width;
             _height = height;
-            _frameRate = Math.Clamp(frameRate, 1, NativeScreenShareStreamingService.TargetFps);
+            _frameRate = Math.Clamp(frameRate, 1, 120);
             _frameDuration100Ns = 10_000_000L / _frameRate;
             _recoveryKeyFrameIntervalFrames = _frameRate * 2;
             _bitrate = bitrate;
             _preferredMediaFoundationDevice = preferredMediaFoundationDevice;
             _preferredEncoderFamily = preferredEncoderFamily;
-            Debug.WriteLine($"[ScreenShare:H264] Creating encoder {width}x{height} @ {_frameRate}fps @ {bitrate}bps.");
+            _enableHdr10 = enableHdr10;
+            Debug.WriteLine($"[ScreenShare:H264] Creating {CodecName} encoder {width}x{height} @ {_frameRate}fps @ {bitrate}bps.");
             InitializeEncoder(bitrate, preferHardware, requireHardware);
         }
 
@@ -149,15 +172,31 @@ namespace Zink.Services.NativeCalling
 
             while (true)
             {
-                var selection = CreateEncoderTransform(allowHardware, requireHardware, _preferredEncoderFamily);
+                var selection = CreateEncoderTransform(allowHardware, requireHardware, _preferredEncoderFamily, OutputSubtype, InputSubtype, CodecName);
                 _encoder = selection.Encoder;
                 _encoderMode = selection.Mode;
                 _isHardwareAccelerated = selection.IsHardwareAccelerated;
                 _dxgiDeviceManagerAttached = false;
                 _useHardwareEventPump = selection.IsHardwareAccelerated;
                 var isNvidiaEncoder = IsNvidiaEncoderMode(selection.Mode);
-                _useDxgiSurfaceInputForHardwareEncoder = ShouldUseDxgiSurfaceInputForEncoder(selection.Mode);
-                _gateHardwareInputOnNeedInput = selection.IsHardwareAccelerated && _useDxgiSurfaceInputForHardwareEncoder;
+                // NVENC can briefly stall asynchronous output if periodic force-IDR
+                // aligns with live DXGI submission. Use a longer normal cadence,
+                // while explicit receiver recovery still requests immediate IDR.
+                _recoveryKeyFrameIntervalFrames = _frameRate * (isNvidiaEncoder ? 8 : 2);
+                // Keep HDR P010 surfaces on the selected GPU. The old NVIDIA
+                // exclusion forced every 4K frame through a synchronous GPU-to-CPU
+                // readback and capped replay near 68 fps. Encoder initialization
+                // already retries a native D3D11 manager, and the replay service
+                // retains its Intel oneVPL recovery if the driver rejects P010.
+                _useDxgiSurfaceInputForHardwareEncoder =
+                    ShouldUseDxgiSurfaceInputForEncoder(selection.Mode);
+                // NVIDIA's asynchronous MFT is event-driven and should be gated by
+                // METransformNeedInput. Intel Quick Sync/Arc can accept several
+                // DXGI samples in flight; restricting it to one pending sample
+                // serializes conversion/encoding and reduced a requested 60 fps
+                // replay to about 16-18 fps.
+                _gateHardwareInputOnNeedInput = selection.IsHardwareAccelerated &&
+                    _useDxgiSurfaceInputForHardwareEncoder && isNvidiaEncoder;
                 _waitBrieflyForHardwareInputRequest = false;
                 _allowRepeatedForceKeyFrameRequests = isNvidiaEncoder;
 
@@ -165,21 +204,34 @@ namespace Zink.Services.NativeCalling
                 {
                     if (selection.IsHardwareAccelerated)
                     {
+                        // Hardware encoder MFTs can be asynchronous even when they
+                        // accept system-memory input. They reject SetInputType with
+                        // MF_E_TRANSFORM_ASYNC_LOCKED unless the async transform is
+                        // unlocked first. Previously this only happened for DXGI
+                        // input, causing replay capture to recreate the encoder and
+                        // log the same failure on every captured frame.
+                        TryUnlockAsyncHardwareTransform(_encoder);
+
                         if (_useDxgiSurfaceInputForHardwareEncoder)
                         {
-                            TryUnlockAsyncHardwareTransform(_encoder);
                             TryAttachDxgiDeviceManager(forceNativeDxgiDeviceManager);
                         }
                         else
                         {
-                            _gpuDeviceManagerMode = "System-memory NV12 hardware path; DXGI manager intentionally not attached";
-                            Debug.WriteLine("[ScreenShare:H264] Using system-memory NV12 hardware path with synchronous hardware input and no DXGI manager.");
+                            if (_enableHdr10 && _preferredMediaFoundationDevice != null)
+                            {
+                                _encoderD3D11Device = _preferredMediaFoundationDevice;
+                                EnableMultithreadProtection(_encoderD3D11Device);
+                            }
+                            _gpuDeviceManagerMode = "System-memory hardware input; DXGI manager intentionally not attached";
+                            Debug.WriteLine("[ScreenShare:H264] Using system-memory hardware input with no encoder DXGI manager.");
                         }
                     }
 
                     try
                     {
-                        var enableHardwareAsyncMode = selection.IsHardwareAccelerated && _useDxgiSurfaceInputForHardwareEncoder;
+                        var enableHardwareAsyncMode = selection.IsHardwareAccelerated &&
+                            (_useDxgiSurfaceInputForHardwareEncoder || isNvidiaEncoder);
                         ConfigureEncoder(
                             bitrate,
                             enableHardwareAsyncMode);
@@ -253,23 +305,32 @@ namespace Zink.Services.NativeCalling
             _inputBufferLength = 0;
             var isNvidiaEncoder = IsNvidiaEncoderMode(_encoderMode);
             _useHardwareEventPump = enableHardwareAsyncMode && _isHardwareAccelerated;
-            _gateHardwareInputOnNeedInput = enableHardwareAsyncMode && _isHardwareAccelerated;
+            _gateHardwareInputOnNeedInput = enableHardwareAsyncMode &&
+                _isHardwareAccelerated && IsNvidiaEncoderMode(_encoderMode);
             _waitBrieflyForHardwareInputRequest = false;
 
             RealtimeModeEnabled = TryEnableRealtimeEncoderMode(_encoder, enableHardwareAsyncMode);
 
             using var outputType = CreateH264OutputType(bitrate);
             LowLatencyOutputEnabled = TrySetLowLatencyOutputTypeAttributes(outputType);
+            _ = GameReplayLog.WriteAsync(nameof(MediaFoundationH264Encoder),
+                $"Setting encoder output type. Encoder={_encoderMode}, Codec={CodecName}, Size={_width}x{_height}, Fps={_frameRate}, Bitrate={bitrate}, HDR10={_enableHdr10}, Async={enableHardwareAsyncMode}");
             _encoder.SetOutputType(0, outputType, 0);
+            _ = GameReplayLog.WriteAsync(nameof(MediaFoundationH264Encoder),
+                "Encoder output type accepted.");
 
             if (_isHardwareAccelerated && _useDxgiSurfaceInputForHardwareEncoder)
             {
                 if (!_dxgiDeviceManagerAttached || _encoderD3D11Device == null)
                     throw new InvalidOperationException("The GPU encoder requires a DXGI device manager and D3D11 input device.");
 
-                _nv12Buffer = new byte[_width * _height * 3 / 2];
+                _nv12Buffer = new byte[_enableHdr10
+                    ? _width * _height * 3
+                    : _width * _height * 3 / 2];
                 _inputBufferLength = _nv12Buffer.Length;
-                SetInputType(VideoFormatGuids.NV12, "D3D11 NV12 DXGI surface");
+                SetInputType(InputSubtype, _enableHdr10 ? "D3D11 P010 DXGI surface" : "D3D11 NV12 DXGI surface");
+                _ = GameReplayLog.WriteAsync(nameof(MediaFoundationH264Encoder),
+                    $"Encoder input type accepted. Subtype={InputSubtype}, DXGI=True, DeclaredBind={(_enableHdr10 ? BindFlags.RenderTarget : BindFlags.None)}, Usage={ResourceUsage.Default}, DeviceManager={_gpuDeviceManagerMode}");
                 EnsureDxgiInputTextures();
                 _useDxgiSurfaceInput = true;
                 if (_useHardwareEventPump)
@@ -285,6 +346,8 @@ namespace Zink.Services.NativeCalling
 
             _encoder.ProcessMessage(TMessageType.NotifyBeginStreaming, IntPtr.Zero);
             _encoder.ProcessMessage(TMessageType.NotifyStartOfStream, IntPtr.Zero);
+            _ = GameReplayLog.WriteAsync(nameof(MediaFoundationH264Encoder),
+                $"Encoder streaming messages accepted. EventPump={_useHardwareEventPump}, InputGate={_gateHardwareInputOnNeedInput}");
             if (_isHardwareAccelerated && !_useDxgiSurfaceInputForHardwareEncoder && _useHardwareEventPump)
                 InitializeHardwareEventPump();
             Debug.WriteLine("[ScreenShare:H264] Encoder started.");
@@ -297,6 +360,16 @@ namespace Zink.Services.NativeCalling
 
         private void ConfigureSystemMemoryInput()
         {
+            if (_enableHdr10)
+            {
+                _nv12Buffer = new byte[_width * _height * 3];
+                _inputBufferLength = _nv12Buffer.Length;
+                SetInputType(VideoFormatGuids.P010, "system-memory P010");
+                _ = GameReplayLog.WriteAsync(nameof(MediaFoundationH264Encoder),
+                    $"Using system-memory P010 input because the NVIDIA HEVC MFT rejects D3D11 P010 samples. GPUConversionDevice={_gpuDeviceManagerMode}");
+                return;
+            }
+
             _useRgb32Input = !_isHardwareAccelerated && TrySetInputType(VideoFormatGuids.Rgb32, "RGB32");
             if (_useRgb32Input)
             {
@@ -321,7 +394,9 @@ namespace Zink.Services.NativeCalling
             get
             {
                 if (_useDxgiSurfaceInput)
-                    return "D3D11 NV12 DXGI surface";
+                    return _enableHdr10 ? "D3D11 P010 DXGI surface" : "D3D11 NV12 DXGI surface";
+                if (_enableHdr10)
+                    return "P010 system-memory hardware encoder input";
                 return _useRgb32Input
                     ? "RGB32 direct"
                     : (_isHardwareAccelerated ? "NV12 hardware encoder input" : "NV12 managed fallback");
@@ -338,10 +413,12 @@ namespace Zink.Services.NativeCalling
         public int HardwareInputRequests => Volatile.Read(ref _hardwareInputRequests);
         public int HardwareOutputRequests => Volatile.Read(ref _hardwareOutputRequests);
         public bool UsesHardwareEventPump => _useHardwareEventPump && _hardwareEventGenerator != null;
+        public bool RecoveryKeyFrameRequestPending => Volatile.Read(ref _recoveryKeyFrameRequestPending) == 1;
 
         public void ForceNextKeyFrame()
         {
-            Interlocked.Exchange(ref _forceNextKeyFrame, 1);
+            if (Interlocked.CompareExchange(ref _recoveryKeyFrameRequestPending, 1, 0) == 0)
+                Interlocked.Exchange(ref _forceNextKeyFrame, 1);
         }
 
         public IReadOnlyList<H264EncodedFrame> Encode(Bitmap bitmap, long? timestampMilliseconds = null)
@@ -487,6 +564,9 @@ namespace Zink.Services.NativeCalling
 
         public IReadOnlyList<H264EncodedFrame> EncodeGpuBgraTexture(Texture2D sourceTexture, int sourceWidth, int sourceHeight, long? timestampMilliseconds)
         {
+            if (_enableHdr10 && !_useDxgiSurfaceInput)
+                return EncodeGpuHdrSystemMemory(sourceTexture, sourceWidth, sourceHeight, timestampMilliseconds);
+
             if (_gpuTextureInputDisabled)
                 throw new InvalidOperationException("GPU texture input has been disabled after a D3D video processor failure.");
             if (_encoderD3D11Device == null)
@@ -563,6 +643,151 @@ namespace Zink.Services.NativeCalling
             return frames;
         }
 
+        public IReadOnlyList<H264EncodedFrame> EncodeRepeatedGpuFrame(long? timestampMilliseconds)
+        {
+            var frames = new List<H264EncodedFrame>();
+            if (_encoderD3D11Device == null || !_useDxgiSurfaceInput ||
+                _videoProcessorOutputTexture == null || !_hasConvertedGpuFrame)
+                return frames;
+
+            if (_hardwareEventGenerator == null || IsNvidiaEncoderMode(_encoderMode))
+                frames.AddRange(DrainOutput());
+
+            var consumedHardwareInputRequest = false;
+            if (_hardwareEventGenerator != null && _gateHardwareInputOnNeedInput)
+                consumedHardwareInputRequest = TryConsumeHardwareInputRequestForFrame();
+
+            if (_hardwareEventGenerator != null && _gateHardwareInputOnNeedInput && !consumedHardwareInputRequest)
+            {
+                frames.AddRange(DrainOutput());
+                return frames;
+            }
+
+            var texture = TryGetNextAvailableDxgiInputTexture();
+            if (texture == null)
+            {
+                if (consumedHardwareInputRequest)
+                    ReturnHardwareInputRequest();
+                return frames;
+            }
+
+            // The desktop image is unchanged. Reuse the most recently converted
+            // NV12 surface instead of repeating a full-resolution video-processor
+            // conversion. The encoder input texture remains independently owned.
+            _encoderD3D11Device.ImmediateContext.CopyResource(_videoProcessorOutputTexture, texture);
+            SubmitDxgiTexture(texture, frames, consumedHardwareInputRequest, timestampMilliseconds);
+            return frames;
+        }
+
+        private IReadOnlyList<H264EncodedFrame> EncodeGpuHdrSystemMemory(
+            Texture2D sourceTexture,
+            int sourceWidth,
+            int sourceHeight,
+            long? timestampMilliseconds)
+        {
+            if (_encoderD3D11Device == null || _nv12Buffer == null)
+                throw new InvalidOperationException("HDR P010 conversion resources were not initialized.");
+
+            Texture2D converted = EnsureVideoProcessorOutputTexture();
+            Texture2D processorSource = AcquireEncoderSourceTexture(sourceTexture, out KeyedMutex? sourceMutex);
+            try
+            {
+                _hdrGpuConverter ??= new ZinkHdrGpuConverter(_encoderD3D11Device);
+                _hdrGpuConverter.Convert(processorSource, converted);
+            }
+            finally
+            {
+                sourceMutex?.Release(0);
+            }
+
+            _hdrReadbackTexture ??= new Texture2D(_encoderD3D11Device, new Texture2DDescription
+            {
+                Width = _width,
+                Height = _height,
+                MipLevels = 1,
+                ArraySize = 1,
+                Format = Format.P010,
+                SampleDescription = new SampleDescription(1, 0),
+                Usage = ResourceUsage.Staging,
+                BindFlags = BindFlags.None,
+                CpuAccessFlags = CpuAccessFlags.Read,
+                OptionFlags = ResourceOptionFlags.None
+            });
+
+            _encoderD3D11Device.ImmediateContext.CopyResource(converted, _hdrReadbackTexture);
+            var mapped = _encoderD3D11Device.ImmediateContext.MapSubresource(
+                _hdrReadbackTexture, 0, MapMode.Read, SharpDX.Direct3D11.MapFlags.None);
+            try
+            {
+                int packedStride = _width * 2;
+                for (int row = 0; row < _height; row++)
+                    Marshal.Copy(mapped.DataPointer + row * mapped.RowPitch, _nv12Buffer, row * packedStride, packedStride);
+                IntPtr chroma = mapped.DataPointer + mapped.RowPitch * _height;
+                int chromaOffset = packedStride * _height;
+                for (int row = 0; row < _height / 2; row++)
+                    Marshal.Copy(chroma + row * mapped.RowPitch, _nv12Buffer, chromaOffset + row * packedStride, packedStride);
+            }
+            finally
+            {
+                _encoderD3D11Device.ImmediateContext.UnmapSubresource(_hdrReadbackTexture, 0);
+            }
+
+            _hasConvertedGpuFrame = true;
+            return SubmitSystemMemoryFrame(timestampMilliseconds);
+        }
+
+        private IReadOnlyList<H264EncodedFrame> SubmitSystemMemoryFrame(long? timestampMilliseconds)
+        {
+            var frames = new List<H264EncodedFrame>();
+            frames.AddRange(DrainOutput());
+
+            var consumedHardwareInputRequest = false;
+            if (_hardwareEventGenerator != null && _gateHardwareInputOnNeedInput)
+            {
+                consumedHardwareInputRequest = TryConsumeHardwareInputRequestForFrame();
+                if (!consumedHardwareInputRequest)
+                    return frames;
+            }
+
+            using var inputBuffer = MediaFactory.CreateMemoryBuffer(_inputBufferLength);
+            int maxLength;
+            int currentLength;
+            IntPtr input = inputBuffer.Lock(out maxLength, out currentLength);
+            try
+            {
+                Marshal.Copy(_nv12Buffer!, 0, input, _inputBufferLength);
+            }
+            finally
+            {
+                inputBuffer.Unlock();
+            }
+            inputBuffer.CurrentLength = _inputBufferLength;
+            using var sample = MediaFactory.CreateSample();
+            sample.AddBuffer(inputBuffer);
+            sample.SampleTime = GetNextInputSampleTime100Ns(timestampMilliseconds);
+            sample.SampleDuration = _frameDuration100Ns;
+            RequestRecoveryKeyFrameIfNeeded();
+            try
+            {
+                _encoder.ProcessInput(0, sample, 0);
+            }
+            catch (SharpDXException ex) when (ex.ResultCode.Code == MfENotAccepting)
+            {
+                if (consumedHardwareInputRequest)
+                    ReturnHardwareInputRequest();
+                return frames;
+            }
+            catch
+            {
+                if (consumedHardwareInputRequest)
+                    ReturnHardwareInputRequest();
+                throw;
+            }
+            frames.AddRange(DrainOutput());
+            _frameIndex++;
+            return frames;
+        }
+
         private void SubmitDxgiTexture(Texture2D texture, List<H264EncodedFrame> frames, bool hardwareInputRequestConsumed = true, long? timestampMilliseconds = null)
         {
             MediaBuffer? inputBuffer = null;
@@ -584,6 +809,13 @@ namespace Zink.Services.NativeCalling
                 sample.SampleDuration = _frameDuration100Ns;
 
                 RequestRecoveryKeyFrameIfNeeded();
+                if (!_loggedFirstInputSubmission)
+                {
+                    _loggedFirstInputSubmission = true;
+                    var description = texture.Description;
+                    _ = GameReplayLog.WriteAsync(nameof(MediaFoundationH264Encoder),
+                        $"Submitting first encoder input. Encoder={_encoderMode}, Texture={description.Width}x{description.Height}/{description.Format}, Bind={description.BindFlags}, Usage={description.Usage}, Options={description.OptionFlags}, SampleTime={sample.SampleTime}, SampleDuration={sample.SampleDuration}, InputRequests={HardwareInputRequests}, OutputRequests={HardwareOutputRequests}");
+                }
                 try
                 {
                     _encoder.ProcessInput(0, sample, 0);
@@ -603,14 +835,23 @@ namespace Zink.Services.NativeCalling
 
                     return;
                 }
-                catch
+                catch (Exception ex)
                 {
                     if (hardwareInputRequestConsumed)
                         ReturnHardwareInputRequest();
+                    var description = texture.Description;
+                    _ = GameReplayLog.WriteAsync(nameof(MediaFoundationH264Encoder),
+                        $"ProcessInput failed. Error={ex}; Encoder={_encoderMode}; HDR10={_enableHdr10}; InputSubtype={InputSubtype}; Texture={description.Width}x{description.Height}/{description.Format}; Bind={description.BindFlags}; Usage={description.Usage}; Options={description.OptionFlags}; DeviceManager={_gpuDeviceManagerMode}; PendingInputs={_pendingHardwareInputs.Count}");
                     throw;
                 }
 
                 _pendingHardwareInputs.Enqueue(new PendingHardwareInputSample(sample, inputBuffer, texture));
+                if (!_loggedFirstAcceptedInput)
+                {
+                    _loggedFirstAcceptedInput = true;
+                    _ = GameReplayLog.WriteAsync(nameof(MediaFoundationH264Encoder),
+                        $"First encoder input accepted. PendingInputs={_pendingHardwareInputs.Count}, InputRequests={HardwareInputRequests}, OutputRequests={HardwareOutputRequests}");
+                }
                 sample = null;
                 inputBuffer = null;
                 _loggedWaitingForHardwareInput = false;
@@ -801,7 +1042,13 @@ namespace Zink.Services.NativeCalling
                 return false;
 
             var nowTicks = Stopwatch.GetTimestamp();
-            var minimumIntervalTicks = Math.Max(1, Stopwatch.Frequency / Math.Max(1, _frameRate));
+            // This is only a safety net for non-conforming async MFTs that fail to
+            // raise METransformHaveOutput. Qualcomm returns E_UNEXPECTED while it
+            // legitimately has no output ready, so polling this fallback at the
+            // replay frame rate creates a continuous handled-exception storm. The
+            // normal event-driven output path remains immediate; only the fallback
+            // probe is bounded to twice per second.
+            var minimumIntervalTicks = Math.Max(1, Stopwatch.Frequency / 2);
             var lastPollTicks = Interlocked.Read(ref _lastNonNvidiaFallbackOutputPollTicks);
             if (lastPollTicks != 0 && nowTicks - lastPollTicks < minimumIntervalTicks)
                 return false;
@@ -1025,7 +1272,7 @@ namespace Zink.Services.NativeCalling
                         continue;
 
                     var subtype = candidate.Get(MediaTypeAttributeKeys.Subtype);
-                    if (subtype != VideoFormatGuids.H264)
+                    if (subtype != OutputSubtype)
                         continue;
 
                     candidate.Set(MediaTypeAttributeKeys.AvgBitrate, _bitrate);
@@ -1074,17 +1321,22 @@ namespace Zink.Services.NativeCalling
         private void AddEncodedFrame(List<H264EncodedFrame> frames, byte[] data, long timestampMilliseconds, bool cleanPoint)
         {
             var annexBData = NormalizeH264AccessUnitToAnnexB(data, out var convertedToAnnexB);
-            var hasIdr = ContainsNalUnitType(annexBData, 5);
+            var hasIdr = _enableHdr10
+                ? ContainsNalUnitType(annexBData, 19, true) || ContainsNalUnitType(annexBData, 20, true) || ContainsNalUnitType(annexBData, 21, true)
+                : ContainsNalUnitType(annexBData, 5, false);
             var isKeyFrame = hasIdr || cleanPoint;
-            var hasSps = ContainsNalUnitType(annexBData, 7);
-            var hasPps = ContainsNalUnitType(annexBData, 8);
+            if (isKeyFrame)
+                Interlocked.Exchange(ref _recoveryKeyFrameRequestPending, 0);
+            var hasVps = _enableHdr10 && ContainsNalUnitType(annexBData, 32, true);
+            var hasSps = ContainsNalUnitType(annexBData, _enableHdr10 ? (byte)33 : (byte)7, _enableHdr10);
+            var hasPps = ContainsNalUnitType(annexBData, _enableHdr10 ? (byte)34 : (byte)8, _enableHdr10);
 
-            if ((hasSps || hasPps) && TryExtractParameterSets(annexBData, out var parameterSets))
+            if ((hasVps || hasSps || hasPps) && TryExtractParameterSets(annexBData, _enableHdr10, out var parameterSets))
                 _cachedParameterSetsAnnexB = parameterSets;
 
             if (hasIdr &&
                 _cachedParameterSetsAnnexB != null &&
-                (!hasSps || !hasPps))
+                (!hasSps || !hasPps || (_enableHdr10 && !hasVps)))
             {
                 annexBData = CombineParameterSetsWithFrame(_cachedParameterSetsAnnexB, annexBData);
                 hasSps = true;
@@ -1095,7 +1347,7 @@ namespace Zink.Services.NativeCalling
             {
                 _loggedFirstOutputFrame = true;
                 Debug.WriteLine(
-                    $"[ScreenShare:H264] First encoded frame: raw={data.Length} bytes, send={annexBData.Length} bytes, framing={(convertedToAnnexB ? "length-prefixed->AnnexB" : "AnnexB")}, sps={hasSps}, pps={hasPps}, idr={hasIdr}, cleanPoint={cleanPoint}.");
+                    $"[ScreenShare:H264] First {CodecName} frame: raw={data.Length} bytes, send={annexBData.Length} bytes, framing={(convertedToAnnexB ? "length-prefixed->AnnexB" : "AnnexB")}, vps={hasVps}, sps={hasSps}, pps={hasPps}, idr={hasIdr}, cleanPoint={cleanPoint}.");
             }
 
             if (!isKeyFrame && _frameIndex > 0 && _frameIndex % _recoveryKeyFrameIntervalFrames == 0)
@@ -1178,14 +1430,14 @@ namespace Zink.Services.NativeCalling
             return true;
         }
 
-        private static bool TryExtractParameterSets(byte[] annexBFrame, out byte[] parameterSets)
+        private static bool TryExtractParameterSets(byte[] annexBFrame, bool hevc, out byte[] parameterSets)
         {
             var output = new List<byte>();
             var found = false;
 
-            foreach (var nal in EnumerateAnnexBNalUnits(annexBFrame))
+            foreach (var nal in EnumerateAnnexBNalUnits(annexBFrame, hevc))
             {
-                if (nal.Type != 7 && nal.Type != 8)
+                if (hevc ? nal.Type is not (32 or 33 or 34) : nal.Type is not (7 or 8))
                     continue;
 
                 AppendStartCode(output);
@@ -1388,9 +1640,9 @@ namespace Zink.Services.NativeCalling
             return false;
         }
 
-        private static bool ContainsNalUnitType(byte[] annexBFrame, byte nalType)
+        private static bool ContainsNalUnitType(byte[] annexBFrame, byte nalType, bool hevc = false)
         {
-            foreach (var nal in EnumerateAnnexBNalUnits(annexBFrame))
+            foreach (var nal in EnumerateAnnexBNalUnits(annexBFrame, hevc))
             {
                 if (nal.Type == nalType)
                     return true;
@@ -1399,7 +1651,7 @@ namespace Zink.Services.NativeCalling
             return false;
         }
 
-        private static IEnumerable<AnnexBNalUnit> EnumerateAnnexBNalUnits(byte[] frame)
+        private static IEnumerable<AnnexBNalUnit> EnumerateAnnexBNalUnits(byte[] frame, bool hevc = false)
         {
             var index = 0;
             while (TryFindStartCode(frame, index, out var startCodeIndex, out var startCodeLength))
@@ -1411,7 +1663,10 @@ namespace Zink.Services.NativeCalling
 
                 var nalLength = nextStart - nalOffset;
                 if (nalLength > 0 && nalOffset < frame.Length)
-                    yield return new AnnexBNalUnit(nalOffset, nalLength, (byte)(frame[nalOffset] & 0x1F));
+                    yield return new AnnexBNalUnit(
+                        nalOffset,
+                        nalLength,
+                        hevc ? (byte)((frame[nalOffset] >> 1) & 0x3F) : (byte)(frame[nalOffset] & 0x1F));
 
                 index = nextStart;
             }
@@ -1453,16 +1708,22 @@ namespace Zink.Services.NativeCalling
         private static EncoderTransformSelection CreateEncoderTransform(
             bool preferHardware,
             bool requireHardware,
-            ScreenShareH264EncoderFamily preferredEncoderFamily)
+            ScreenShareH264EncoderFamily preferredEncoderFamily,
+            Guid outputSubtype,
+            Guid inputSubtype,
+            string codecName)
         {
             if (preferHardware &&
-                TryCreateHardwareEncoderTransform(preferredEncoderFamily, out var hardwareEncoder, out var hardwareMode))
+                TryCreateHardwareEncoderTransform(preferredEncoderFamily, outputSubtype, inputSubtype, codecName, out var hardwareEncoder, out var hardwareMode))
             {
                 return new EncoderTransformSelection(hardwareEncoder, hardwareMode, true);
             }
 
             if (requireHardware)
-                throw new InvalidOperationException("No GPU H.264 hardware encoder MFT was found on this Windows install.");
+                throw new InvalidOperationException($"No GPU {codecName} hardware encoder MFT was found on this Windows install.");
+
+            if (outputSubtype != VideoFormatGuids.H264)
+                throw new InvalidOperationException($"Software fallback is forbidden for {codecName} replay encoding.");
 
             Debug.WriteLine("[ScreenShare:H264] Using stable Microsoft H.264 encoder MFT.");
             return new EncoderTransformSelection(
@@ -1473,6 +1734,9 @@ namespace Zink.Services.NativeCalling
 
         private static bool TryCreateHardwareEncoderTransform(
             ScreenShareH264EncoderFamily preferredEncoderFamily,
+            Guid outputSubtype,
+            Guid inputSubtype,
+            string codecName,
             out Transform encoder,
             out string mode)
         {
@@ -1482,12 +1746,12 @@ namespace Zink.Services.NativeCalling
             var outputInfo = new TRegisterTypeInformation
             {
                 GuidMajorType = MediaTypeGuids.Video,
-                GuidSubtype = VideoFormatGuids.H264
+                GuidSubtype = outputSubtype
             };
             var nv12InputInfo = new TRegisterTypeInformation
             {
                 GuidMajorType = MediaTypeGuids.Video,
-                GuidSubtype = VideoFormatGuids.NV12
+                GuidSubtype = inputSubtype
             };
 
             var activations = new List<Activate>();
@@ -1515,14 +1779,14 @@ namespace Zink.Services.NativeCalling
                         var friendlyName = GetActivationString(
                             activation,
                             TransformAttributeKeys.MftFriendlyNameAttribute,
-                            "hardware H.264 encoder");
+                            $"hardware {codecName} encoder");
                         var vendorId = GetActivationString(
                             activation,
                             TransformAttributeKeys.MftEnumHardwareVendorIdAttribute,
                             "");
 
                         encoder = activation.ActivateObject<Transform>();
-                        mode = $"GPU H.264 hardware MFT ({GetHardwareEncoderFamily(friendlyName, vendorId)}): {friendlyName}";
+                        mode = $"GPU {codecName} hardware MFT ({GetHardwareEncoderFamily(friendlyName, vendorId)}): {friendlyName}";
                         Debug.WriteLine($"[ScreenShare:H264] Using {mode}.");
                         return true;
                     }
@@ -1618,8 +1882,8 @@ namespace Zink.Services.NativeCalling
                     EnableMultithreadProtection(_nativeMediaFoundationDevice);
                     AttachDxgiDeviceManager(_nativeMediaFoundationDevice);
                     _encoderD3D11Device = _nativeMediaFoundationDevice;
-                    _gpuDeviceManagerMode = "WGC shared native D3D11 device + Media Foundation DXGI manager";
-                    Debug.WriteLine("[ScreenShare:H264] WGC shared native D3D11 device attached to hardware encoder for GPU texture input.");
+                    _gpuDeviceManagerMode = "Capture D3D11 device + Media Foundation DXGI manager";
+                    Debug.WriteLine("[ScreenShare:H264] Capture D3D11 device attached to hardware encoder for GPU texture input.");
                     return;
                 }
                 catch (Exception ex)
@@ -1785,6 +2049,14 @@ namespace Zink.Services.NativeCalling
             DisposePendingHardwareInputs();
             DisposeHardwareEventGenerator();
             DisposeVideoProcessorResources();
+
+            try { _crossAdapterSourceMutex?.Dispose(); } catch { }
+            try { _crossAdapterSourceTexture?.Dispose(); } catch { }
+            try { _localEncoderSourceTexture?.Dispose(); } catch { }
+            _crossAdapterSourceMutex = null;
+            _crossAdapterSourceTexture = null;
+            _crossAdapterSourceIdentity = IntPtr.Zero;
+            _localEncoderSourceTexture = null;
 
             try
             {
@@ -1960,6 +2232,9 @@ namespace Zink.Services.NativeCalling
         [DllImport("ole32.dll", ExactSpelling = true)]
         private static extern void CoTaskMemFree(IntPtr ptr);
 
+        [DllImport("kernel32.dll", ExactSpelling = true)]
+        private static extern bool CloseHandle(IntPtr handle);
+
         [UnmanagedFunctionPointer(CallingConvention.StdCall)]
         private delegate int ProcessOutputNativeDelegate(
             IntPtr transform,
@@ -2009,13 +2284,15 @@ namespace Zink.Services.NativeCalling
         {
             var outputType = new MediaType();
             outputType.Set(MediaTypeAttributeKeys.MajorType, MediaTypeGuids.Video);
-            outputType.Set(MediaTypeAttributeKeys.Subtype, VideoFormatGuids.H264);
+            outputType.Set(MediaTypeAttributeKeys.Subtype, OutputSubtype);
             outputType.Set(MediaTypeAttributeKeys.AvgBitrate, bitrate);
             outputType.Set(MediaTypeAttributeKeys.FrameSize, PackRatio(_width, _height));
             outputType.Set(MediaTypeAttributeKeys.FrameRate, PackRatio(_frameRate, 1));
             outputType.Set(MediaTypeAttributeKeys.PixelAspectRatio, PackRatio(1, 1));
             outputType.Set(MediaTypeAttributeKeys.InterlaceMode, (int)VideoInterlaceMode.Progressive);
             outputType.Set(MediaTypeAttributeKeys.MaxKeyframeSpacing, _recoveryKeyFrameIntervalFrames);
+            if (_enableHdr10)
+                SetHdr10ColourMetadata(outputType);
             return outputType;
         }
 
@@ -2024,7 +2301,9 @@ namespace Zink.Services.NativeCalling
             var inputType = new MediaType();
             var sampleSize = subtype == VideoFormatGuids.Rgb32
                 ? _width * _height * 4
-                : _width * _height * 3 / 2;
+                : subtype == VideoFormatGuids.P010
+                    ? _width * _height * 3
+                    : _width * _height * 3 / 2;
 
             inputType.Set(MediaTypeAttributeKeys.MajorType, MediaTypeGuids.Video);
             inputType.Set(MediaTypeAttributeKeys.Subtype, subtype);
@@ -2035,8 +2314,35 @@ namespace Zink.Services.NativeCalling
             inputType.Set(MediaTypeAttributeKeys.FixedSizeSamples, 1);
             inputType.Set(MediaTypeAttributeKeys.AllSamplesIndependent, 1);
             inputType.Set(MediaTypeAttributeKeys.SampleSize, sampleSize);
-            inputType.Set(MediaTypeAttributeKeys.DefaultStride, subtype == VideoFormatGuids.Rgb32 ? _width * 4 : _width);
+            if (_enableHdr10 && _useDxgiSurfaceInputForHardwareEncoder)
+            {
+                inputType.Set(
+                    TransformAttributeKeys.D3D11Bindflags,
+                    (int)BindFlags.RenderTarget);
+                inputType.Set(
+                    TransformAttributeKeys.D3D11Usage,
+                    (int)ResourceUsage.Default);
+            }
+            inputType.Set(
+                MediaTypeAttributeKeys.DefaultStride,
+                subtype == VideoFormatGuids.Rgb32
+                    ? _width * 4
+                    : subtype == VideoFormatGuids.P010
+                        ? _width * 2
+                        : _width);
+            if (_enableHdr10)
+                SetHdr10ColourMetadata(inputType);
             return inputType;
+        }
+
+        private static void SetHdr10ColourMetadata(MediaType mediaType)
+        {
+            // MFVideoPrimaries_BT2020=9, MFVideoTransferFunction_2084=15,
+            // MFVideoTransferMatrix_BT2020_10=4, MFNominalRange_16_235=2.
+            mediaType.Set(MediaTypeAttributeKeys.VideoPrimaries, 9);
+            mediaType.Set(MediaTypeAttributeKeys.TransferFunction, 15);
+            mediaType.Set(MediaTypeAttributeKeys.YuvMatrix, 4);
+            mediaType.Set(MediaTypeAttributeKeys.VideoNominalRange, 2);
         }
 
         private Texture2D? TryGetNextAvailableDxgiInputTexture()
@@ -2065,16 +2371,29 @@ namespace Zink.Services.NativeCalling
             if (_encoderD3D11Device == null)
                 throw new InvalidOperationException("D3D11 input device was not initialized.");
 
-            var bindFlagCandidates = new[]
-            {
-                BindFlags.VideoEncoder,
-                BindFlags.None,
-                BindFlags.ShaderResource
-            };
+            var bindFlagCandidates = _enableHdr10
+                ? new[]
+                {
+                    BindFlags.VideoEncoder | BindFlags.RenderTarget,
+                    BindFlags.VideoEncoder,
+                    BindFlags.RenderTarget,
+                    BindFlags.ShaderResource,
+                    BindFlags.None
+                }
+                : new[]
+                {
+                    BindFlags.VideoEncoder | BindFlags.RenderTarget,
+                    BindFlags.RenderTarget,
+                    BindFlags.VideoEncoder,
+                    BindFlags.None,
+                    BindFlags.ShaderResource
+                };
 
             foreach (var bindFlags in bindFlagCandidates)
             {
                 var desc = CreateDxgiInputTextureDescription(bindFlags);
+                _ = GameReplayLog.WriteAsync(nameof(MediaFoundationH264Encoder),
+                    $"Trying encoder texture pool. Count={DxgiInputTexturePoolSize}, Size={desc.Width}x{desc.Height}, Format={desc.Format}, Bind={desc.BindFlags}, Usage={desc.Usage}, Options={desc.OptionFlags}");
 
                 try
                 {
@@ -2103,11 +2422,15 @@ namespace Zink.Services.NativeCalling
                     }
 
                     Debug.WriteLine($"[ScreenShare:H264] Created D3D11 NV12 DXGI input texture pool with bind flags: {bindFlags}.");
+                    _ = GameReplayLog.WriteAsync(nameof(MediaFoundationH264Encoder),
+                        $"Encoder texture pool created. Count={_dxgiInputTextures.Length}, Format={desc.Format}, Bind={bindFlags}, Usage={desc.Usage}");
                     return;
                 }
                 catch (SharpDXException ex)
                 {
                     Debug.WriteLine($"[ScreenShare:H264] D3D11 NV12 texture creation failed with bind flags {bindFlags}: {ex.Message}");
+                    _ = GameReplayLog.WriteAsync(nameof(MediaFoundationH264Encoder),
+                        $"Encoder texture pool rejected. Format={desc.Format}, Bind={bindFlags}, HResult=0x{ex.ResultCode.Code:X8}, Error={ex.Message}");
                     DisposeDxgiInputTextures();
                 }
             }
@@ -2123,7 +2446,7 @@ namespace Zink.Services.NativeCalling
                 Height = _height,
                 MipLevels = 1,
                 ArraySize = 1,
-                Format = Format.NV12,
+                Format = InputTextureFormat,
                 SampleDescription = new SampleDescription(1, 0),
                 Usage = ResourceUsage.Default,
                 BindFlags = bindFlags,
@@ -2141,6 +2464,26 @@ namespace Zink.Services.NativeCalling
             if (_encoderD3D11Device == null)
                 throw new InvalidOperationException("D3D11 input device was not initialized.");
 
+            // Twitch remains an H.264/SDR transport. When Windows supplies the
+            // NVIDIA path with the background recorder's FP16 scRGB capture,
+            // perform the HDR colour conversion on the capture GPU before the
+            // established NV12/NVENC conversion and submission stages.
+            if (!_enableHdr10 && sourceTexture.Description.Format == Format.R16G16B16A16_Float)
+            {
+                if (!_loggedStreamHdrConversion)
+                {
+                    _loggedStreamHdrConversion = true;
+                    var hdrSourceDescription = sourceTexture.Description;
+                    DiagnosticLogService.WriteLine($"[ScreenShare:HDR:Nvidia] conversion active; source={hdrSourceDescription.Width}x{hdrSourceDescription.Height}/{hdrSourceDescription.Format}; target={_width}x{_height}/{Format.B8G8R8A8_UNorm}; encoderInput=NV12; encoder='{_encoderMode}'; toneMap='{ZinkHdrToSdrGpuConverter.ToneMapDescription}'.");
+                    DiagnosticLogService.Flush();
+                }
+                EnsureStreamHdrConversionResources(sourceTexture);
+                _streamHdrConverter!.Convert(sourceTexture, _streamSdrTexture!);
+                sourceTexture = _streamSdrTexture!;
+                sourceWidth = _width;
+                sourceHeight = _height;
+            }
+
             using var videoContext = _encoderD3D11Device.ImmediateContext.QueryInterface<VideoContext>();
             using var videoDevice = _encoderD3D11Device.QueryInterface<VideoDevice>();
             EnsureVideoProcessor(sourceWidth, sourceHeight);
@@ -2149,6 +2492,43 @@ namespace Zink.Services.NativeCalling
             var processor = _videoProcessor ??
                 throw new InvalidOperationException("D3D11 video processor was not initialized.");
             var conversionOutputTexture = EnsureVideoProcessorOutputTexture();
+            Texture2D processorSource = AcquireEncoderSourceTexture(sourceTexture, out KeyedMutex? sourceMutex);
+            if (!_loggedFirstGpuConversion)
+            {
+                _loggedFirstGpuConversion = true;
+                var sourceDescription = sourceTexture.Description;
+                var processorDescription = processorSource.Description;
+                var targetDescription = targetTexture.Description;
+                _ = GameReplayLog.WriteAsync(nameof(MediaFoundationH264Encoder),
+                    $"First GPU conversion. HDR10={_enableHdr10}, Source={sourceDescription.Width}x{sourceDescription.Height}/{sourceDescription.Format}/Bind={sourceDescription.BindFlags}/Options={sourceDescription.OptionFlags}, ProcessorSource={processorDescription.Width}x{processorDescription.Height}/{processorDescription.Format}/Bind={processorDescription.BindFlags}/Options={processorDescription.OptionFlags}, Target={targetDescription.Width}x{targetDescription.Height}/{targetDescription.Format}/Bind={targetDescription.BindFlags}/Options={targetDescription.OptionFlags}, SameDevice={sourceTexture.Device.NativePointer == _encoderD3D11Device.NativePointer}");
+            }
+            if (_enableHdr10)
+            {
+                try
+                {
+                    if (sourceTexture.Description.Format != Format.R16G16B16A16_Float)
+                        throw new InvalidOperationException(
+                            $"HDR10 encoding requires an FP16 scRGB capture texture; received {sourceTexture.Description.Format}.");
+
+                    // Render into a converter-owned P010 surface first. It remains
+                    // valid after ProcessInput and is also the source for paced
+                    // duplicate frames when desktop duplication has no new image.
+                    // Rendering directly into an encoder-pool surface allowed the
+                    // asynchronous Intel MFT to observe partially written/reused
+                    // planes, which appeared as alternating green and valid frames.
+                    var stableHdrFrame = EnsureVideoProcessorOutputTexture();
+                    _hdrGpuConverter ??= new ZinkHdrGpuConverter(_encoderD3D11Device);
+                    _hdrGpuConverter.Convert(processorSource, stableHdrFrame);
+                    _encoderD3D11Device.ImmediateContext.CopyResource(stableHdrFrame, targetTexture);
+                    _encoderD3D11Device.ImmediateContext.Flush();
+                    _hasConvertedGpuFrame = true;
+                    return;
+                }
+                finally
+                {
+                    sourceMutex?.Release(0);
+                }
+            }
             var inputViewDescription = new VideoProcessorInputViewDescription
             {
                 Dimension = VpivDimension.Texture2D,
@@ -2158,15 +2538,17 @@ namespace Zink.Services.NativeCalling
                     ArraySlice = 0
                 }
             };
-            videoDevice.CreateVideoProcessorInputView(
-                sourceTexture,
-                enumerator,
-                inputViewDescription,
-                out var inputView);
-            using var inputViewScope = inputView;
-            var outputView = EnsureVideoProcessorOutputView(conversionOutputTexture);
+            try
+            {
+                videoDevice.CreateVideoProcessorInputView(
+                    processorSource,
+                    enumerator,
+                    inputViewDescription,
+                    out var inputView);
+                using var inputViewScope = inputView;
+                var outputView = EnsureVideoProcessorOutputView(conversionOutputTexture);
 
-            var destination = GetAspectFitRectangle(sourceWidth, sourceHeight, _width, _height);
+                var destination = GetAspectFitRectangle(sourceWidth, sourceHeight, _width, _height);
             videoContext.VideoProcessorSetStreamFrameFormat(processor, 0, VideoFrameFormat.Progressive);
             videoContext.VideoProcessorSetStreamSourceRect(
                 processor,
@@ -2179,6 +2561,30 @@ namespace Zink.Services.NativeCalling
                 new RawBool(true),
                 destination);
             videoContext.VideoProcessorSetStreamAutoProcessingMode(processor, 0, new RawBool(false));
+
+            // DXGI desktop duplication supplies an RGB desktop surface. Be explicit
+            // about both sides of the conversion: driver defaults vary and on an HDR
+            // desktop can interpret full-range RGB as limited-range video, producing
+            // the heavily clipped white image seen in saved replays. This H.264 path
+            // is the SDR compatibility path, so convert to BT.709 limited-range NV12.
+            var inputColorSpace = new VideoProcessorColorSpace
+            {
+                Usage = false,
+                RgbRange = false,
+                YCbCrMatrix = true,
+                YCbCrXvYCC = false,
+                NominalRange = 2
+            };
+            var outputColorSpace = new VideoProcessorColorSpace
+            {
+                Usage = false,
+                RgbRange = true,
+                YCbCrMatrix = true,
+                YCbCrXvYCC = false,
+                NominalRange = 1
+            };
+            videoContext.VideoProcessorSetStreamColorSpace(processor, 0, inputColorSpace);
+            videoContext.VideoProcessorSetOutputColorSpace(processor, outputColorSpace);
 
             var background = new VideoColor
             {
@@ -2205,9 +2611,117 @@ namespace Zink.Services.NativeCalling
                 }
             };
 
-            videoContext.VideoProcessorBlt(processor, outputView, _frameIndex, streams.Length, streams);
-            _encoderD3D11Device.ImmediateContext.CopyResource(conversionOutputTexture, targetTexture);
-            _encoderD3D11Device.ImmediateContext.Flush();
+                videoContext.VideoProcessorBlt(processor, outputView, _frameIndex, streams.Length, streams);
+                _encoderD3D11Device.ImmediateContext.CopyResource(conversionOutputTexture, targetTexture);
+                _encoderD3D11Device.ImmediateContext.Flush();
+                _hasConvertedGpuFrame = true;
+            }
+            finally
+            {
+                sourceMutex?.Release(0);
+            }
+            // ProcessInput consumes the DXGI surface through the device manager.
+            // An explicit Flush on every frame needlessly serializes the capture
+            // and video queues, especially on Intel integrated graphics.
+        }
+
+        private void EnsureStreamHdrConversionResources(Texture2D sourceTexture)
+        {
+            if (_streamSdrTexture != null &&
+                _streamSdrTexture.Description.Width == _width &&
+                _streamSdrTexture.Description.Height == _height &&
+                _streamSdrTexture.Device.NativePointer == sourceTexture.Device.NativePointer)
+            {
+                return;
+            }
+
+            _streamSdrTexture?.Dispose();
+            _streamHdrConverter?.Dispose();
+            _streamHdrConverter = new ZinkHdrToSdrGpuConverter(sourceTexture.Device);
+            _streamSdrTexture = new Texture2D(sourceTexture.Device, new Texture2DDescription
+            {
+                Width = _width,
+                Height = _height,
+                MipLevels = 1,
+                ArraySize = 1,
+                Format = Format.B8G8R8A8_UNorm,
+                SampleDescription = new SampleDescription(1, 0),
+                Usage = ResourceUsage.Default,
+                BindFlags = BindFlags.RenderTarget | BindFlags.ShaderResource,
+                CpuAccessFlags = CpuAccessFlags.None,
+                OptionFlags = ResourceOptionFlags.None
+            });
+        }
+
+        private Texture2D AcquireEncoderSourceTexture(Texture2D sourceTexture, out KeyedMutex? mutex)
+        {
+            if (_encoderD3D11Device == null)
+                throw new InvalidOperationException("D3D11 input device was not initialized.");
+
+            Texture2D encoderSource = sourceTexture;
+            if (sourceTexture.Device.NativePointer != _encoderD3D11Device.NativePointer)
+            {
+                if (_crossAdapterSourceTexture == null ||
+                    _crossAdapterSourceIdentity != sourceTexture.NativePointer)
+                {
+                    _crossAdapterSourceMutex?.Dispose();
+                    _crossAdapterSourceTexture?.Dispose();
+                    using var resource = sourceTexture.QueryInterface<Resource1>();
+                    IntPtr sharedHandle = resource.CreateSharedHandle(
+                        null,
+                        SharedResourceFlags.Read | SharedResourceFlags.Write,
+                        null);
+                    try
+                    {
+                        using var encoderDevice1 = _encoderD3D11Device.QueryInterface<SharpDX.Direct3D11.Device1>();
+                        _crossAdapterSourceTexture = encoderDevice1.OpenSharedResource1<Texture2D>(sharedHandle);
+                    }
+                    finally
+                    {
+                        CloseHandle(sharedHandle);
+                    }
+                    _crossAdapterSourceMutex = _crossAdapterSourceTexture.QueryInterface<KeyedMutex>();
+                    _crossAdapterSourceIdentity = sourceTexture.NativePointer;
+                }
+
+                encoderSource = _crossAdapterSourceTexture;
+                mutex = _crossAdapterSourceMutex;
+            }
+            else
+            {
+                // The capture surface carries shared/keyed-mutex flags. NVIDIA's
+                // video processor accepts the format but rejects VideoProcessorBlt
+                // from that shared surface, so copy it to a private same-device
+                // texture before BGRA-to-NV12 conversion.
+                var sourceDescription = sourceTexture.Description;
+                if (_localEncoderSourceTexture == null ||
+                    _localEncoderSourceTexture.Description.Width != sourceDescription.Width ||
+                    _localEncoderSourceTexture.Description.Height != sourceDescription.Height ||
+                    _localEncoderSourceTexture.Description.Format != sourceDescription.Format)
+                {
+                    _localEncoderSourceTexture?.Dispose();
+                    sourceDescription.OptionFlags = ResourceOptionFlags.None;
+                    _localEncoderSourceTexture = new Texture2D(_encoderD3D11Device, sourceDescription);
+                }
+
+                using var sourceMutex = sourceTexture.QueryInterfaceOrNull<KeyedMutex>();
+                sourceMutex?.Acquire(0, -1).CheckError();
+                try
+                {
+                    _encoderD3D11Device.ImmediateContext.CopyResource(
+                        sourceTexture,
+                        _localEncoderSourceTexture);
+                }
+                finally
+                {
+                    sourceMutex?.Release(0);
+                }
+                encoderSource = _localEncoderSourceTexture;
+                mutex = null;
+            }
+
+            mutex?.Acquire(0, -1).CheckError();
+            return encoderSource;
         }
 
         private void EnsureVideoProcessor(int sourceWidth, int sourceHeight)
@@ -2288,7 +2802,7 @@ namespace Zink.Services.NativeCalling
                 Height = _height,
                 MipLevels = 1,
                 ArraySize = 1,
-                Format = Format.NV12,
+                Format = InputTextureFormat,
                 SampleDescription = new SampleDescription(1, 0),
                 Usage = ResourceUsage.Default,
                 BindFlags = BindFlags.RenderTarget,
@@ -2326,6 +2840,20 @@ namespace Zink.Services.NativeCalling
 
         private void DisposeDxgiInputTextures()
         {
+            try { _streamSdrTexture?.Dispose(); } catch { }
+            _streamSdrTexture = null;
+            try { _streamHdrConverter?.Dispose(); } catch { }
+            _streamHdrConverter = null;
+
+            try
+            {
+                _hdrGpuConverter?.Dispose();
+            }
+            catch
+            {
+            }
+            _hdrGpuConverter = null;
+
             try
             {
                 _videoProcessorOutputTexture?.Dispose();
@@ -2335,6 +2863,9 @@ namespace Zink.Services.NativeCalling
             }
 
             _videoProcessorOutputTexture = null;
+            try { _hdrReadbackTexture?.Dispose(); } catch { }
+            _hdrReadbackTexture = null;
+            _hasConvertedGpuFrame = false;
             DisposeVideoProcessorResources();
 
             if (_dxgiInputTextures == null)
@@ -2737,20 +3268,40 @@ namespace Zink.Services.NativeCalling
             if (!_allowRepeatedForceKeyFrameRequests && !forced && _frameIndex > 0)
                 return;
 
+            if (!forced && Interlocked.CompareExchange(ref _recoveryKeyFrameRequestPending, 1, 0) != 0)
+                return;
+
+            IntPtr codecApiPtr = IntPtr.Zero;
             try
             {
-                using var attributes = _encoder.Attributes;
-                attributes.Set(CodecApiAvEncVideoForceKeyFrame, 1);
+                var iid = CodecApiInterfaceId;
+                var hr = Marshal.QueryInterface(_encoder.NativePointer, ref iid, out codecApiPtr);
+                if (hr != 0 || codecApiPtr == IntPtr.Zero)
+                    throw new COMException("ICodecAPI is unavailable for the active encoder.", hr);
+
+                var codecApi = (ICodecApi)Marshal.GetObjectForIUnknown(codecApiPtr);
+                object requestKeyFrame = 1u;
+                var forceKeyFrameProperty = CodecApiAvEncVideoForceKeyFrame;
+                var setResult = codecApi.SetValue(ref forceKeyFrameProperty, ref requestKeyFrame);
+                if (setResult != 0)
+                    throw new COMException("The encoder rejected AVEncVideoForceKeyFrame.", setResult);
+
                 if (forced)
                     Debug.WriteLine($"[ScreenShare:H264] Forced recovery keyframe requested. encoder='{_encoderMode}'; frameIndex={_frameIndex}; repeatedAllowed={_allowRepeatedForceKeyFrameRequests}.");
             }
             catch (Exception ex)
             {
+                Interlocked.Exchange(ref _recoveryKeyFrameRequestPending, 0);
                 if (!_loggedForceKeyFrameUnavailable)
                 {
                     _loggedForceKeyFrameUnavailable = true;
                     Debug.WriteLine($"[ScreenShare:H264] Force keyframe request skipped: {ex.Message}");
                 }
+            }
+            finally
+            {
+                if (codecApiPtr != IntPtr.Zero)
+                    Marshal.Release(codecApiPtr);
             }
         }
 

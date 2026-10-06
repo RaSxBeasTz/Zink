@@ -26,6 +26,10 @@
             <StackPanel Orientation="Horizontal" Spacing="12">
                 <TextBlock Text="Video Library" FontSize="28" FontWeight="SemiBold" />
                 <Button x:Name="AddFolderButton" Content="Add Folder" Click="AddFolderButton_Click" />
+                <Button x:Name="AddMultipleFoldersButton"
+                        Content="Add Multiple Folders"
+                        Click="AddMultipleFoldersButton_Click"
+                        ToolTipService.ToolTip="Choose up to 4 folders, one at a time" />
                 <Button x:Name="RescanButton" Content="Rescan" Click="RescanButton_Click" />
             </StackPanel>
 
@@ -40,6 +44,20 @@
                            Opacity="0.75"
                            Text=""
                            TextTrimming="CharacterEllipsis"/>
+                <ProgressBar x:Name="LibraryStatusProgressBar"
+                             Width="160"
+                             Height="6"
+                             Minimum="0"
+                             Maximum="100"
+                             Value="0"
+                             Visibility="Collapsed"
+                             VerticalAlignment="Center"/>
+                <TextBlock x:Name="LibraryStatusProgressText"
+                           Opacity="0.75"
+                           Text=""
+                           MinWidth="36"
+                           Visibility="Collapsed"
+                           VerticalAlignment="Center"/>
             </StackPanel>
 
             <Grid ColumnSpacing="10">
@@ -50,7 +68,7 @@
                 </Grid.ColumnDefinitions>
 
                 <TextBox x:Name="SearchBox"
-                         PlaceholderText="Search films by name, file type, folder, or duration"
+                         PlaceholderText="Search the films by the name, the file type, the folder, or the duration"
                          TextChanged="SearchBox_TextChanged"/>
                 <ComboBox x:Name="SortByBox"
                           Grid.Column="1"
@@ -58,7 +76,7 @@
                           SelectedIndex="0"
                           SelectionChanged="SortByBox_SelectionChanged"
                           MinWidth="180">
-                    <ComboBoxItem Content="Recently added" Tag="recent"/>
+                    <ComboBoxItem Content="the Recently added" Tag="recent"/>
                     <ComboBoxItem Content="Title A-Z" Tag="title-az"/>
                     <ComboBoxItem Content="Title Z-A" Tag="title-za"/>
                     <ComboBoxItem Content="Longest first" Tag="longest"/>
@@ -78,7 +96,8 @@
         </StackPanel>
 
         <!-- Thumbnails -->
-        <GridView Grid.Row="1"
+        <GridView x:Name="VideoGridView"
+                  Grid.Row="1"
                   ItemsSource="{x:Bind Videos, Mode=OneWay}"
                   IsItemClickEnabled="True"
                   ScrollViewer.VerticalScrollBarVisibility="Visible"
@@ -86,6 +105,7 @@
                   ScrollViewer.HorizontalScrollBarVisibility="Disabled"
                   ScrollViewer.HorizontalScrollMode="Disabled"
                   ItemClick="GridView_ItemClick"
+                  ContainerContentChanging="VideoGridView_ContainerContentChanging"
                   SelectionMode="None">
             <GridView.ItemsPanel>
                 <ItemsPanelTemplate>
@@ -147,19 +167,129 @@
         <Grid x:Name="MovieLibraryLoadingOverlay"
               Background="#CC000000"
               Visibility="Collapsed">
-            <StackPanel HorizontalAlignment="Center"
-                        VerticalAlignment="Center"
-                        Spacing="14">
-                <ProgressRing x:Name="MovieLibraryLoadingRing"
-                              Width="52"
-                              Height="52"
-                              IsActive="False"/>
-                <TextBlock x:Name="MovieLibraryLoadingText"
-                           Text="Loading films..."
-                           FontSize="16"
-                           FontWeight="SemiBold"
-                           HorizontalAlignment="Center"/>
-            </StackPanel>
+            <Border MaxWidth="520"
+                    Margin="24"
+                    Padding="32,30"
+                    HorizontalAlignment="Center"
+                    VerticalAlignment="Center"
+                    Background="#F2040F16"
+                    BorderBrush="#7A11D8E8"
+                    BorderThickness="1"
+                    CornerRadius="14">
+                <StackPanel Spacing="14">
+                    <ProgressRing x:Name="MovieLibraryLoadingRing"
+                                  Width="52"
+                                  Height="52"
+                                  IsActive="False"
+                                  HorizontalAlignment="Center"/>
+                    <TextBlock x:Name="MovieLibraryLoadingText"
+                               Text="Loading films..."
+                               FontSize="16"
+                               FontWeight="SemiBold"
+                               TextAlignment="Center"
+                               TextWrapping="WrapWholeWords"
+                               Foreground="#F4FFFFFF"
+                               HorizontalAlignment="Center"/>
+                    <StackPanel Orientation="Horizontal"
+                                Spacing="10"
+                                HorizontalAlignment="Center">
+                        <ProgressBar x:Name="MovieLibraryLoadingProgressBar"
+                                     Width="260"
+                                     Height="8"
+                                     Minimum="0"
+                                     Maximum="100"
+                                     Value="0"
+                                     Visibility="Collapsed"
+                                     VerticalAlignment="Center"/>
+                        <TextBlock x:Name="MovieLibraryLoadingPercentage"
+                                   Text=""
+                                   MinWidth="42"
+                                   FontSize="14"
+                                   FontWeight="SemiBold"
+                                   Foreground="#BDE7FFF6"
+                                   Visibility="Collapsed"
+                                   VerticalAlignment="Center"/>
+                    </StackPanel>
+                </StackPanel>
+            </Border>
+        </Grid>
+
+        <Grid x:Name="EmptyLibraryPromptOverlay"
+              Background="#99000814"
+              Visibility="Collapsed">
+            <Border MaxWidth="760"
+                    Margin="24"
+                    HorizontalAlignment="Center"
+                    VerticalAlignment="Center"
+                    Background="#F21F2223"
+                    BorderBrush="#3F6F7B80"
+                    BorderThickness="1"
+                    CornerRadius="14">
+                <Grid>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
+                    </Grid.RowDefinitions>
+
+                    <StackPanel Padding="34,32,34,30"
+                                Spacing="18">
+                        <TextBlock Text="Your video library is empty"
+                                   FontSize="30"
+                                   FontWeight="SemiBold"
+                                   Foreground="#D7E9EC"
+                                   TextWrapping="Wrap"/>
+                        <TextBlock Text="This section is empty. Would you like to choose the folder where your videos are stored so Zink can keep them here for future use?"
+                                   FontSize="20"
+                                   LineHeight="29"
+                                   Foreground="#BBCDD1"
+                                   TextWrapping="WrapWholeWords"/>
+                    </StackPanel>
+
+                    <Border Grid.Row="1"
+                            Background="#E91A1D1E"
+                            BorderBrush="#1F000000"
+                            BorderThickness="0,1,0,0"
+                            Padding="34,34,34,34">
+                        <Grid ColumnSpacing="12">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="*"/>
+                            </Grid.ColumnDefinitions>
+
+                            <Button x:Name="EmptyLibraryChooseFolderButton"
+                                    Content="Choose folder"
+                                    Click="EmptyLibraryChooseFolderButton_Click"
+                                    HorizontalAlignment="Stretch"
+                                    MinHeight="52"
+                                    FontSize="20"
+                                    Foreground="#050909"
+                                    Background="#6CD2D8"
+                                    BorderThickness="0"/>
+                            <Button x:Name="EmptyLibraryNotNowButton"
+                                    Grid.Column="1"
+                                    Content="Not now"
+                                    Click="EmptyLibraryNotNowButton_Click"
+                                    HorizontalAlignment="Stretch"
+                                    MinHeight="52"
+                                    FontSize="20"
+                                    Foreground="#BBCDD1"
+                                    Background="#132B2F"
+                                    BorderThickness="0"/>
+                            <Button x:Name="EmptyLibraryDontAskAgainButton"
+                                    Grid.Column="2"
+                                    Content="Don't ask again"
+                                    Click="EmptyLibraryDontAskAgainButton_Click"
+                                    HorizontalAlignment="Stretch"
+                                    MinHeight="52"
+                                    FontSize="20"
+                                    Foreground="#BBCDD1"
+                                    Background="#132B2F"
+                                    BorderThickness="0"/>
+                        </Grid>
+                    </Border>
+                </Grid>
+            </Border>
         </Grid>
     </Grid>
 </Page>

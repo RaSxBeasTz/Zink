@@ -1,6 +1,8 @@
 ﻿using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.Net.WebSockets;
+using System.Linq;
 using System.Text;
 using System.Text.Json;
 using System.Threading;
@@ -96,11 +98,20 @@ namespace Zink.Services.Social
         public string Codec { get; set; } = "h264";
     }
 
+    public sealed class ScreenShareCapabilitiesEventArgs : EventArgs
+    {
+        public string CallId { get; set; } = "";
+        public long FromUserId { get; set; }
+        public string[] Codecs { get; set; } = Array.Empty<string>();
+        public string Architecture { get; set; } = "unknown";
+    }
+
     public sealed class RealtimeService
     {
         private ClientWebSocket? _ws;
         private CancellationTokenSource? _cts;
         private bool _connected;
+        private readonly SemaphoreSlim _connectionLock = new(1, 1);
         private readonly SemaphoreSlim _sendLock = new(1, 1);
         private long _outgoingTextH264Frames;
         private long _outgoingBinaryH264Frames;
@@ -123,42 +134,50 @@ namespace Zink.Services.Social
         public event EventHandler<AudioChunkEventArgs>? AudioChunkReceived;
         public event EventHandler<ScreenFrameEventArgs>? ScreenFrameReceived;
         public event EventHandler<ScreenFrameEventArgs>? EncodedScreenFrameReceived;
-        public event EventHandler<(string CallId, long FromUserId)>? ScreenShareStarted;
+        public event EventHandler<(string CallId, long FromUserId, int Width, int Height, string Codec)>? ScreenShareStarted;
         public event EventHandler<(string CallId, long FromUserId)>? ScreenShareStopped;
         public event EventHandler<ScreenShareMetadataEventArgs>? ScreenShareMetadataReceived;
+        public event EventHandler<ScreenShareCapabilitiesEventArgs>? ScreenShareCapabilitiesReceived;
         public event EventHandler<ScreenShareQosEventArgs>? ScreenShareQosReceived;
         public event EventHandler<int>? RawIncomingAudioMessageCountChanged;
         public event EventHandler<IncomingMessageEventArgs>? IncomingMessage;
 
         public async Task ConnectAsync()
         {
-            if (IsConnected)
-                return;
-
-            var token = await Calling.TokenStore.Instance.GetTokenAsync();
-            if (string.IsNullOrWhiteSpace(token))
-                throw new Exception("No auth token found.");
-
-            await DisconnectAsync();
-
-            RawIncomingAudioMessages = 0;
-
-            _cts = new CancellationTokenSource();
-            _ws = new ClientWebSocket();
-
-
-            var uri = new Uri($"wss://34-73-152-179.nip.io/ws?token={Uri.EscapeDataString(token)}");
-
+            await _connectionLock.WaitAsync();
             try
             {
-                await _ws.ConnectAsync(uri, CancellationToken.None);
-                _connected = true;
-                _ = ReceiveLoopAsync(_ws, _cts.Token);
+                if (IsConnected)
+                    return;
+
+                var token = await Calling.TokenStore.Instance.GetTokenAsync();
+                if (string.IsNullOrWhiteSpace(token))
+                    throw new Exception("No auth token found.");
+
+                await DisconnectAsync();
+
+                RawIncomingAudioMessages = 0;
+
+                _cts = new CancellationTokenSource();
+                _ws = new ClientWebSocket();
+
+                var uri = new Uri(Calling.CallServerConfig.GetWebSocketUrl(token));
+
+                try
+                {
+                    await _ws.ConnectAsync(uri, CancellationToken.None);
+                    _connected = true;
+                    _ = ReceiveLoopAsync(_ws, _cts.Token);
+                }
+                catch (WebSocketException ex)
+                {
+                    _connected = false;
+                    throw new Exception($"Realtime websocket failed: {ex.Message}", ex);
+                }
             }
-            catch (WebSocketException ex)
+            finally
             {
-                _connected = false;
-                throw new Exception($"Realtime websocket failed: {ex.Message}", ex);
+                _connectionLock.Release();
             }
         }
 
@@ -213,7 +232,8 @@ namespace Zink.Services.Social
 
                         if (result.MessageType == WebSocketMessageType.Close)
                         {
-                            _connected = false;
+                            if (ReferenceEquals(_ws, socket))
+                                _connected = false;
                             return;
                         }
 
@@ -253,6 +273,16 @@ namespace Zink.Services.Social
                                 FromUserId = msg.FromUserId,
                                 FromUsername = msg.FromUsername ?? "",
                                 FromDisplayName = msg.FromDisplayName ?? ""
+                            });
+                            break;
+
+                        case "screen-share-capabilities":
+                            ScreenShareCapabilitiesReceived?.Invoke(this, new ScreenShareCapabilitiesEventArgs
+                            {
+                                CallId = msg.CallId ?? "",
+                                FromUserId = msg.FromUserId,
+                                Codecs = msg.ScreenCodecs ?? Array.Empty<string>(),
+                                Architecture = msg.ScreenArchitecture ?? "unknown"
                             });
                             break;
 
@@ -327,6 +357,7 @@ namespace Zink.Services.Social
                                         AudioData = bytes
                                     });
                                 }
+
                                 catch
                                 {
                                 }
@@ -334,7 +365,12 @@ namespace Zink.Services.Social
                             break;
 
                         case "screen-share-started":
-                            ScreenShareStarted?.Invoke(this, (msg.CallId ?? "", msg.FromUserId));
+                            ScreenShareStarted?.Invoke(this, (
+                                msg.CallId ?? "",
+                                msg.FromUserId,
+                                msg.ScreenFrameWidth ?? msg.ScreenWidth ?? 0,
+                                msg.ScreenFrameHeight ?? msg.ScreenHeight ?? 0,
+                                msg.ScreenCodec ?? "h264"));
                             break;
 
                         case "screen-share-stopped":
@@ -422,7 +458,8 @@ namespace Zink.Services.Social
             }
             catch
             {
-                _connected = false;
+                if (ReferenceEquals(_ws, socket))
+                    _connected = false;
             }
         }
 
@@ -569,7 +606,7 @@ namespace Zink.Services.Social
             });
         }
 
-        public async Task SendScreenShareStartedAsync(long userId, string callId)
+        public async Task SendScreenShareStartedAsync(long userId, string callId, int width = 0, int height = 0, string codec = "h264")
         {
             if (!IsConnected)
                 await ConnectAsync();
@@ -578,7 +615,31 @@ namespace Zink.Services.Social
             {
                 Type = "screen-share-started",
                 TargetUserId = userId,
-                CallId = callId
+                CallId = callId,
+                ScreenFrameWidth = width,
+                ScreenFrameHeight = height,
+                ScreenWidth = width,
+                ScreenHeight = height,
+                ScreenCodec = codec
+            });
+        }
+
+        public async Task SendScreenShareCapabilitiesAsync(
+            long userId,
+            string callId,
+            IReadOnlyList<string> codecs,
+            string architecture)
+        {
+            if (!IsConnected)
+                await ConnectAsync();
+
+            await SendAsync(new SignalEnvelope
+            {
+                Type = "screen-share-capabilities",
+                TargetUserId = userId,
+                CallId = callId,
+                ScreenCodecs = codecs.ToArray(),
+                ScreenArchitecture = architecture
             });
         }
 
@@ -857,6 +918,8 @@ namespace Zink.Services.Social
         public int? ScreenHeight { get; set; }
         public long? TimestampUtcMs { get; set; }
         public string? ScreenCodec { get; set; }
+        public string[]? ScreenCodecs { get; set; }
+        public string? ScreenArchitecture { get; set; }
         public bool? ScreenFrameIsKeyFrame { get; set; }
         public string? DebugMessage { get; set; }
         public string? Message { get; set; }

@@ -1,7 +1,10 @@
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Navigation;
 using Microsoft.Web.WebView2.Core;
 using System;
+using System.IO;
+using System.Threading.Tasks;
 using Zink.Services;
 
 namespace Zink.Pages
@@ -10,29 +13,51 @@ namespace Zink.Pages
     {
         private bool _attached = false;
         private bool _tokenExchanged = false;
+        private bool _initialized = false;
 
         public SpotifyLoginPage()
         {
             this.InitializeComponent();
+            NavigationCacheMode = NavigationCacheMode.Required;
             SpotifyWebView.NavigationStarting += SpotifyWebView_NavigationStarting;
             SpotifyWebView.NavigationCompleted += SpotifyWebView_NavigationCompleted;
-            StartSpotifyLogin();
 
-            this.Loaded += async (_, __) =>
-            {
-                try
-                {
-                    await SpotifyWebView.EnsureCoreWebView2Async();
-                }
-                catch { }
-            };
+            this.Loaded += async (_, __) => await InitializeSpotifyWebViewAsync();
 
             SpotifyWebView.CoreWebView2Initialized += SpotifyWebView_CoreWebView2Initialized;
         }
 
-        private void StartSpotifyLogin()
+        private async Task InitializeSpotifyWebViewAsync()
         {
-            SpotifyWebView.Source = new Uri(SpotifyAuthHelper.GetNativeAuthorizationUrl(showDialog: false));
+            if (_initialized)
+                return;
+
+            _initialized = true;
+
+            try
+            {
+                string userDataFolder = Path.Combine(
+                    Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                    "Zink",
+                    "WebView2",
+                    "Spotify");
+
+                Directory.CreateDirectory(userDataFolder);
+
+                var environment = await CoreWebView2Environment.CreateWithOptionsAsync(
+                    browserExecutableFolder: null,
+                    userDataFolder: userDataFolder,
+                    options: null);
+
+                await SpotifyWebView.EnsureCoreWebView2Async(environment);
+                SpotifyWebView.CoreWebView2.Navigate(
+                    SpotifyAuthHelper.GetNativeAuthorizationUrl(showDialog: false));
+            }
+            catch (Exception ex)
+            {
+                _initialized = false;
+                System.Diagnostics.Debug.WriteLine("Spotify WebView initialization failed: " + ex.Message);
+            }
         }
 
         private async void SpotifyWebView_NavigationStarting(WebView2 sender, CoreWebView2NavigationStartingEventArgs args)

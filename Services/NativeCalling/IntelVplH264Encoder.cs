@@ -7,6 +7,7 @@ using System.Diagnostics;
 using System.Drawing;
 using System.Drawing.Imaging;
 using System.Runtime.InteropServices;
+using System.Threading;
 using System.Threading.Tasks;
 
 namespace Zink.Services.NativeCalling
@@ -33,16 +34,19 @@ namespace Zink.Services.NativeCalling
         private Texture2D? _readbackTexture;
         private int _readbackWidth;
         private int _readbackHeight;
+        private ZinkHdrToSdrGpuConverter? _hdrConverter;
+        private Texture2D? _hdrSdrTexture;
+        private bool _loggedHdrStreamConversion;
 
         public IntelVplH264Encoder(int width, int height, int bitrate, int frameRate)
         {
             _width = width;
             _height = height;
-            _frameRate = Math.Clamp(frameRate, 1, NativeScreenShareStreamingService.TargetFps);
+            _frameRate = Math.Clamp(frameRate, 1, ScreenShareCapturePipeline.TargetFps);
             _nv12Buffer = new byte[width * height * 3 / 2];
             _outputBuffer = new byte[Math.Max(8 * 1024 * 1024, width * height)];
 
-            var result = NativeMethods.ZinkIntelVpl_CreateEncoder(width, height, _frameRate, bitrate, out _handle);
+            var result = NativeMethods.ZinkIntelVpl_CreateEncoder(width, height, _frameRate, bitrate, 0, out _handle);
             if (result != 0 || _handle == IntPtr.Zero)
             {
                 throw new InvalidOperationException(
@@ -65,6 +69,7 @@ namespace Zink.Services.NativeCalling
         public int HardwareInputRequests => 0;
         public int HardwareOutputRequests => 0;
         public bool UsesHardwareEventPump => false;
+        public bool RecoveryKeyFrameRequestPending => Volatile.Read(ref _forceNextKeyFrame) != 0;
 
         public IReadOnlyList<H264EncodedFrame> Encode(Bitmap bitmap, long? timestampMilliseconds = null)
         {
@@ -117,6 +122,10 @@ namespace Zink.Services.NativeCalling
 
         public void Dispose()
         {
+            _hdrSdrTexture?.Dispose();
+            _hdrSdrTexture = null;
+            _hdrConverter?.Dispose();
+            _hdrConverter = null;
             _readbackTexture?.Dispose();
             _readbackTexture = null;
 
@@ -162,10 +171,27 @@ namespace Zink.Services.NativeCalling
             if (actualSourceWidth <= 0 || actualSourceHeight <= 0)
                 throw new InvalidOperationException("Intel oneVPL GPU encode received an empty capture texture.");
 
-            EnsureReadbackTexture(sourceTexture, sourceDescription.Width, sourceDescription.Height);
+            Texture2D conversionSource = sourceTexture;
+            if (sourceDescription.Format == Format.R16G16B16A16_Float)
+            {
+                if (!_loggedHdrStreamConversion)
+                {
+                    _loggedHdrStreamConversion = true;
+                    DiagnosticLogService.WriteLine($"[ScreenShare:HDR:Intel] conversion active; source={sourceDescription.Width}x{sourceDescription.Height}/{sourceDescription.Format}; target={_width}x{_height}/{Format.B8G8R8A8_UNorm}; encoderInput=NV12; encoder=Intel oneVPL H.264; toneMap='{ZinkHdrToSdrGpuConverter.ToneMapDescription}'.");
+                    DiagnosticLogService.Flush();
+                }
+                EnsureHdrConversionResources(sourceTexture);
+                _hdrConverter!.Convert(sourceTexture, _hdrSdrTexture!);
+                conversionSource = _hdrSdrTexture!;
+                sourceDescription = conversionSource.Description;
+                actualSourceWidth = sourceDescription.Width;
+                actualSourceHeight = sourceDescription.Height;
+            }
 
-            var context = sourceTexture.Device.ImmediateContext;
-            context.CopyResource(sourceTexture, _readbackTexture);
+            EnsureReadbackTexture(conversionSource, sourceDescription.Width, sourceDescription.Height);
+
+            var context = conversionSource.Device.ImmediateContext;
+            context.CopyResource(conversionSource, _readbackTexture);
 
             DataBox mapped = default;
             var mappedSuccessfully = false;
@@ -192,6 +218,34 @@ namespace Zink.Services.NativeCalling
                 if (mappedSuccessfully)
                     context.UnmapSubresource(_readbackTexture, 0);
             }
+        }
+
+        private void EnsureHdrConversionResources(Texture2D sourceTexture)
+        {
+            if (_hdrSdrTexture != null &&
+                _hdrSdrTexture.Description.Width == _width &&
+                _hdrSdrTexture.Description.Height == _height &&
+                _hdrSdrTexture.Device.NativePointer == sourceTexture.Device.NativePointer)
+            {
+                return;
+            }
+
+            _hdrSdrTexture?.Dispose();
+            _hdrConverter?.Dispose();
+            _hdrConverter = new ZinkHdrToSdrGpuConverter(sourceTexture.Device);
+            _hdrSdrTexture = new Texture2D(sourceTexture.Device, new Texture2DDescription
+            {
+                Width = _width,
+                Height = _height,
+                MipLevels = 1,
+                ArraySize = 1,
+                Format = Format.B8G8R8A8_UNorm,
+                SampleDescription = new SampleDescription(1, 0),
+                Usage = ResourceUsage.Default,
+                BindFlags = BindFlags.RenderTarget | BindFlags.ShaderResource,
+                CpuAccessFlags = CpuAccessFlags.None,
+                OptionFlags = ResourceOptionFlags.None
+            });
         }
 
         private void EnsureReadbackTexture(Texture2D sourceTexture, int width, int height)
@@ -386,7 +440,7 @@ namespace Zink.Services.NativeCalling
         private static class NativeMethods
         {
             [DllImport("ZinkIntelVplEncoder.dll", CallingConvention = CallingConvention.Cdecl)]
-            public static extern int ZinkIntelVpl_CreateEncoder(int width, int height, int frameRate, int bitrate, out IntPtr handle);
+            public static extern int ZinkIntelVpl_CreateEncoder(int width, int height, int frameRate, int bitrate, int enableHdr10, out IntPtr handle);
 
             [DllImport("ZinkIntelVplEncoder.dll", CallingConvention = CallingConvention.Cdecl)]
             public static extern int ZinkIntelVpl_EncodeNv12(

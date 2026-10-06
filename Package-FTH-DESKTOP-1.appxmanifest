@@ -13,10 +13,10 @@
   <Identity
     Name="FrancisHayle.Zink-MusicVideoPlayer"
     Publisher="CN=3FFFC630-A58A-41F5-B554-BA1A779ED16E"
-    Version="3.0.30.0" />
+    Version="4.0.0.0" />
 
   <Properties>
-    <DisplayName>Zink - Music &amp; Video Player</DisplayName>
+    <DisplayName>Zink.</DisplayName>
     <PublisherDisplayName>Francis Hayle</PublisherDisplayName>
     <Logo>Assets\StoreLogo.png</Logo>
   </Properties>
@@ -39,7 +39,7 @@
       EntryPoint="$targetentrypoint$">
 
       <uap:VisualElements
-        DisplayName="Zink - Music &amp; Video Player"
+        DisplayName="Zink"
         Description="Zink - Your all-in-one media hub"
         BackgroundColor="#00080B"
         Square150x150Logo="Assets\Square150x150Logo.png"

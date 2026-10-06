@@ -18,7 +18,7 @@ namespace Zink.Services.Social
         {
             _http = new HttpClient
             {
-                BaseAddress = new Uri("https://34-73-152-179.nip.io/"), // ✅ ONLY CHANGE
+                BaseAddress = new Uri(CallServerConfig.BaseHttpUrl + "/"),
                 Timeout = TimeSpan.FromSeconds(30)
             };
 
@@ -232,9 +232,11 @@ namespace Zink.Services.Social
                 Email = "",
                 Username = data.Username ?? "",
                 DisplayName = data.DisplayName ?? "",
-                AvatarUrl = null,
+                AvatarUrl = data.AvatarUrl,
                 EmailVerified = true,
-                Presence = ""
+                Presence = "",
+                SignedUpAtUtc = data.SignedUpAtUtc,
+                SocialLinks = data.SocialLinks ?? new List<SocialLink>()
             };
         }
 
@@ -270,6 +272,9 @@ namespace Zink.Services.Social
             public long Id { get; set; }
             public string? Username { get; set; }
             public string? DisplayName { get; set; }
+            public string? AvatarUrl { get; set; }
+            public DateTimeOffset? SignedUpAtUtc { get; set; }
+            public List<SocialLink>? SocialLinks { get; set; }
         }
     }
 }

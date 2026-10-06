@@ -3,20 +3,36 @@ using SharpDX.MediaFoundation;
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Linq;
 using System.Runtime.InteropServices;
+using System.Threading.Tasks;
 
-namespace Zink.Services.NativeCalling
+namespace Zink.Services.NativeCalling.Quality720p
 {
     public sealed class MediaFoundationH264Decoder : IDisposable
     {
+        // Colour conversion is frequent and CPU-bound. Using every thread-pool
+        // worker for each frame delayed UI presentation and audio refill work on
+        // the receiver. Two workers keep 720p conversion inside the frame budget
+        // without causing system-wide scheduler bursts.
+        private static readonly ParallelOptions ColourConversionParallelOptions = new()
+        {
+            MaxDegreeOfParallelism = 2
+        };
+
         private static readonly Guid CmsH264DecoderMft = new("62CE7E72-4C71-4D20-B15D-452831A87D9D");
+        // CODECAPI_AVLowLatencyMode. Without this, the Windows H.264 decoder can
+        // retain roughly a GOP-sized reorder/look-ahead queue even when the
+        // stream contains no B-frames. That is useful for file playback, but it
+        // adds close to a second of avoidable delay to interactive screen share.
+        private static readonly Guid CodecApiAvLowLatencyMode = new("9C27891A-ED7A-40E1-88E8-B22727A024EE");
         private const int MfENotAccepting = unchecked((int)0xC00D36B5);
         private const int MfENeedMoreInput = unchecked((int)0xC00D6D72);
         private const int MfEStreamChange = unchecked((int)0xC00D6D61);
         private const int MfETypeNotSet = unchecked((int)0xC00D6D60);
         private const int MftOutputStreamProvidesSamples = 0x00000100;
         private const int MftOutputStreamCanProvideSamples = 0x00000200;
-        private const long FrameDuration100Ns = 10_000_000L / NativeScreenShareStreamingService.TargetFps;
+        private const long FrameDuration100Ns = 10_000_000L / ScreenShareCapturePipeline.TargetFps;
 
         private readonly Transform _decoder;
         private readonly string _codec;
@@ -56,7 +72,35 @@ namespace Zink.Services.NativeCalling
             _decoder = ScreenShareCodecNames.IsAv1(_codec)
                 ? CreateAv1DecoderTransform()
                 : new Transform(CmsH264DecoderMft);
+            ConfigureLowLatencyDecoder();
             ConfigureTypes(width, height);
+        }
+
+        private void ConfigureLowLatencyDecoder()
+        {
+            var enabled = false;
+            try
+            {
+                _decoder.Attributes.Set(SinkWriterAttributeKeys.LowLatency.Guid, 1);
+                enabled = true;
+            }
+            catch
+            {
+            }
+
+            try
+            {
+                _decoder.Attributes.Set(CodecApiAvLowLatencyMode, 1);
+                enabled = true;
+            }
+            catch
+            {
+            }
+
+            Debug.WriteLine(
+                $"[ScreenShare:{GetLogCodecName()}:DECODER] Low-latency decoder attributes {(enabled ? "enabled" : "were not accepted") }.");
+            DiagnosticLogService.WriteLine(
+                $"[ScreenShare:{GetLogCodecName()}:DECODER] Low-latency decoder attributes {(enabled ? "enabled" : "were not accepted") }.");
         }
 
         public void Reconfigure(int width, int height)
@@ -70,7 +114,7 @@ namespace Zink.Services.NativeCalling
             ConfigureTypes(width, height);
         }
 
-        public byte[]? DecodeToBgra(byte[] h264Frame, int width, int height)
+        public byte[]? DecodeToBgra(byte[] h264Frame, int width, int height, bool materializeOutput = true)
         {
             Reconfigure(width, height);
             var inputFrame = ScreenShareCodecNames.IsAv1(_codec)
@@ -123,7 +167,7 @@ namespace Zink.Services.NativeCalling
             }
             catch (SharpDXException ex) when (ex.ResultCode.Code == MfENotAccepting)
             {
-                var pendingFrame = TryDrainFrame();
+                var pendingFrame = TryDrainFrame(materializeOutput: materializeOutput);
                 try
                 {
                     _decoder.ProcessInput(0, sample, 0);
@@ -139,7 +183,7 @@ namespace Zink.Services.NativeCalling
                 return null;
             }
 
-            return TryDrainFrame();
+            return TryDrainFrame(materializeOutput: materializeOutput);
         }
 
         public bool TrySwitchToLengthPrefixedInput(string reason)
@@ -265,7 +309,7 @@ namespace Zink.Services.NativeCalling
             inputType.Set(MediaTypeAttributeKeys.MajorType, MediaTypeGuids.Video);
             inputType.Set(MediaTypeAttributeKeys.Subtype, _inputSubtype);
             inputType.Set(MediaTypeAttributeKeys.FrameSize, PackRatio(width, height));
-            inputType.Set(MediaTypeAttributeKeys.FrameRate, PackRatio(NativeScreenShareStreamingService.TargetFps, 1));
+            inputType.Set(MediaTypeAttributeKeys.FrameRate, PackRatio(ScreenShareCapturePipeline.TargetFps, 1));
             inputType.Set(MediaTypeAttributeKeys.PixelAspectRatio, PackRatio(1, 1));
             inputType.Set(MediaTypeAttributeKeys.InterlaceMode, (int)VideoInterlaceMode.Progressive);
             _decoder.SetInputType(0, inputType, 0);
@@ -297,7 +341,17 @@ namespace Zink.Services.NativeCalling
                 GuidSubtype = VideoFormatGuids.NV12
             };
 
-            foreach (var activation in EnumerateDecoderActivations(inputInfo, outputInfo))
+            var activations = EnumerateDecoderActivations(
+                inputInfo,
+                outputInfo,
+                TransformEnumFlag.Hardware | TransformEnumFlag.SortAndFilter).ToList();
+            if (activations.Count == 0)
+            {
+                Debug.WriteLine("[ScreenShare:AV1X:DECODER] No hardware AV1 decoder was exposed; trying the Windows software AV1 decoder.");
+                activations = EnumerateDecoderActivations(inputInfo, outputInfo, TransformEnumFlag.SortAndFilter).ToList();
+            }
+
+            foreach (var activation in activations)
             {
                 try
                 {
@@ -314,7 +368,10 @@ namespace Zink.Services.NativeCalling
             throw new InvalidOperationException("Windows Media Foundation did not expose an AV1 decoder MFT.");
         }
 
-        private byte[]? TryDrainFrame(bool handledStreamChange = false, int emptyRetryCount = 0)
+        private byte[]? TryDrainFrame(
+            bool handledStreamChange = false,
+            int emptyRetryCount = 0,
+            bool materializeOutput = true)
         {
             var outputBufferSize = GetOutputBufferSize(out var outputFlags);
             var useDecoderAllocatedOutput =
@@ -363,14 +420,14 @@ namespace Zink.Services.NativeCalling
             catch (SharpDXException ex) when (ex.ResultCode.Code == MfEStreamChange)
             {
                 if (!handledStreamChange && TrySelectDecoderOutputType("stream change"))
-                    return TryDrainFrame(handledStreamChange: true, emptyRetryCount: emptyRetryCount);
+                    return TryDrainFrame(handledStreamChange: true, emptyRetryCount: emptyRetryCount, materializeOutput: materializeOutput);
 
                 return null;
             }
             catch (SharpDXException ex) when (ex.ResultCode.Code == MfETypeNotSet)
             {
                 if (!handledStreamChange && TrySelectDecoderOutputType("output type not set"))
-                    return TryDrainFrame(handledStreamChange: true, emptyRetryCount: emptyRetryCount);
+                    return TryDrainFrame(handledStreamChange: true, emptyRetryCount: emptyRetryCount, materializeOutput: materializeOutput);
 
                 return null;
             }
@@ -410,14 +467,20 @@ namespace Zink.Services.NativeCalling
                     return null;
                 }
 
+                // Every compressed H.264 sample must still pass through the decoder
+                // so its reference chain remains valid. When playback is behind,
+                // however, converting every decoded NV12 surface into a 3.6 MB BGRA
+                // frame only makes the backlog grow. Drain the decoded surface and
+                // skip that conversion; the caller will materialize the newest frame
+                // once it has caught back up.
+                if (!materializeOutput)
+                    return null;
+
                 int maxLength;
                 int currentLength;
                 var ptr = contiguous.Lock(out maxLength, out currentLength);
                 try
                 {
-                    byte[] outputBytes = new byte[length];
-                    Marshal.Copy(ptr, outputBytes, 0, outputBytes.Length);
-
                     if (!_loggedFirstOutputSample || _inputSamples % 120 == 0)
                     {
                         _loggedFirstOutputSample = true;
@@ -430,10 +493,10 @@ namespace Zink.Services.NativeCalling
                         if (_outputSubtype != VideoFormatGuids.Rgb32)
                             Debug.WriteLine("[ScreenShare:H264:DECODER] Decoder returned RGB32-sized output while NV12 was selected; treating sample as RGB32 to prevent colour corruption.");
 
-                        return Rgb32ToBgra(outputBytes, _width, _height);
+                        return Rgb32ToBgra(ptr, length, _width, _height);
                     }
 
-                    return Nv12ToBgra(outputBytes, _width, _height);
+                    return Nv12ToBgra(ptr, length, _width, _height);
                 }
                 finally
                 {
@@ -477,7 +540,7 @@ namespace Zink.Services.NativeCalling
                         continue;
 
                     candidate.Set(MediaTypeAttributeKeys.FrameSize, PackRatio(_width, _height));
-                    candidate.Set(MediaTypeAttributeKeys.FrameRate, PackRatio(NativeScreenShareStreamingService.TargetFps, 1));
+                    candidate.Set(MediaTypeAttributeKeys.FrameRate, PackRatio(ScreenShareCapturePipeline.TargetFps, 1));
                     candidate.Set(MediaTypeAttributeKeys.PixelAspectRatio, PackRatio(1, 1));
                     candidate.Set(MediaTypeAttributeKeys.InterlaceMode, (int)VideoInterlaceMode.Progressive);
                     candidate.Set(MediaTypeAttributeKeys.FixedSizeSamples, 1);
@@ -517,7 +580,7 @@ namespace Zink.Services.NativeCalling
                 outputType.Set(MediaTypeAttributeKeys.MajorType, MediaTypeGuids.Video);
                 outputType.Set(MediaTypeAttributeKeys.Subtype, subtype);
                 outputType.Set(MediaTypeAttributeKeys.FrameSize, PackRatio(_width, _height));
-                outputType.Set(MediaTypeAttributeKeys.FrameRate, PackRatio(NativeScreenShareStreamingService.TargetFps, 1));
+                outputType.Set(MediaTypeAttributeKeys.FrameRate, PackRatio(ScreenShareCapturePipeline.TargetFps, 1));
                 outputType.Set(MediaTypeAttributeKeys.PixelAspectRatio, PackRatio(1, 1));
                 outputType.Set(MediaTypeAttributeKeys.InterlaceMode, (int)VideoInterlaceMode.Progressive);
                 outputType.Set(MediaTypeAttributeKeys.FixedSizeSamples, 1);
@@ -652,35 +715,49 @@ namespace Zink.Services.NativeCalling
             return false;
         }
 
-        private static byte[] Nv12ToBgra(byte[] nv12, int width, int height)
+        private static unsafe byte[] Nv12ToBgra(IntPtr nv12Pointer, int nv12Length, int width, int height)
         {
             byte[] bgra = new byte[width * height * 4];
-            int lumaHeight = GetNv12LumaHeight(nv12.Length, width, height);
+            int lumaHeight = GetNv12LumaHeight(nv12Length, width, height);
             int uvStart = width * lumaHeight;
 
-            for (int y = 0; y < height; y++)
+            // The 720p receiver was spending 33-55 ms per frame in this colour
+            // conversion. Process independent scanlines in parallel so decode
+            // stays within the 30 fps realtime budget and does not trigger the
+            // dependent-frame backlog/keyframe recovery loop.
+            var outputHandle = GCHandle.Alloc(bgra, GCHandleType.Pinned);
+            try
             {
-                for (int x = 0; x < width; x++)
+                var outputPointer = outputHandle.AddrOfPinnedObject();
+                Parallel.For(0, height, ColourConversionParallelOptions, y =>
                 {
-                    int yValue = nv12[(y * width) + x] - 16;
-                    int uv = uvStart + ((y / 2) * width) + (x & ~1);
-                    if (uv + 1 >= nv12.Length)
-                        continue;
+                    var nv12Base = (byte*)nv12Pointer.ToPointer();
+                    var bgraBase = (byte*)outputPointer.ToPointer();
+                    var yRow = nv12Base + (y * width);
+                    var uvRowOffset = uvStart + ((y / 2) * width);
+                    var destination = bgraBase + (y * width * 4);
 
-                    int u = nv12[uv] - 128;
-                    int v = nv12[uv + 1] - 128;
+                    for (int x = 0; x < width; x++)
+                    {
+                        var uv = uvRowOffset + (x & ~1);
+                        if (uv + 1 >= nv12Length)
+                            break;
 
-                    int c = Math.Max(0, yValue);
-                    byte r = ClampToByte((298 * c + 459 * v + 128) >> 8);
-                    byte g = ClampToByte((298 * c - 55 * u - 136 * v + 128) >> 8);
-                    byte b = ClampToByte((298 * c + 541 * u + 128) >> 8);
+                        int c = Math.Max(0, yRow[x] - 16);
+                        int u = nv12Base[uv] - 128;
+                        int v = nv12Base[uv + 1] - 128;
 
-                    int dst = ((y * width) + x) * 4;
-                    bgra[dst] = b;
-                    bgra[dst + 1] = g;
-                    bgra[dst + 2] = r;
-                    bgra[dst + 3] = 255;
-                }
+                        var dst = destination + (x * 4);
+                        dst[0] = ClampToByte((298 * c + 541 * u + 128) >> 8);
+                        dst[1] = ClampToByte((298 * c - 55 * u - 136 * v + 128) >> 8);
+                        dst[2] = ClampToByte((298 * c + 459 * v + 128) >> 8);
+                        dst[3] = 255;
+                    }
+                });
+            }
+            finally
+            {
+                outputHandle.Free();
             }
 
             return bgra;
@@ -707,11 +784,11 @@ namespace Zink.Services.NativeCalling
             return visibleHeight;
         }
 
-        private static byte[] Rgb32ToBgra(byte[] rgb32, int width, int height)
+        private static unsafe byte[] Rgb32ToBgra(IntPtr rgb32Pointer, int rgb32Length, int width, int height)
         {
             var outputLength = width * height * 4;
             var bgra = new byte[outputLength];
-            Buffer.BlockCopy(rgb32, 0, bgra, 0, Math.Min(rgb32.Length, outputLength));
+            Marshal.Copy(rgb32Pointer, bgra, 0, Math.Min(rgb32Length, outputLength));
 
             for (var i = 3; i < bgra.Length; i += 4)
                 bgra[i] = 255;
@@ -746,7 +823,10 @@ namespace Zink.Services.NativeCalling
             return ScreenShareCodecNames.IsAv1(_codec) ? ScreenShareCodecNames.AV1XDisplayName : "H264";
         }
 
-        private static IEnumerable<Activate> EnumerateDecoderActivations(TRegisterTypeInformation inputInfo, TRegisterTypeInformation outputInfo)
+        private static IEnumerable<Activate> EnumerateDecoderActivations(
+            TRegisterTypeInformation inputInfo,
+            TRegisterTypeInformation outputInfo,
+            TransformEnumFlag flags)
         {
             var category = TransformCategoryGuids.VideoDecoder;
             var activationArrayPtr = IntPtr.Zero;
@@ -757,7 +837,7 @@ namespace Zink.Services.NativeCalling
             {
                 var hr = MFTEnumEx(
                     ref category,
-                    (int)(TransformEnumFlag.Hardware | TransformEnumFlag.Asyncmft | TransformEnumFlag.SortAndFilter),
+                    (int)flags,
                     inputInfoPtr,
                     outputInfoPtr,
                     out activationArrayPtr,

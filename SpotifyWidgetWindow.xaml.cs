@@ -19,13 +19,14 @@ namespace Zink
 {
     public sealed partial class SpotifyWidgetWindow : Window
     {
-        private const int BOX_WIDTH = 1300;
+        private const int BOX_WIDTH = 1100;
         private const int BOX_HEIGHT = 500;
 
         private IntPtr _hwnd;
         private AppWindow _appWindow;
         private DispatcherTimer _topmostTimer;
         private DispatcherTimer _stateTick;
+        private bool _isPinned = true;
 
         private bool _userDraggingSlider = false;
         private double _lastDuration = 0;
@@ -37,12 +38,12 @@ namespace Zink
         public SpotifyWidgetWindow()
         {
             InitializeComponent();
+            LocalizationService.RegisterWindow(this);
 
             // Use the root Grid's Loaded event
             Root.Loaded += OnLoaded;
 
             ConfigureFramelessAndSize();
-            HookDragAnywhere();
 
             Activated += (_, __) => MakeTopMost();
             MakeTopMost();
@@ -275,6 +276,12 @@ namespace Zink
         }
         private void Hide_Click(object sender, RoutedEventArgs e) => HideWindow();
 
+        private void Pin_Click(object sender, RoutedEventArgs e)
+        {
+            _isPinned = !_isPinned;
+            SetPinnedState();
+        }
+
         private async void Like_Click(object sender, RoutedEventArgs e)
         {
             if (SpotifyControllerService.Instance.IsAttached)
@@ -303,17 +310,6 @@ namespace Zink
             }
         }
 
-        private void DragSurface_PointerPressed(object sender, PointerRoutedEventArgs e)
-        {
-            var pt = e.GetCurrentPoint(sender as UIElement);
-            if (pt.Properties.IsLeftButtonPressed)
-            {
-                Activate();
-                BeginDragMove();
-                e.Handled = true;
-            }
-        }
-
         private void ConfigureFramelessAndSize()
         {
             _hwnd = WindowNative.GetWindowHandle(this);
@@ -331,6 +327,7 @@ namespace Zink
                 }
 
                 _appWindow.Resize(new WinGraphics.SizeInt32(BOX_WIDTH, BOX_HEIGHT));
+                DisableNativeWindowBorder();
 
                 var area = DisplayArea.GetFromWindowId(windowId, DisplayAreaFallback.Primary);
                 var x = area.WorkArea.X + (area.WorkArea.Width - BOX_WIDTH) / 2;
@@ -339,68 +336,39 @@ namespace Zink
 
                 try
                 {
-                    var tb = _appWindow.TitleBar;
-                    tb.ExtendsContentIntoTitleBar = true;
-                    UpdateDragRegion();
+                    ExtendsContentIntoTitleBar = true;
+                    SetTitleBar(DragRegion);
                     _appWindow.Changed += (_, __) =>
                     {
-                        UpdateDragRegion();
                         MakeTopMost(noActivate: true);
                     };
                 }
                 catch { }
             }
         }
-        private void UpdateDragRegion()
-        {
-            if (_appWindow is null) return;
-            var sz = _appWindow.Size;
-            if (sz.Width <= 0 || sz.Height <= 0) return;
-            try
-            {
-                var rect = new WinGraphics.RectInt32(0, 0, sz.Width, sz.Height);
-                _appWindow.TitleBar.SetDragRectangles(new[] { rect });
-            }
-            catch { }
-        }
-        private void HookDragAnywhere()
-        {
-            if (Content is FrameworkElement fe)
-            {
-                fe.AddHandler(UIElement.PointerPressedEvent,
-                    new PointerEventHandler((s, e) =>
-                    {
-                        var pt = e.GetCurrentPoint(s as UIElement);
-                        if (pt.Properties.IsLeftButtonPressed)
-                        {
-                            Activate();
-                            BeginDragMove();
-                            e.Handled = true;
-                        }
-                    }),
-                    handledEventsToo: true);
-            }
-            else
-            {
-                Activated += (_, __) => HookDragAnywhere();
-            }
-        }
-        private void BeginDragMove()
-        {
-            try
-            {
-                if (_hwnd == IntPtr.Zero)
-                    _hwnd = WindowNative.GetWindowHandle(this);
 
-                ReleaseCapture();
-                SendMessage(_hwnd, WM_NCLBUTTONDOWN, (IntPtr)HTCAPTION, IntPtr.Zero);
-            }
-            catch { }
+        private void DisableNativeWindowBorder()
+        {
+            const int DwmwaBorderColor = 34;
+            const uint DwmColorNone = 0xFFFFFFFE;
+            var borderColor = DwmColorNone;
+            DwmSetWindowAttribute(
+                _hwnd,
+                DwmwaBorderColor,
+                ref borderColor,
+                Marshal.SizeOf<uint>());
         }
 
         [DllImport("user32.dll", SetLastError = true)]
         private static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);
+        [DllImport("dwmapi.dll")]
+        private static extern int DwmSetWindowAttribute(
+            IntPtr hwnd,
+            int attribute,
+            ref uint attributeValue,
+            int attributeSize);
         private static readonly IntPtr HWND_TOPMOST = new IntPtr(-1);
+        private static readonly IntPtr HWND_NOTOPMOST = new IntPtr(-2);
         private const uint SWP_NOSIZE = 0x0001;
         private const uint SWP_NOMOVE = 0x0002;
         private const uint SWP_SHOWWINDOW = 0x0040;
@@ -412,12 +380,31 @@ namespace Zink
         {
             try
             {
+                if (!_isPinned)
+                    return;
+
                 if (_hwnd == IntPtr.Zero)
                     _hwnd = WindowNative.GetWindowHandle(this);
 
                 uint flags = SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW | SWP_NOOWNERZORDER | SWP_NOSENDCHANGING;
                 if (noActivate) flags |= SWP_NOACTIVATE;
                 SetWindowPos(_hwnd, HWND_TOPMOST, 0, 0, 0, 0, flags);
+            }
+            catch { }
+        }
+
+        private void SetPinnedState()
+        {
+            try
+            {
+                if (_hwnd == IntPtr.Zero)
+                    _hwnd = WindowNative.GetWindowHandle(this);
+
+                uint flags = SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW | SWP_NOOWNERZORDER | SWP_NOSENDCHANGING;
+                SetWindowPos(_hwnd, _isPinned ? HWND_TOPMOST : HWND_NOTOPMOST, 0, 0, 0, 0, flags);
+
+                PinButton.Opacity = _isPinned ? 1.0 : 0.55;
+                ToolTipService.SetToolTip(PinButton, _isPinned ? "Unpin widget" : "Pin above apps and games");
             }
             catch { }
         }
@@ -449,11 +436,5 @@ namespace Zink
             _topmostTimer.Start();
         }
 
-        [DllImport("user32.dll")]
-        private static extern bool ReleaseCapture();
-        [DllImport("user32.dll")]
-        private static extern IntPtr SendMessage(IntPtr hWnd, int Msg, IntPtr wParam, IntPtr lParam);
-        private const int WM_NCLBUTTONDOWN = 0x00A1;
-        private const int HTCAPTION = 2;
     }
 }

@@ -1,17 +1,54 @@
 ﻿<Project Sdk="Microsoft.NET.Sdk">
 
+  <ItemGroup>
+    <Compile Remove="Services\NativeCalling\Quality 720P H.264\**\*.cs" />
+    <Compile Remove="Services\NativeCalling\Quality 1080P H.264\**\*.cs" />
+    <Compile Remove="Services\NativeCalling\Quality 1440P H.264\**\*.cs" />
+    <Compile Remove="Services\NativeCalling\Quality 4K H.264\**\*.cs" />
+    <None Include="Services\NativeCalling\Quality 720P H.264\**\*.cs" />
+    <None Include="Services\NativeCalling\Quality 1080P H.264\**\*.cs" />
+    <None Include="Services\NativeCalling\Quality 1440P H.264\**\*.cs" />
+    <None Include="Services\NativeCalling\Quality 4K H.264\**\*.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- The active receiver decoder lives with the 720p screen-share stack. -->
+    <Compile Include="Services\NativeCalling\Quality 720P H.264\AudioPlaybackService.720P.H264.cs" />
+    <Compile Include="Services\NativeCalling\Quality 720P H.264\ScreenShareServiceStack.720P.H264.cs" />
+    <Compile Include="Services\NativeCalling\Quality 720P H.264\ScreenShare720pRuntimePolicy.720P.H264.cs" />
+    <Compile Include="Services\NativeCalling\Quality 1080P H.264\ScreenShare1080pRuntimePolicy.1080P.H264.cs" />
+    <Compile Include="Services\NativeCalling\Quality 1440P H.264\ScreenShare1440pRuntimePolicy.1440P.H264.cs" />
+    <Compile Include="Services\NativeCalling\Quality 4K H.264\ScreenShare4KRuntimePolicy.4K.H264.cs" />
+    <Compile Include="Services\NativeCalling\Quality 720P H.264\MediaFoundationH264Decoder.720P.H264.cs" />
+    <Compile Include="Services\NativeCalling\Quality 720P H.264\HDR.720P.H264.cs" />
+    <Compile Include="Services\NativeCalling\Quality 720P H.264\ZinkHdrGpuConverter.720P.H264.cs" />
+    <Compile Include="Services\NativeCalling\Quality 720P H.264\ZinkHdrToSdrGpuConverter.720P.H264.cs" />
+    <Compile Include="Services\NativeCalling\Quality 4K H.264\ScreenShare4KH264QualityService.4K.H264.cs" />
+    <None Remove="Services\NativeCalling\Quality 720P H.264\AudioPlaybackService.720P.H264.cs" />
+    <None Remove="Services\NativeCalling\Quality 720P H.264\ScreenShareServiceStack.720P.H264.cs" />
+    <None Remove="Services\NativeCalling\Quality 720P H.264\ScreenShare720pRuntimePolicy.720P.H264.cs" />
+    <None Remove="Services\NativeCalling\Quality 1080P H.264\ScreenShare1080pRuntimePolicy.1080P.H264.cs" />
+    <None Remove="Services\NativeCalling\Quality 1440P H.264\ScreenShare1440pRuntimePolicy.1440P.H264.cs" />
+    <None Remove="Services\NativeCalling\Quality 4K H.264\ScreenShare4KRuntimePolicy.4K.H264.cs" />
+    <None Remove="Services\NativeCalling\Quality 720P H.264\MediaFoundationH264Decoder.720P.H264.cs" />
+    <None Remove="Services\NativeCalling\Quality 720P H.264\HDR.720P.H264.cs" />
+    <None Remove="Services\NativeCalling\Quality 720P H.264\ZinkHdrGpuConverter.720P.H264.cs" />
+    <None Remove="Services\NativeCalling\Quality 720P H.264\ZinkHdrToSdrGpuConverter.720P.H264.cs" />
+    <None Remove="Services\NativeCalling\Quality 4K H.264\ScreenShare4KH264QualityService.4K.H264.cs" />
+  </ItemGroup>
+
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
-    <TargetFramework>net8.0-windows10.0.26100.0</TargetFramework>
+    <TargetFramework>net10.0-windows10.0.26100.0</TargetFramework>
     <TargetPlatformMinVersion>10.0.17763.0</TargetPlatformMinVersion>
     <RootNamespace>Zink</RootNamespace>
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <ApplicationIcon>Assets\Zink.ico</ApplicationIcon>
 
     <!-- Store upload fix: increment package/app version to avoid duplicate identity in Partner Center -->
-    <Version>3.0.33.0</Version>
-    <AssemblyVersion>3.0.33.0</AssemblyVersion>
-    <FileVersion>3.0.33.0</FileVersion>
+    <Version>4.0.0.0</Version>
+    <AssemblyVersion>4.0.0.0</AssemblyVersion>
+    <FileVersion>4.0.0.0</FileVersion>
 
     <!-- x86 + x64 + arm64 support (Store-complete) -->
     <Platforms>x86;x64;arm64</Platforms>
@@ -19,7 +56,7 @@
     <!-- Ensure restore generates assets for all targets -->
     <RuntimeIdentifiers>win-x86;win-x64;win-arm64</RuntimeIdentifiers>
 
-    <!-- Bundle .NET 8 runtime so users don't have to install it -->
+    <!-- Bundle .NET 10 runtime so users don't have to install it -->
     <SelfContained>true</SelfContained>
 
     <!-- Fix duplicate assembly attributes (e.g. AssemblyFileVersionAttribute) -->
@@ -57,10 +94,13 @@
     <Compile Remove="Av1xSmokeTest\**\*.cs" />
     <Compile Remove="bin\**\*.cs" />
     <Compile Remove="obj\**\*.cs" />
+    <!-- Preserve the OneDrive conflict copy, but do not compile its duplicate type. -->
+    <Compile Remove="Services\Recording\ManualRecordingService-FTH-LAPTOP-2.cs" />
     <Compile Remove="Pages\FeedbackPage.xaml.cs" />
     <Page Remove="Av1xSmokeTest\**\*.xaml" />
     <Page Remove="bin\**\*.xaml" />
     <Page Remove="obj\**\*.xaml" />
+    <Page Remove="Pages\AppThemePage-FTH-DESKTOP-1.xaml" />
     <Content Remove="Assets\BadgeLogo.scale-100.png" />
     <Content Remove="Assets\BadgeLogo.scale-125.png" />
     <Content Remove="Assets\BadgeLogo.scale-150.png" />
@@ -87,24 +127,25 @@
   </Target>
 
   <ItemGroup>
-    <PackageReference Include="BouncyCastle.Cryptography" Version="2.6.2" />
+    <PackageReference Include="BouncyCastle.Cryptography" Version="2.7.0" />
     <PackageReference Include="CommunityToolkit.Mvvm" Version="8.4.2" />
     <PackageReference Include="Concentus" Version="2.2.2" />
     <PackageReference Include="fdk-aac" Version="2.0.3" />
-    <PackageReference Include="LibVLCSharp.WinUI" Version="3.10.0" />
-    <PackageReference Include="Microsoft.AspNetCore.WebSockets" Version="2.3.11" />
-    <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.4022.49" />
-    <PackageReference Include="Microsoft.Windows.CsWinRT" Version="2.2.0" />
-    <PackageReference Include="Microsoft.WindowsAppSDK" Version="2.2.0" />
-    <PackageReference Include="Microsoft.Windows.SDK.BuildTools" Version="10.0.28000.2270" />
-    <PackageReference Include="NAudio.Core" Version="2.3.0" />
-    <PackageReference Include="NAudio.WinMM" Version="2.3.0" />
+    <PackageReference Include="LibVLCSharp.WinUI" Version="3.10.1" />
+    <PackageReference Include="Microsoft.AspNetCore.WebSockets" Version="2.3.13" />
+    <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.4191.47" />
+    <PackageReference Include="Microsoft.Windows.CsWinRT" Version="2.3.1" />
+    <PackageReference Include="Microsoft.WindowsAppSDK" Version="2.4.0" />
+    <PackageReference Include="Microsoft.Windows.SDK.BuildTools" Version="10.0.28000.2705" />
+    <PackageReference Include="NAudio.Core" Version="3.1.0" />
+    <PackageReference Include="NAudio.WinMM" Version="3.1.0" />
     <PackageReference Include="SharpDX" Version="4.2.0" />
     <PackageReference Include="SharpDX.Direct3D11" Version="4.2.0" />
+    <PackageReference Include="SharpDX.D3DCompiler" Version="4.2.0" />
     <PackageReference Include="SharpDX.DXGI" Version="4.2.0" />
     <PackageReference Include="SharpDX.MediaFoundation" Version="4.2.0" />
-    <PackageReference Include="SIPSorcery" Version="10.0.11" />
-    <PackageReference Include="System.Drawing.Common" Version="10.0.9" />
+    <PackageReference Include="SIPSorcery" Version="10.0.16" />
+    <PackageReference Include="System.Drawing.Common" Version="10.0.12" />
     <PackageReference Include="TagLibSharp" Version="2.3.0" />
     <PackageReference Include="VideoLAN.LibVLC.Windows" Version="3.0.23.1" />
     <PackageReference Include="Vortice.Direct3D12" Version="3.8.3" />
@@ -124,6 +165,10 @@
     </Content>
     <Content Include="$(MSBuildProjectDirectory)\x64\$(Configuration)\ZinkIntelVplEncoder.dll" Condition="Exists('$(MSBuildProjectDirectory)\x64\$(Configuration)\ZinkIntelVplEncoder.dll')">
       <Link>ZinkIntelVplEncoder.dll</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+    <Content Include="$(MSBuildProjectDirectory)\x64\$(Configuration)\ZinkNvencEncoder.dll" Condition="Exists('$(MSBuildProjectDirectory)\x64\$(Configuration)\ZinkNvencEncoder.dll')">
+      <Link>ZinkNvencEncoder.dll</Link>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
   </ItemGroup>
@@ -152,6 +197,24 @@
     <Copy SourceFiles="@(_IntelVplOutput)" DestinationFolder="$(OutDir)" SkipUnchangedFiles="true" Condition="'@(_IntelVplOutput)'!=''" />
   </Target>
 
+  <Target Name="EnsureNvencHeader" BeforeTargets="BuildZinkNvencEncoder" Condition="'$(Platform)'=='x64' And !Exists('$(MSBuildProjectDirectory)\Native\ZinkNvencEncoder\nvEncodeAPI.h')">
+    <Exec Command="powershell -NoProfile -ExecutionPolicy Bypass -Command &quot;$ErrorActionPreference='Stop'; Invoke-WebRequest -Uri 'https://raw.githubusercontent.com/NVIDIA/video-sdk-samples/master/Samples/NvCodec/NvEncoder/nvEncodeAPI.h' -OutFile '$(MSBuildProjectDirectory)\Native\ZinkNvencEncoder\nvEncodeAPI.h'&quot;" />
+  </Target>
+
+  <Target Name="BuildZinkNvencEncoder" BeforeTargets="Build" DependsOnTargets="EnsureNvencHeader" Condition="'$(Platform)'=='x64'">
+    <Exec Command="&quot;$(MSBuildProjectDirectory)\Native\ZinkNvencEncoder\build.cmd&quot; &quot;$(MSBuildProjectDirectory)&quot; &quot;$(Configuration)&quot;" />
+    <Copy SourceFiles="$(MSBuildProjectDirectory)\x64\$(Configuration)\ZinkNvencEncoder.dll" DestinationFolder="$(OutDir)" SkipUnchangedFiles="true" />
+  </Target>
+
+  <Target Name="CopyZinkRuntimeToAppx" AfterTargets="Build" Condition="'$(Platform)'=='x64' And Exists('$(OutDir)AppX')">
+    <ItemGroup>
+      <_ZinkAppxRuntime Include="$(OutDir)Zink.dll" />
+      <_ZinkAppxRuntime Include="$(MSBuildProjectDirectory)\x64\$(Configuration)\ZinkNvencEncoder.dll" />
+    </ItemGroup>
+    <Copy SourceFiles="@(_ZinkAppxRuntime)" DestinationFolder="$(OutDir)AppX" SkipUnchangedFiles="false" />
+  </Target>
+
+
   <!-- everything below unchanged from your file -->
   <ItemGroup>
     <None Remove="Assets\ZinkLogo.png" />
@@ -175,6 +238,8 @@
     <None Remove="Pages\BBCiPlayerPage.xaml" />
     <None Remove="Pages\BlueskyPage.xaml" />
     <None Remove="Pages\BoosteroidPage.xaml" />
+    <None Remove="Pages\ToolsPage.xaml" />
+    <None Remove="Windows\AreaSelectionWindow.xaml" />
     <None Remove="Pages\CustomisePage.xaml" />
     <None Remove="Pages\DiscordPage.xaml" />
     <None Remove="Pages\DisneyPlusPage.xaml" />
@@ -266,13 +331,10 @@
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <ExcludeFromPRIResource>true</ExcludeFromPRIResource>
     </Content>
-    <Content Include="Tools\ffprobe.exe">
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-    </Content>
-    <Content Include="Tools\ffmpeg.exe">
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-    </Content>
     <PRIResource Remove="Extensions\uBlockOrigin\**\*" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include=".github\copilot-instructions.md" />
   </ItemGroup>
 
   <ItemGroup>
@@ -306,6 +368,12 @@
     <Content Update="Assets\incoming-call.wav">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
+    <Content Update="Assets\Sounds\zink-achievement-unlock.wav">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+    <Content Update="Assets\Sounds\zink-call-ring.wav">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
     <Content Update="Assets\QuickAccess\*.png">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
@@ -314,6 +382,9 @@
     </Content>
     <Content Update="Assets\Radio\smoothfm.png">
       <CopyToOutputDirectory>Never</CopyToOutputDirectory>
+    </Content>
+    <Content Update="Assets\Radio\ad-break.png">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
   </ItemGroup>
 
@@ -352,6 +423,12 @@
       <Generator>MSBuild:Compile</Generator>
     </Page>
     <Page Update="Pages\ScreenRecorderPage.xaml">
+      <Generator>MSBuild:Compile</Generator>
+    </Page>
+    <Page Update="Pages\ToolsPage.xaml">
+      <Generator>MSBuild:Compile</Generator>
+    </Page>
+    <Page Update="Windows\AreaSelectionWindow.xaml">
       <Generator>MSBuild:Compile</Generator>
     </Page>
     <Page Update="Pages\StreamingPage.xaml">
@@ -450,7 +527,7 @@
     <HoursBetweenUpdateChecks>0</HoursBetweenUpdateChecks>
 
     <!-- Keep package outputs outside OneDrive so packaging does not sync generated installers. -->
-    <AppxPackageDir>C:\Users\Franc\Downloads\</AppxPackageDir>
+    <AppxPackageDir>C:\Users\franc\Desktop\New folder %282%29\</AppxPackageDir>
     <ZinkPackageArtifactDir>$(LOCALAPPDATA)\Zink\PackageOutput\BundleArtifacts\</ZinkPackageArtifactDir>
 
     <SupportedOSPlatformVersion>10.0.19041.0</SupportedOSPlatformVersion>

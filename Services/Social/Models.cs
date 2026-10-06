@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Collections.Generic;
 
 namespace Zink.Services.Social
 {
@@ -10,6 +11,8 @@ namespace Zink.Services.Social
         public string? AvatarUrl { get; set; }
         public string Presence { get; set; } = "";
         public bool IsFriend { get; set; }
+        public DateTimeOffset? SignedUpAtUtc { get; set; }
+        public List<SocialLink> SocialLinks { get; set; } = new();
     }
 
     public sealed class FriendDto
@@ -20,6 +23,8 @@ namespace Zink.Services.Social
         public string? AvatarUrl { get; set; }
         public string Presence { get; set; } = "";
         public bool IsOnline { get; set; } // matches server
+        public DateTimeOffset? SignedUpAtUtc { get; set; }
+        public List<SocialLink> SocialLinks { get; set; } = new();
     }
 
     public sealed class FriendRequestDto
@@ -46,6 +51,8 @@ namespace Zink.Services.Social
         public string? AvatarUrl { get; set; }
         public bool EmailVerified { get; set; }
         public string Presence { get; set; } = "";
+        public DateTimeOffset? SignedUpAtUtc { get; set; }
+        public List<SocialLink> SocialLinks { get; set; } = new();
     }
 
     public sealed class LoginRequest

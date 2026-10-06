@@ -5,19 +5,19 @@
     RequestedTheme="Dark">
 
     <Page.Resources>
-        <SolidColorBrush x:Key="ThemePanelBrush" Color="#B0000814"/>
-        <SolidColorBrush x:Key="ThemeCardBrush" Color="#8204161A"/>
-        <SolidColorBrush x:Key="ThemeBorderBrush" Color="#5538FF66"/>
-        <SolidColorBrush x:Key="MutedTextBrush" Color="#BDE7FFF6"/>
-        <SolidColorBrush x:Key="SelectedStrokeBrush" Color="#38FF66"/>
+        <SolidColorBrush x:Key="ThemePanelBrush" Color="#B0141820"/>
+        <SolidColorBrush x:Key="ThemeCardBrush" Color="#82121C26"/>
+        <SolidColorBrush x:Key="ThemeBorderBrush" Color="#34FFFFFF"/>
+        <SolidColorBrush x:Key="MutedTextBrush" Color="#B8C8D2DC"/>
+        <SolidColorBrush x:Key="SelectedStrokeBrush" Color="#8CEBFF"/>
     </Page.Resources>
 
     <Grid>
         <Grid.Background>
             <LinearGradientBrush StartPoint="0,0" EndPoint="1,1">
-                <GradientStop x:Name="PageGradientStart" Color="#90000814" Offset="0"/>
-                <GradientStop x:Name="PageGradientMiddle" Color="#78062D38" Offset="0.48"/>
-                <GradientStop x:Name="PageGradientEnd" Color="#8006404A" Offset="1"/>
+                <GradientStop x:Name="PageGradientStart" Color="#70002333" Offset="0"/>
+                <GradientStop x:Name="PageGradientMiddle" Color="#7800394B" Offset="0.48"/>
+                <GradientStop x:Name="PageGradientEnd" Color="#90061019" Offset="1"/>
             </LinearGradientBrush>
         </Grid.Background>
 
@@ -104,7 +104,7 @@
                                     <StackPanel>
                                         <Grid Height="104">
                                             <Rectangle Fill="#F3F6FA"/>
-                                            <Rectangle Fill="#000814" HorizontalAlignment="Right" Width="92"/>
+                                            <Rectangle Fill="#151D26" HorizontalAlignment="Right" Width="92"/>
                                         </Grid>
                                         <StackPanel Padding="14" Spacing="3">
                                             <TextBlock Text="System" Foreground="White" FontWeight="SemiBold"/>
@@ -137,7 +137,7 @@
                                         BorderBrush="{StaticResource ThemeBorderBrush}"
                                         BorderThickness="1">
                                     <StackPanel>
-                                        <Border Height="104" Background="#000814"/>
+                                        <Border Height="104" Background="#151D26"/>
                                         <StackPanel Padding="14" Spacing="3">
                                             <TextBlock Text="Zink default" Foreground="White" FontWeight="SemiBold"/>
                                             <TextBlock Text="Neon theme" Foreground="{StaticResource MutedTextBrush}" FontSize="12"/>
@@ -167,17 +167,17 @@
                                             <RowDefinition Height="46"/>
                                             <RowDefinition Height="46"/>
                                         </Grid.RowDefinitions>
-                                        <Button Tag="#06404A" Click="PresetColor_Click" Background="#06404A" BorderBrush="#5511D8E8"/>
-                                        <Button Grid.Column="1" Tag="#11D8E8" Click="PresetColor_Click" Background="#11D8E8" BorderBrush="#5511D8E8"/>
-                                        <Button Grid.Column="2" Tag="#38FF66" Click="PresetColor_Click" Background="#38FF66" BorderBrush="#5511D8E8"/>
-                                        <Button Grid.Column="3" Tag="#C9FF3D" Click="PresetColor_Click" Background="#C9FF3D" BorderBrush="#5511D8E8"/>
-                                        <Button Grid.Row="1" Tag="#062D38" Click="PresetColor_Click" Background="#062D38" BorderBrush="#5511D8E8"/>
-                                        <Button Grid.Row="1" Grid.Column="1" Tag="#000814" Click="PresetColor_Click" Background="#000814" BorderBrush="#5511D8E8"/>
-                                        <Button Grid.Row="1" Grid.Column="2" Tag="#003B35" Click="PresetColor_Click" Background="#003B35" BorderBrush="#5511D8E8"/>
-                                        <Button Grid.Row="1" Grid.Column="3" Tag="#04161A" Click="PresetColor_Click" Background="#04161A" BorderBrush="#5511D8E8"/>
+                                        <Button Tag="#38FF66" Click="PresetColor_Click" Background="#38FF66" BorderBrush="#55FFFFFF"/>
+                                        <Button Grid.Column="1" Tag="#14D8E8" Click="PresetColor_Click" Background="#14D8E8" BorderBrush="#55FFFFFF"/>
+                                        <Button Grid.Column="2" Tag="#1EDC8A" Click="PresetColor_Click" Background="#1EDC8A" BorderBrush="#55FFFFFF"/>
+                                        <Button Grid.Column="3" Tag="#9EFF4F" Click="PresetColor_Click" Background="#9EFF4F" BorderBrush="#55FFFFFF"/>
+                                        <Button Grid.Row="1" Tag="#0E7B5A" Click="PresetColor_Click" Background="#0E7B5A" BorderBrush="#55FFFFFF"/>
+                                        <Button Grid.Row="1" Grid.Column="1" Tag="#06404A" Click="PresetColor_Click" Background="#06404A" BorderBrush="#55FFFFFF"/>
+                                        <Button Grid.Row="1" Grid.Column="2" Tag="#123B64" Click="PresetColor_Click" Background="#123B64" BorderBrush="#55FFFFFF"/>
+                                        <Button Grid.Row="1" Grid.Column="3" Tag="#252A35" Click="PresetColor_Click" Background="#252A35" BorderBrush="#55FFFFFF"/>
                                     </Grid>
                                     <TextBlock x:Name="CurrentGlassText"
-                                               Text="Glass colour: #06404A"
+                                               Text="Glass colour: #38FF66"
                                                Foreground="{StaticResource MutedTextBrush}"
                                                FontSize="12"/>
                                 </StackPanel>

@@ -163,11 +163,11 @@ namespace Zink.Services.Recording
         }
 
         public async Task<string?> SaveLast45SecondsAsync()
-            => await SaveLastReplayAsync(TimeSpan.FromSeconds(45));
+            => await SaveLastReplayAsync(TimeSpan.FromSeconds(RecordingPreferences.BackgroundReplayDurationSeconds));
 
         public async Task<string?> SaveLastReplayAsync(TimeSpan requestedDuration)
         {
-            var supportedDuration = TimeSpan.FromSeconds(45);
+            var supportedDuration = TimeSpan.FromSeconds(RecordingPreferences.BackgroundReplayDurationSeconds);
             var label = FormatReplayDuration(requestedDuration);
 
             if (requestedDuration > supportedDuration)

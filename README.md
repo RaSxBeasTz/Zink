@@ -1,6 +1,6 @@
 # Zink
 
-Zink is an all-in-one Windows media hub built with WinUI 3 and .NET 8. It brings music, video, radio, streaming shortcuts, Spotify controls, screen recording, social features, and calling tools into one desktop app.
+Zink is an all-in-one Windows media hub built with WinUI 3 and .NET 10. It brings music, video, radio, streaming shortcuts, Spotify controls, screen recording, social features, and calling tools into one desktop app.
 
 ## Features
 
@@ -16,7 +16,7 @@ Zink is an all-in-one Windows media hub built with WinUI 3 and .NET 8. It brings
 ## Tech Stack
 
 - C# and XAML
-- .NET 8
+- .NET 10
 - WinUI 3 / Windows App SDK
 - WebView2
 - NAudio
@@ -32,7 +32,7 @@ Zink is an all-in-one Windows media hub built with WinUI 3 and .NET 8. It brings
   - .NET desktop development
   - Windows App SDK / WinUI tooling
   - MSIX Packaging Tools
-- .NET 8 SDK.
+- .NET 10 SDK.
 
 ## Getting Started
 

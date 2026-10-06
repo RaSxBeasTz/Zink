@@ -11,30 +11,37 @@ namespace Zink.Services.NativeCalling
 {
     public sealed class NativePeerConnectionService
     {
-        private const int H264PayloadType = 102;
-        private const int Av1PayloadType = 103;
-        private const uint H264ClockRate = 90000;
-        private const uint VideoFrameDuration = H264ClockRate / NativeScreenShareStreamingService.TargetFps;
-        private const string H264FormatParameters = "packetization-mode=1;profile-level-id=42e034;level-asymmetry-allowed=1";
+        private readonly ScreenSharePeerConnectionSettings _settings;
 
         private readonly object _syncRoot = new();
+        private readonly List<IceCandidateModel> _pendingRemoteIceCandidates = new();
         private RTCPeerConnection? _peerConnection;
         private bool _hasVideoTrack;
         private bool _isClosed;
+        private bool _hasRemoteDescription;
         private long _sentVideoFrames;
         private long _receivedVideoFrames;
         private uint _lastRemoteVideoSsrc;
         private ushort? _lastRemoteVideoSequence;
         private string _lastRemoteVideoCodec = ScreenShareCodecNames.H264;
+        private string _expectedRemoteVideoCodec = ScreenShareCodecNames.H264;
         private DateTimeOffset _lastPliSentUtc = DateTimeOffset.MinValue;
         private DateTimeOffset _lastNackSentUtc = DateTimeOffset.MinValue;
         private DateTimeOffset _lastSendDiagnosticUtc = DateTimeOffset.MinValue;
         private long _sentPliRequests;
         private long _sentNackRequests;
         private readonly string _diagnosticName;
+        public ScreenShareQualityPreset QualityPreset { get; }
 
-        public NativePeerConnectionService(string? diagnosticName = null)
+        public NativePeerConnectionService(
+            string? diagnosticName = null,
+            ScreenShareQualityPreset? qualityPreset = null,
+            ScreenSharePeerConnectionSettings? settings = null)
         {
+            QualityPreset = qualityPreset ?? ScreenShareServiceSelector.Active.Preset;
+            _settings = settings ?? new ScreenSharePeerConnectionSettings(
+                102, 103, 90_000, 30,
+                "packetization-mode=1;profile-level-id=42e034;level-asymmetry-allowed=1");
             _diagnosticName = string.IsNullOrWhiteSpace(diagnosticName)
                 ? "peer"
                 : diagnosticName.Trim();
@@ -50,6 +57,14 @@ namespace Zink.Services.NativeCalling
         public long SentPliRequests => Interlocked.Read(ref _sentPliRequests);
         public long SentNackRequests => Interlocked.Read(ref _sentNackRequests);
         public string ConnectionState => _peerConnection?.connectionState.ToString() ?? "not-created";
+        public bool HasRemoteDescription
+        {
+            get
+            {
+                lock (_syncRoot)
+                    return _hasRemoteDescription;
+            }
+        }
         public bool IsVideoTransportReady
         {
             get
@@ -64,7 +79,17 @@ namespace Zink.Services.NativeCalling
         }
 
         public string TransportDescription => "WebRTC RTP AV1X/H.264 media track";
-        public string CodecParameters => $"AV1X payload={Av1PayloadType}; H.264 {H264FormatParameters}";
+        public string CodecParameters => $"AV1X payload={_settings.Av1PayloadType}; H.264 {_settings.H264FormatParameters}";
+
+        public void SetExpectedRemoteVideoCodec(string codec)
+        {
+            var normalizedCodec = ScreenShareCodecNames.IsAv1(codec)
+                ? ScreenShareCodecNames.Av1
+                : ScreenShareCodecNames.H264;
+
+            Volatile.Write(ref _expectedRemoteVideoCodec, normalizedCodec);
+            Volatile.Write(ref _lastRemoteVideoCodec, normalizedCodec);
+        }
 
         public Task AttachMicrophoneAsync(MicCaptureService mic)
         {
@@ -110,13 +135,17 @@ namespace Zink.Services.NativeCalling
         public Task SetRemoteOfferAsync(SessionDescriptionModel offer)
         {
             EnsureVideoTrack();
-            EnsurePeerConnection().setRemoteDescription(ToRtcDescription(offer));
+            var peerConnection = EnsurePeerConnection();
+            peerConnection.setRemoteDescription(ToRtcDescription(offer));
+            ApplyPendingRemoteIceCandidates(peerConnection);
             return Task.CompletedTask;
         }
 
         public Task SetRemoteAnswerAsync(SessionDescriptionModel answer)
         {
-            EnsurePeerConnection().setRemoteDescription(ToRtcDescription(answer));
+            var peerConnection = EnsurePeerConnection();
+            peerConnection.setRemoteDescription(ToRtcDescription(answer));
+            ApplyPendingRemoteIceCandidates(peerConnection);
             return Task.CompletedTask;
         }
 
@@ -125,22 +154,55 @@ namespace Zink.Services.NativeCalling
             if (string.IsNullOrWhiteSpace(ice.Candidate))
                 return Task.CompletedTask;
 
-            EnsurePeerConnection().addIceCandidate(new RTCIceCandidateInit
+            lock (_syncRoot)
             {
-                candidate = ice.Candidate,
-                sdpMid = ice.Mid,
-                sdpMLineIndex = ice.MLineIndex.HasValue ? (ushort)ice.MLineIndex.Value : (ushort)0
-            });
+                if (!_hasRemoteDescription)
+                {
+                    _pendingRemoteIceCandidates.Add(ice);
+                    return Task.CompletedTask;
+                }
+            }
+
+            EnsurePeerConnection().addIceCandidate(ToRtcIceCandidate(ice));
 
             return Task.CompletedTask;
         }
 
+        private void ApplyPendingRemoteIceCandidates(RTCPeerConnection peerConnection)
+        {
+            List<IceCandidateModel> pending;
+            lock (_syncRoot)
+            {
+                _hasRemoteDescription = true;
+                pending = new List<IceCandidateModel>(_pendingRemoteIceCandidates);
+                _pendingRemoteIceCandidates.Clear();
+            }
+
+            foreach (var candidate in pending)
+                peerConnection.addIceCandidate(ToRtcIceCandidate(candidate));
+        }
+
+        private static RTCIceCandidateInit ToRtcIceCandidate(IceCandidateModel ice)
+        {
+            return new RTCIceCandidateInit
+            {
+                candidate = ice.Candidate,
+                sdpMid = ice.Mid,
+                sdpMLineIndex = ice.MLineIndex.HasValue ? (ushort)ice.MLineIndex.Value : (ushort)0
+            };
+        }
+
         public Task<bool> SendEncodedVideoFrameAsync(byte[] h264Frame)
         {
-            return SendEncodedVideoFrameAsync(h264Frame, ScreenShareCodecNames.H264);
+            return SendEncodedVideoFrameAsync(h264Frame, ScreenShareCodecNames.H264, _settings.RealtimeVideoFps);
         }
 
         public Task<bool> SendEncodedVideoFrameAsync(byte[] encodedFrame, string codec)
+        {
+            return SendEncodedVideoFrameAsync(encodedFrame, codec, _settings.RealtimeVideoFps);
+        }
+
+        public Task<bool> SendEncodedVideoFrameAsync(byte[] encodedFrame, string codec, int frameRate)
         {
             if (encodedFrame.Length == 0)
                 return Task.FromResult(false);
@@ -173,17 +235,22 @@ namespace Zink.Services.NativeCalling
 
             try
             {
+                // SIPSorcery advances the RTP timestamp by this duration for every
+                // encoded access unit. The legacy path used a fixed 30 FPS duration
+                // even when the H.264 encoder was producing 60 FPS, so the receiver
+                // clock ran at half speed and immediately accumulated a backlog.
+                var videoFrameDuration = Math.Max(1u, _settings.VideoClockRate / (uint)Math.Clamp(frameRate, 1, 120));
                 if (ScreenShareCodecNames.IsAv1(codec))
                 {
-                    peerConnection.VideoStream.SendAv1Frame(VideoFrameDuration, Av1PayloadType, encodedFrame);
+                    peerConnection.VideoStream.SendAv1Frame(videoFrameDuration, _settings.Av1PayloadType, encodedFrame);
                 }
                 else
                 {
-                    peerConnection.VideoStream.SendH264Frame(VideoFrameDuration, H264PayloadType, encodedFrame);
+                    peerConnection.VideoStream.SendH264Frame(videoFrameDuration, _settings.H264PayloadType, encodedFrame);
                 }
 
                 var sentFrames = Interlocked.Increment(ref _sentVideoFrames);
-                if (sentFrames == 1 || sentFrames % (NativeScreenShareStreamingService.TargetFps * 2) == 0)
+                if (sentFrames == 1 || sentFrames % (ScreenShareCapturePipeline.TargetFps * 2) == 0)
                     Debug.WriteLine($"[ScreenShare:RTP] {_diagnosticName}: sent {sentFrames} {GetLogCodecName(codec)} frames; bytes={encodedFrame.Length}; connectionState={peerConnection.connectionState}.");
                 return Task.FromResult(true);
             }
@@ -203,6 +270,8 @@ namespace Zink.Services.NativeCalling
                 _peerConnection = null;
                 _hasVideoTrack = false;
                 _isClosed = true;
+                _hasRemoteDescription = false;
+                _pendingRemoteIceCandidates.Clear();
             }
 
             peerConnection?.close();
@@ -276,10 +345,12 @@ namespace Zink.Services.NativeCalling
                 peerConnection.OnVideoFrameReceived += (_, _, frame, _) =>
                 {
                     var receivedFrames = Interlocked.Increment(ref _receivedVideoFrames);
-                    if (receivedFrames == 1 || receivedFrames % (NativeScreenShareStreamingService.TargetFps * 2) == 0)
+                    if (receivedFrames == 1 || receivedFrames % (ScreenShareCapturePipeline.TargetFps * 2) == 0)
                     Debug.WriteLine($"[ScreenShare:RTP] {_diagnosticName}: received {receivedFrames} encoded video frames; bytes={frame.Length}.");
 
-                    var codec = Volatile.Read(ref _lastRemoteVideoCodec) ?? ScreenShareCodecNames.H264;
+                    var codec = Volatile.Read(ref _expectedRemoteVideoCodec) ??
+                        Volatile.Read(ref _lastRemoteVideoCodec) ??
+                        ScreenShareCodecNames.H264;
                     EncodedVideoFrameReceived?.Invoke(this, new NativeRtpVideoFrameEventArgs(frame, codec));
                 };
                 peerConnection.OnRtpPacketReceived += (_, mediaType, packet) =>
@@ -304,7 +375,7 @@ namespace Zink.Services.NativeCalling
             lock (_syncRoot)
             {
                 _lastRemoteVideoSsrc = mediaSsrc;
-                _lastRemoteVideoCodec = header.PayloadType == Av1PayloadType
+                _lastRemoteVideoCodec = header.PayloadType == _settings.Av1PayloadType
                     ? ScreenShareCodecNames.Av1
                     : ScreenShareCodecNames.H264;
 
@@ -403,18 +474,18 @@ namespace Zink.Services.NativeCalling
 
                 var videoFormats = new List<VideoFormat>
                 {
-                    new VideoFormat(Av1PayloadType, "AV1", (int)H264ClockRate, null),
+                    new VideoFormat(_settings.Av1PayloadType, "AV1", (int)_settings.VideoClockRate, null),
                     new VideoFormat(
                         VideoCodecsEnum.H264,
-                        H264PayloadType,
-                        (int)H264ClockRate,
-                        H264FormatParameters)
+                        _settings.H264PayloadType,
+                        (int)_settings.VideoClockRate,
+                        _settings.H264FormatParameters)
                 };
                 var videoTrack = new MediaStreamTrack(videoFormats, MediaStreamStatusEnum.SendRecv);
 
                 EnsurePeerConnection().addTrack(videoTrack);
                 _hasVideoTrack = true;
-                Debug.WriteLine($"[ScreenShare:RTP] {_diagnosticName}: added low-latency AV1X/H.264 video track: AV1/{H264ClockRate}, H.264 {H264FormatParameters}");
+                Debug.WriteLine($"[ScreenShare:RTP] {_diagnosticName}: added low-latency AV1X/H.264 video track: AV1/{_settings.VideoClockRate}, H.264 {_settings.H264FormatParameters}");
             }
         }
 

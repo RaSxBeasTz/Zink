@@ -4,80 +4,257 @@
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
     xmlns:controls="using:Microsoft.UI.Xaml.Controls">
 
-    <!-- Put visual styling on the root container, not on <Window> -->
-    <Grid x:Name="Root" Background="#202020" Padding="20">
-        <Grid.ColumnDefinitions>
-            <ColumnDefinition Width="Auto"/>
-            <ColumnDefinition Width="*" />
-        </Grid.ColumnDefinitions>
+    <Grid x:Name="Root">
+        <Grid.Resources>
+            <Style x:Key="TransportButtonStyle" TargetType="Button">
+                <Setter Property="Width" Value="38"/>
+                <Setter Property="Height" Value="38"/>
+                <Setter Property="MinWidth" Value="0"/>
+                <Setter Property="MinHeight" Value="0"/>
+                <Setter Property="Padding" Value="0"/>
+                <Setter Property="CornerRadius" Value="12"/>
+                <Setter Property="Background" Value="#2EFFFFFF"/>
+                <Setter Property="BorderBrush" Value="#3DFFFFFF"/>
+                <Setter Property="BorderThickness" Value="1"/>
+                <Setter Property="Foreground" Value="#F7FFFFFF"/>
+            </Style>
 
-        <!-- Album Art -->
-        <Border Width="120" Height="120" CornerRadius="12" Background="#303030">
-            <Image x:Name="AlbumArtImage" Stretch="UniformToFill"/>
-        </Border>
+            <Style x:Key="ActionButtonStyle" TargetType="Button"
+                   BasedOn="{StaticResource TransportButtonStyle}">
+                <Setter Property="Width" Value="Auto"/>
+                <Setter Property="Padding" Value="12,0"/>
+            </Style>
+        </Grid.Resources>
 
-        <!-- Track Info + Controls -->
-        <StackPanel Grid.Column="1" Margin="20,0,0,0" VerticalAlignment="Center" Spacing="12">
-            <!-- Song Info -->
-            <TextBlock x:Name="TrackTitle" Text="Track" FontSize="22" FontWeight="Bold"
-                       Foreground="White" TextTrimming="CharacterEllipsis"/>
-            <TextBlock x:Name="TrackArtist" Text="Artist" FontSize="16"
-                       Foreground="#DDDDDD" TextTrimming="CharacterEllipsis"/>
-            <TextBlock x:Name="AlbumName" Text="Album" FontSize="14"
-                       Foreground="#AAAAAA" TextTrimming="CharacterEllipsis"/>
+        <Grid.Background>
+            <LinearGradientBrush StartPoint="0,0" EndPoint="1,1">
+                <GradientStop Color="#FF000814" Offset="0"/>
+                <GradientStop Color="#FF05242C" Offset="0.55"/>
+                <GradientStop Color="#FF063A3F" Offset="1"/>
+            </LinearGradientBrush>
+        </Grid.Background>
 
-            <!-- Progress row kept for compatibility but hidden -->
-            <StackPanel x:Name="ProgressRow" Orientation="Horizontal" VerticalAlignment="Center" Spacing="10" Visibility="Collapsed">
-                <TextBlock x:Name="ElapsedText" Text="0:00" Foreground="White" FontSize="12"/>
-                <Slider x:Name="ProgressSlider"
-                        Minimum="0"
-                        Maximum="100"
-                        Value="0"
-                        Width="420"
-                        PointerPressed="ProgressSlider_PointerPressed"
-                        PointerReleased="ProgressSlider_PointerReleased"
-                        PointerCaptureLost="ProgressSlider_PointerReleased"/>
-                <TextBlock x:Name="RemainingText" Text="-0:00" Foreground="White" FontSize="12"/>
-            </StackPanel>
+        <!-- Soft Zink colour bloom behind the glass card. -->
+        <Ellipse Width="330" Height="330" HorizontalAlignment="Right"
+                 VerticalAlignment="Top" Margin="0,-170,-70,0"
+                 IsHitTestVisible="False">
+            <Ellipse.Fill>
+                <RadialGradientBrush>
+                    <GradientStop Color="#4438FF66" Offset="0"/>
+                    <GradientStop Color="#0011D8E8" Offset="1"/>
+                </RadialGradientBrush>
+            </Ellipse.Fill>
+        </Ellipse>
 
-            <!-- Single-line timer -->
-            <TextBlock x:Name="TimerText"
-                       Text="0:00 / 0:00"
-                       Foreground="White"
-                       FontSize="12"
-                       Opacity="0.9"/>
+        <Grid RowSpacing="0">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="0"/>
+                <RowDefinition Height="*"/>
+            </Grid.RowDefinitions>
 
-            <!-- Controls -->
-            <StackPanel Orientation="Horizontal" Spacing="16" VerticalAlignment="Center">
-                <Button Click="Prev_Click">
-                    <FontIcon Glyph="&#xE892;" Foreground="White"/>
-                </Button>
-                <Button Click="PlayPause_Click">
-                    <StackPanel Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">
-                        <FontIcon x:Name="PlayPauseIcon" Glyph="&#xE768;" Foreground="White"/>
-                        <TextBlock x:Name="PlayPauseLabel" Text="Play" Foreground="White"/>
+            <!-- The code-behind registers this as the native WinUI move surface. -->
+            <Grid x:Name="DragRegion" Grid.RowSpan="2" Height="42"
+                  VerticalAlignment="Top" Background="Transparent"
+                  Canvas.ZIndex="10"/>
+
+            <Border Grid.RowSpan="2" Margin="0" Padding="18,18,18,10"
+                    CornerRadius="22" Background="#9A06151B"
+                    BorderBrush="#6611D8E8" BorderThickness="1">
+                <Grid ColumnSpacing="16">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="164"/>
+                        <ColumnDefinition Width="*"/>
+                    </Grid.ColumnDefinitions>
+
+                    <StackPanel Grid.ColumnSpan="2" Orientation="Horizontal"
+                                Spacing="5" HorizontalAlignment="Right"
+                                VerticalAlignment="Top" Canvas.ZIndex="1">
+                        <Ellipse Width="5" Height="5" Fill="#38FF66"/>
+                        <TextBlock Text="SPOTIFY" FontSize="10"
+                                   CharacterSpacing="100" Foreground="#AEE7FFF6"/>
                     </StackPanel>
-                </Button>
-                <Button Click="Next_Click">
-                    <FontIcon Glyph="&#xE893;" Foreground="White"/>
-                </Button>
 
-                <Button x:Name="LikeButton" Click="Like_Click" ToolTipService.ToolTip="Like">
-                    <StackPanel Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">
-                        <FontIcon x:Name="LikeIcon" Glyph="&#xEB52;" Foreground="White"/>
-                        <TextBlock x:Name="LikeLabel" Text="Like" Foreground="White"/>
-                    </StackPanel>
-                </Button>
+                    <!-- Artwork well -->
+                    <Grid Width="164" Height="164">
+                        <Border Margin="3,5,0,0" CornerRadius="21"
+                                Background="#5038FF66"/>
+                        <Border Margin="0,0,3,5" CornerRadius="20"
+                                Background="#FF04161A"
+                                BorderBrush="#7038FF66"
+                                BorderThickness="1">
+                            <Image x:Name="AlbumArtImage"
+                                   Stretch="UniformToFill"/>
+                        </Border>
+                        <Border Width="34" Height="20" CornerRadius="10"
+                                Margin="10" HorizontalAlignment="Left"
+                                VerticalAlignment="Bottom"
+                                Background="#C8000814"
+                                BorderBrush="#8038FF66"
+                                BorderThickness="1">
+                            <StackPanel Orientation="Horizontal"
+                                        HorizontalAlignment="Center"
+                                        VerticalAlignment="Center"
+                                        Spacing="2">
+                                <Rectangle Width="2" Height="5" RadiusX="1"
+                                           Fill="#38FF66"/>
+                                <Rectangle Width="2" Height="10" RadiusX="1"
+                                           Fill="#38FF66"/>
+                                <Rectangle Width="2" Height="7" RadiusX="1"
+                                           Fill="#38FF66"/>
+                            </StackPanel>
+                        </Border>
+                    </Grid>
 
-                <Button Click="Hide_Click">
-                    <FontIcon Glyph="&#xE8BB;" Foreground="White"/>
-                </Button>
-            </StackPanel>
-        </StackPanel>
+                    <!-- Metadata and transport -->
+                    <Grid Grid.Column="1">
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="*"/>
+                            <RowDefinition Height="Auto"/>
+                        </Grid.RowDefinitions>
 
-        <!-- ? Hidden WebView2 host so code-behind can reference SpotifyWebView -->
+                        <StackPanel VerticalAlignment="Center" Spacing="3">
+                            <TextBlock x:Name="TrackTitle" Text="Track"
+                                       FontSize="24" FontWeight="SemiBold"
+                                       Foreground="#FAFFFFFF"
+                                       TextTrimming="CharacterEllipsis"
+                                       MaxLines="1"/>
+                            <TextBlock x:Name="TrackArtist" Text="Artist"
+                                       FontSize="15" FontWeight="SemiBold"
+                                       Foreground="#D6E7FFF6"
+                                       TextTrimming="CharacterEllipsis"
+                                       MaxLines="1"/>
+                            <TextBlock x:Name="AlbumName" Text="Album"
+                                       FontSize="12" Foreground="#8EC1E3DD"
+                                       TextTrimming="CharacterEllipsis"
+                                       MaxLines="1"/>
+
+                            <!-- Retained for the existing seek code. -->
+                            <StackPanel x:Name="ProgressRow"
+                                        Orientation="Horizontal"
+                                        VerticalAlignment="Center"
+                                        Spacing="10"
+                                        Visibility="Collapsed">
+                                <TextBlock x:Name="ElapsedText" Text="0:00"
+                                           Foreground="#F4FFFFFF"
+                                           FontSize="12"/>
+                                <Slider x:Name="ProgressSlider"
+                                        Minimum="0" Maximum="100" Value="0"
+                                        Width="240"
+                                        PointerPressed="ProgressSlider_PointerPressed"
+                                        PointerReleased="ProgressSlider_PointerReleased"
+                                        PointerCaptureLost="ProgressSlider_PointerReleased"/>
+                                <TextBlock x:Name="RemainingText"
+                                           Text="-0:00"
+                                           Foreground="#F4FFFFFF"
+                                           FontSize="12"/>
+                            </StackPanel>
+
+                            <StackPanel Orientation="Horizontal"
+                                        Spacing="7" Margin="0,7,0,0">
+                                <Border Padding="9,4" CornerRadius="10"
+                                        Background="#3011D8E8"
+                                        BorderBrush="#6611D8E8"
+                                        BorderThickness="1">
+                                    <TextBlock x:Name="TimerText"
+                                               Text="0:00 / 0:00"
+                                               FontSize="11"
+                                               FontWeight="SemiBold"
+                                               Foreground="#EFFFFFFF"/>
+                                </Border>
+                                <Border Padding="8,4" CornerRadius="10"
+                                        Background="#2438FF66">
+                                    <TextBlock Text="ZINK GLASS"
+                                               FontSize="9"
+                                               CharacterSpacing="100"
+                                               Foreground="#B838FF66"/>
+                                </Border>
+                            </StackPanel>
+                        </StackPanel>
+
+                        <Grid Grid.Row="1" Margin="0,8,0,0">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="Auto"/>
+                                <ColumnDefinition Width="Auto"/>
+                                <ColumnDefinition Width="Auto"/>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="Auto"/>
+                                <ColumnDefinition Width="Auto"/>
+                                <ColumnDefinition Width="Auto"/>
+                            </Grid.ColumnDefinitions>
+
+                            <Button Grid.Column="0"
+                                    Style="{StaticResource TransportButtonStyle}"
+                                    Click="Prev_Click"
+                                    ToolTipService.ToolTip="Previous">
+                                <FontIcon Glyph="&#xE892;" FontSize="15"/>
+                            </Button>
+
+                            <Button Grid.Column="1" Margin="7,0,0,0"
+                                    Height="38" MinWidth="92"
+                                    Padding="14,0" CornerRadius="12"
+                                    Background="#E838FF66"
+                                    BorderBrush="#FF7BFF88"
+                                    BorderThickness="1"
+                                    Foreground="#FF000814"
+                                    Click="PlayPause_Click">
+                                <StackPanel Orientation="Horizontal"
+                                            Spacing="7">
+                                    <FontIcon x:Name="PlayPauseIcon"
+                                              Glyph="&#xE768;"
+                                              FontSize="15"
+                                              Foreground="#FF000814"/>
+                                    <TextBlock x:Name="PlayPauseLabel"
+                                               Text="Play"
+                                               FontWeight="SemiBold"
+                                               Foreground="#FF000814"/>
+                                </StackPanel>
+                            </Button>
+
+                            <Button Grid.Column="2" Margin="7,0,0,0"
+                                    Style="{StaticResource TransportButtonStyle}"
+                                    Click="Next_Click"
+                                    ToolTipService.ToolTip="Next">
+                                <FontIcon Glyph="&#xE893;" FontSize="15"/>
+                            </Button>
+
+                            <Button x:Name="LikeButton" Grid.Column="4"
+                                    Style="{StaticResource ActionButtonStyle}"
+                                    Click="Like_Click"
+                                    ToolTipService.ToolTip="Like">
+                                <StackPanel Orientation="Horizontal"
+                                            Spacing="6">
+                                    <FontIcon x:Name="LikeIcon"
+                                              Glyph="&#xEB52;"
+                                              FontSize="15"
+                                              Foreground="#FF38FF66"/>
+                                    <TextBlock x:Name="LikeLabel"
+                                               Text="Like"
+                                               FontWeight="SemiBold"
+                                               Foreground="#F7FFFFFF"/>
+                                </StackPanel>
+                            </Button>
+
+                            <Button x:Name="PinButton" Grid.Column="5" Margin="7,0,0,0"
+                                    Style="{StaticResource TransportButtonStyle}"
+                                    Click="Pin_Click"
+                                    ToolTipService.ToolTip="Unpin widget">
+                                <FontIcon Glyph="&#xE718;" FontSize="15"/>
+                            </Button>
+
+                            <Button Grid.Column="6" Margin="7,0,0,0"
+                                    Style="{StaticResource TransportButtonStyle}"
+                                    Click="Hide_Click"
+                                    ToolTipService.ToolTip="Close widget">
+                                <FontIcon Glyph="&#xE8BB;" FontSize="15"/>
+                            </Button>
+                        </Grid>
+                    </Grid>
+                </Grid>
+            </Border>
+        </Grid>
+
         <controls:WebView2 x:Name="SpotifyWebView"
                            Visibility="Collapsed"
-                           IsHitTestVisible="False" />
+                           IsHitTestVisible="False"/>
     </Grid>
 </Window>

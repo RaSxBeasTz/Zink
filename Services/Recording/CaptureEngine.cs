@@ -36,6 +36,8 @@ namespace Zink.Services.Recording
         private D3D11Device? _device;
         private DxgiOutputDuplication? _duplication;
         private D3D11Texture2D? _stagingTexture;
+        private D3D11Texture2D? _lastGpuFrameTexture;
+        private KeyedMutex? _lastGpuFrameMutex;
         private CancellationTokenSource? _cts;
         private Task? _captureTask;
         private Stopwatch? _stopwatch;
@@ -44,13 +46,17 @@ namespace Zink.Services.Recording
         private long _frameCount;
         private int _width;
         private int _height;
+        private DxgiFormat _captureFormat = DxgiFormat.B8G8R8A8_UNorm;
+        private bool _hdrCapture;
         private byte[]? _lastFrameBytes;
+        private bool _loggedFirstCapturedSurface;
 
         // Fixed pacing is much steadier for replay segments than "capture whenever + Task.Delay jitter".
         private uint _targetFps = 120;
         private TimeSpan _targetFrameInterval = TimeSpan.FromMilliseconds(1000.0 / 120);
 
         public event EventHandler<VideoFramePacket>? VideoFrameArrived;
+        internal event EventHandler<GpuVideoFramePacket>? GpuFrameArrived;
 
         private const int MONITORINFOF_PRIMARY = 0x00000001;
         private const int MONITOR_DEFAULTTOPRIMARY = 1;
@@ -101,7 +107,8 @@ namespace Zink.Services.Recording
                 _targetFps = Math.Clamp(options?.FrameRate ?? 60, 1u, 240u);
                 _frameCount = 0;
                 InitializeDuplication();
-                ApplyResolutionAwareFrameRate();
+                if (options?.AllowHighFrameRateCapture != true)
+                    ApplyResolutionAwareFrameRate();
                 _targetFrameInterval = TimeSpan.FromMilliseconds(1000.0 / _targetFps);
 
                 _cts = new CancellationTokenSource();
@@ -111,11 +118,14 @@ namespace Zink.Services.Recording
                 _isRunning = true;
 
                 await RecorderLog.InfoAsync(nameof(CaptureEngine),
-                    $"DXGI duplication capture started. Size={_width}x{_height}, TargetFps={_targetFps}");
+                    $"DXGI duplication capture started. Size={_width}x{_height}, TargetFps={_targetFps}, Format={_captureFormat}, HDR={_hdrCapture}");
+                await GameReplayLog.WriteAsync(nameof(CaptureEngine),
+                    $"Capture started. Size={_width}x{_height}, TargetFps={_targetFps}, Format={_captureFormat}, HDR={_hdrCapture}, DeviceFlags=BGRA|VideoSupport");
             }
             catch (Exception ex)
             {
                 await RecorderLog.ErrorAsync(nameof(CaptureEngine), ex, "StartAsync failed");
+                await GameReplayLog.WriteAsync(nameof(CaptureEngine), $"Start failed: {ex}");
                 throw;
             }
         }
@@ -185,10 +195,59 @@ namespace Zink.Services.Recording
             if (chosenAdapter == null || chosenOutput == null)
                 throw new InvalidOperationException("Primary monitor output was not found for DXGI duplication.");
 
-            _device = new D3D11Device(chosenAdapter);
-            using var output1 = chosenOutput.QueryInterface<DxgiOutput1>();
+            _device = new D3D11Device(
+                chosenAdapter,
+                DeviceCreationFlags.BgraSupport | DeviceCreationFlags.VideoSupport);
+            AdapterDescription1 selectedAdapterDescription = chosenAdapter.Description1;
+            var selectedOutputDescription = chosenOutput.Description;
+            try
+            {
+                using var output6 = chosenOutput.QueryInterface<Output6>();
+                OutputDescription1 outputDescription = output6.Description1;
+                _hdrCapture = outputDescription.BitsPerColor >= 10 &&
+                    outputDescription.ColorSpace == ColorSpaceType.RgbFullG2084NoneP2020;
+            }
+            catch
+            {
+                _hdrCapture = false;
+            }
 
-            _duplication = output1.DuplicateOutput(_device);
+            _ = GameReplayLog.WriteAsync(nameof(CaptureEngine),
+                $"Capture adapter selected. Adapter='{selectedAdapterDescription.Description?.Trim()}', Vendor=0x{selectedAdapterDescription.VendorId:X4}, DedicatedVideoMemory={selectedAdapterDescription.DedicatedVideoMemory}, Output='{selectedOutputDescription.DeviceName}', Bounds={selectedOutputDescription.DesktopBounds.Left},{selectedOutputDescription.DesktopBounds.Top}-{selectedOutputDescription.DesktopBounds.Right},{selectedOutputDescription.DesktopBounds.Bottom}, HDR={_hdrCapture}");
+
+            // Preserve the HDR desktop as linear FP16. Replay converts this with
+            // Zink's shader-based P010 path, avoiding the D3D11 video processor
+            // that rejects FP16 input on some adapters. Non-HDR displays continue
+            // through the established BGRA SDR capture path.
+            // Preserve the HDR desktop as FP16 scRGB. HardwareReplayBuffer applies
+            // Zink's shader conversion to P010 at the selected output resolution;
+            // NVIDIA's HEVC MFT uses the existing system-memory P010 fallback when
+            // it cannot accept a P010 DXGI surface directly.
+            bool useNativeFp16ReplayCapture = _hdrCapture;
+            if (_hdrCapture && useNativeFp16ReplayCapture)
+            {
+                using var output5 = chosenOutput.QueryInterface<Output5>();
+                var formats = new[] { DxgiFormat.R16G16B16A16_Float };
+                _duplication = output5.DuplicateOutput1(_device, 0, formats.Length, formats);
+                _captureFormat = DxgiFormat.R16G16B16A16_Float;
+            }
+            else
+            {
+                using var output1 = chosenOutput.QueryInterface<DxgiOutput1>();
+                _duplication = output1.DuplicateOutput(_device);
+                _captureFormat = DxgiFormat.B8G8R8A8_UNorm;
+                if (_hdrCapture)
+                {
+                    _ = RecordingDiagnostics.WriteHdrAsync(
+                        "NativeFp16ToP010ConversionUnavailable",
+                        new
+                        {
+                            GenuineHdr = false,
+                            CaptureFormat = _captureFormat.ToString(),
+                            Reason = "Intel D3D11 video processor rejected FP16 input with E_INVALIDARG; corrupt green HDR output was blocked."
+                        });
+                }
+            }
 
             var outputDesc = chosenOutput.Description;
             _width = outputDesc.DesktopBounds.Right - outputDesc.DesktopBounds.Left;
@@ -200,13 +259,31 @@ namespace Zink.Services.Recording
                 Height = _height,
                 MipLevels = 1,
                 ArraySize = 1,
-                Format = DxgiFormat.B8G8R8A8_UNorm,
+                Format = _captureFormat,
                 SampleDescription = new DxgiSampleDescription(1, 0),
                 Usage = D3D11Usage.Staging,
                 BindFlags = D3D11BindFlags.None,
                 CpuAccessFlags = D3D11CpuAccessFlags.Read,
                 OptionFlags = D3D11ResourceOptionFlags.None
             });
+
+            _lastGpuFrameTexture = new D3D11Texture2D(_device, new Texture2DDescription
+            {
+                Width = _width,
+                Height = _height,
+                MipLevels = 1,
+                ArraySize = 1,
+                Format = _captureFormat,
+                SampleDescription = new DxgiSampleDescription(1, 0),
+                Usage = D3D11Usage.Default,
+                BindFlags = D3D11BindFlags.ShaderResource | D3D11BindFlags.RenderTarget,
+                CpuAccessFlags = D3D11CpuAccessFlags.None,
+                // Capture and encoding run synchronously on this D3D11 device.
+                // A shared keyed-mutex texture was unnecessary here and could
+                // hand the converter an uninitialised/black shared surface.
+                OptionFlags = D3D11ResourceOptionFlags.None
+            });
+            _lastGpuFrameMutex = null;
 
             chosenOutput.Dispose();
             chosenAdapter.Dispose();
@@ -217,20 +294,10 @@ namespace Zink.Services.Recording
             if (_width <= 0 || _height <= 0)
                 return;
 
-            long pixels = (long)_width * _height;
-
-            if (pixels >= 3840L * 2160L)
-            {
-                _targetFps = Math.Min(_targetFps, 30);
-            }
-            else if (pixels >= 2560L * 1440L)
-            {
-                _targetFps = Math.Min(_targetFps, 45);
-            }
-            else
-            {
-                _targetFps = Math.Min(_targetFps, 60);
-            }
+            // Encoding uses a smaller hardware-selected output surface. Capping
+            // cadence from the 3840x2400 capture size forced a requested 60 fps
+            // replay to approximately 30 fps even while encoding only 1152x720.
+            _targetFps = Math.Min(_targetFps, 60);
         }
 
         private static string? GetPrimaryMonitorDeviceName()
@@ -277,7 +344,9 @@ namespace Zink.Services.Recording
                     }
 
                     TimeSpan packetTimestamp = now;
-                    nextFrameDue = now + _targetFrameInterval;
+                    nextFrameDue += _targetFrameInterval;
+                    if (nextFrameDue < now - _targetFrameInterval)
+                        nextFrameDue = now + _targetFrameInterval;
 
                     DxgiOutputDuplicateFrameInformation frameInfo;
                     int acquireTimeoutMs = _targetFps > 60 ? 0 : 8;
@@ -288,6 +357,7 @@ namespace Zink.Services.Recording
 
                     if (result == DxgiResultCode.WaitTimeout || desktopResource == null)
                     {
+                        EmitDuplicateGpuFrame(packetTimestamp);
                         EmitDuplicateFrame(packetTimestamp);
                         continue;
                     }
@@ -296,6 +366,31 @@ namespace Zink.Services.Recording
                     frameAcquired = true;
 
                     using var desktopImage = desktopResource.QueryInterface<D3D11Texture2D>();
+                    if (!_loggedFirstCapturedSurface)
+                    {
+                        _loggedFirstCapturedSurface = true;
+                        var desktopDescription = desktopImage.Description;
+                        _ = GameReplayLog.WriteAsync(nameof(CaptureEngine),
+                            $"First desktop surface acquired. Size={desktopDescription.Width}x{desktopDescription.Height}, Format={desktopDescription.Format}, Bind={desktopDescription.BindFlags}, Usage={desktopDescription.Usage}, Options={desktopDescription.OptionFlags}, TargetFps={_targetFps}");
+                    }
+                    if (_lastGpuFrameTexture != null)
+                    {
+                        _lastGpuFrameMutex?.Acquire(0, -1).CheckError();
+                        try
+                        {
+                            _device.ImmediateContext.CopyResource(desktopImage, _lastGpuFrameTexture);
+                            _device.ImmediateContext.Flush();
+                        }
+                        finally
+                        {
+                            _lastGpuFrameMutex?.Release(0);
+                        }
+                        GpuFrameArrived?.Invoke(this, new GpuVideoFramePacket(_lastGpuFrameTexture, packetTimestamp, _width, _height, format: _captureFormat));
+                    }
+
+                    if (VideoFrameArrived == null)
+                        continue;
+
                     _device.ImmediateContext.CopyResource(desktopImage, _stagingTexture);
 
                     var dataBox = _device.ImmediateContext.MapSubresource(
@@ -350,6 +445,7 @@ namespace Zink.Services.Recording
                 catch (Exception ex)
                 {
                     await RecorderLog.ErrorAsync(nameof(CaptureEngine), ex, "CaptureLoop failed");
+                    await GameReplayLog.WriteAsync(nameof(CaptureEngine), $"Capture loop failed: {ex}");
 
                     try
                     {
@@ -395,6 +491,21 @@ namespace Zink.Services.Recording
             VideoFrameArrived?.Invoke(this, packet);
         }
 
+        private void EmitDuplicateGpuFrame(TimeSpan timestamp)
+        {
+            if (_lastGpuFrameTexture == null || GpuFrameArrived == null)
+                return;
+
+            _frameCount++;
+            GpuFrameArrived.Invoke(this, new GpuVideoFramePacket(
+                _lastGpuFrameTexture,
+                timestamp,
+                _width,
+                _height,
+                isDuplicate: true,
+                format: _captureFormat));
+        }
+
         public async Task StopAsync()
         {
             try
@@ -422,6 +533,11 @@ namespace Zink.Services.Recording
 
                 _stagingTexture?.Dispose();
                 _stagingTexture = null;
+
+                _lastGpuFrameMutex?.Dispose();
+                _lastGpuFrameMutex = null;
+                _lastGpuFrameTexture?.Dispose();
+                _lastGpuFrameTexture = null;
 
                 _device?.Dispose();
                 _device = null;

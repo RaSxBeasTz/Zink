@@ -72,12 +72,13 @@ namespace Zink
         private bool _windowIsActivated = false;
 
         private bool _incomingCallDialogShowing = false;
-        private bool _zinkSocialLockedDialogShowing = false;
         private bool _realtimeConnectAttempted = false;
         private bool _startupOverlayHidden = false;
         private bool _initialNavigationStarted = false;
         private HotkeyService? _hotkeyService;
         private readonly HashSet<WebView2> _discordPresenceWebViews = new();
+        private Microsoft.UI.Dispatching.DispatcherQueueTimer? _localizationPopupTimer;
+        private XboxAchievementNotificationService? _xboxAchievementNotificationService;
 
         public MainWindow()
         {
@@ -103,6 +104,16 @@ namespace Zink
             ContentFrame.Navigating += ContentFrame_Navigating;
             ContentFrame.Navigated += ContentFrame_Navigated;
             RootGrid.Loaded += RootGrid_Loaded_StartInitialNavigation;
+            RootGrid.Loaded += (_, _) => LocalizationService.Apply(RootGrid);
+            RootGrid.Loaded += RootGrid_Loaded_StartXboxAchievementListener;
+            LocalizationService.LanguageChanged += LocalizationService_LanguageChanged;
+            _localizationPopupTimer = DispatcherQueue.CreateTimer();
+            _localizationPopupTimer.Interval = TimeSpan.FromMilliseconds(350);
+            _localizationPopupTimer.Tick += (_, _) =>
+            {
+                LocalizationService.ApplyOpenPopups(RootGrid.XamlRoot);
+            };
+            _localizationPopupTimer.Start();
 
             SocialManager.Instance.Realtime.IncomingCall -= Realtime_IncomingCall_Global;
             SocialManager.Instance.Realtime.IncomingCall += Realtime_IncomingCall_Global;
@@ -112,6 +123,18 @@ namespace Zink
             UpdateVideoLibrarySidebarBusyIndicator(VideoLibraryService.Current.IsBusy);
 
             _ = EnsureRealtimeConnectedIfLoggedInAsync();
+        }
+
+        private async void RootGrid_Loaded_StartXboxAchievementListener(object sender, RoutedEventArgs e)
+        {
+            RootGrid.Loaded -= RootGrid_Loaded_StartXboxAchievementListener;
+            _xboxAchievementNotificationService = new XboxAchievementNotificationService(DispatcherQueue);
+            await _xboxAchievementNotificationService.StartAsync();
+        }
+
+        private void LocalizationService_LanguageChanged(object? sender, EventArgs e)
+        {
+            DispatcherQueue.TryEnqueue(() => LocalizationService.Apply(RootGrid));
         }
 
         private void VideoLibraryService_BusyChanged(object? sender, EventArgs e)
@@ -531,11 +554,22 @@ namespace Zink
 
             try
             {
-                RootGrid.RequestedTheme = theme;
-                SidebarNav.RequestedTheme = theme;
-                ContentFrame.RequestedTheme = theme;
+                if (RootGrid != null)
+                {
+                    RootGrid.RequestedTheme = theme;
+                }
 
-                if (ContentFrame.Content is FrameworkElement content)
+                if (SidebarNav != null)
+                {
+                    SidebarNav.RequestedTheme = theme;
+                }
+
+                if (ContentFrame != null)
+                {
+                    ContentFrame.RequestedTheme = theme;
+                }
+
+                if (ContentFrame?.Content is FrameworkElement content)
                 {
                     content.RequestedTheme = theme;
                 }
@@ -721,6 +755,7 @@ namespace Zink
             try
             {
                 SuppressInitialNavigation = true;
+                MaximizeWindow();
                 DiagnosticLogService.WriteLine("File activation navigation started for " + pageType.Name + ".");
                 ContentFrame.Navigate(pageType, parameter);
                 ClearStartupOverlayImmediately();
@@ -903,6 +938,13 @@ namespace Zink
             SetSidebarColumnForPaneState(!_isSidebarCompact);
         }
 
+        public void CollapseSidebar()
+        {
+            _isSidebarCompact = true;
+            SidebarNav.IsPaneOpen = true;
+            SetSidebarColumnForPaneState(false);
+        }
+
         private void SetSidebarColumnForPaneState(bool isOpen)
         {
             try
@@ -1036,13 +1078,6 @@ namespace Zink
             if (args.SelectedItem is not NavigationViewItem item)
                 return;
 
-            if (item.Tag is string selectedTag && IsZinkSocialLockedTag(selectedTag))
-            {
-                SidebarNav.SelectedItem = null;
-                _ = ShowZinkSocialLockedDialogAsync();
-                return;
-            }
-
             if ((item.Tag as string) == "ZinkConnect" && ZinkConnectBrowserWindow.LaunchBrowserOnlyEnabled)
             {
                 ZinkConnectBrowserWindow.ShowOrActivate();
@@ -1056,6 +1091,7 @@ namespace Zink
                 "Home" => typeof(HomeDashboardPage),
                 "ZinkConnect" => typeof(ZinkConnectPage),
                 "ZinkVpn" => typeof(ZinkVpnPage),
+                "Tools" => typeof(ToolsPage),
                 "MusicPlayer" => typeof(MusicPlayerPage),
                 "MusicLibrary" => typeof(MusicLibraryPage),
                 "YouTubeMusic" => typeof(YouTubeMusicPage),
@@ -1135,41 +1171,6 @@ namespace Zink
             }
         }
 
-        private void ZinkSocialLocked_Tapped(object sender, TappedRoutedEventArgs e)
-        {
-            _ = ShowZinkSocialLockedDialogAsync();
-        }
-
-        private async Task ShowZinkSocialLockedDialogAsync()
-        {
-            if (_zinkSocialLockedDialogShowing)
-                return;
-
-            _zinkSocialLockedDialogShowing = true;
-
-            try
-            {
-                var dialog = new ContentDialog
-                {
-                    Title = "Zink Social is coming soon",
-                    Content = "This feature is still in development, keep updating the app and check out the about section for when the feature goes live.",
-                    CloseButtonText = "OK",
-                    XamlRoot = RootGrid.XamlRoot
-                };
-
-                await dialog.ShowAsync();
-            }
-            finally
-            {
-                _zinkSocialLockedDialogShowing = false;
-            }
-        }
-
-        private static bool IsZinkSocialLockedTag(string tag)
-        {
-            return tag is "ZinkSocialLocked" or "SocialLogin" or "SocialRegister" or "SocialDeveloperSettings" or "SocialFriends" or "SocialMessages" or "SocialFriendRequests" or "SocialProfile" or "SocialCall";
-        }
-
         private bool TrySetDesktopAcrylicBackdrop()
         {
             if (!DesktopAcrylicController.IsSupported())
@@ -1211,6 +1212,9 @@ namespace Zink
 
             _hotkeyService?.Dispose();
             _hotkeyService = null;
+
+            _xboxAchievementNotificationService?.Dispose();
+            _xboxAchievementNotificationService = null;
 
             if (_acrylicController != null)
             {
@@ -1410,6 +1414,7 @@ namespace Zink
                 {
                     content.RequestedTheme = _currentAppTheme;
                     ApplyGlassTintToElementTree(content, _currentGlassTint);
+                    LocalizationService.Apply(content);
 
                     if (content is not SettingsPage)
                     {
@@ -1906,12 +1911,23 @@ namespace Zink
         {
             if (ContentFrame.Content is DependencyObject outgoingPage)
             {
+                // Keep Spotify's authenticated WebView alive while using its widget.
+                // Closing it here stops playback and destroys the controller target.
+                if (outgoingPage is SpotifyLoginPage)
+                    return;
+
                 CloseWebViews(outgoingPage);
             }
         }
 
         private void CloseWebViews(DependencyObject root)
         {
+            if (root is YouTubePage youtubePage)
+            {
+                youtubePage.StopWebView();
+                return;
+            }
+
             if (root is WebView2 webView)
             {
                 _discordPresenceWebViews.Remove(webView);
@@ -1998,42 +2014,42 @@ namespace Zink
                 switch (tag)
                 {
                     case "Home":
-                        DiscordPresenceService.Instance.SetAppPresence("Checking the home dashboard");
+                        DiscordPresenceService.Instance.SetAppPresence("Using the home dashboard");
                         break;
 
                     case "ZinkConnect":
-                        DiscordPresenceService.Instance.SetPagePresence(displayName, "Connect", "Connecting devices with Zink Connect");
+                        DiscordPresenceService.Instance.SetPagePresence(displayName, "Connect", "Using the Zink Connect browser");
                         break;
                     case "ZinkVpn":
                         DiscordPresenceService.Instance.SetPagePresence(displayName, "VPN", "Using Zink VPN");
                         break;
 
                     case "MusicPlayer":
-                        DiscordPresenceService.Instance.SetPagePresence(displayName, "Music", "Choosing music on Zink Music");
+                        DiscordPresenceService.Instance.SetPagePresence(displayName, "Music", "Playing music in Zink");
                         break;
                     case "MusicLibrary":
-                        DiscordPresenceService.Instance.SetPagePresence(displayName, "Music", "Browsing their music library");
+                        DiscordPresenceService.Instance.SetPagePresence(displayName, "Music", "Using the music library");
                         break;
                     case "YouTubeMusic":
-                        DiscordPresenceService.Instance.SetWebPresence(displayName, "Music", "Listening to YouTube Music");
+                        DiscordPresenceService.Instance.SetWebPresence(displayName, "Music", "Playing YouTube Music");
                         break;
                     case "AmazonMusic":
-                        DiscordPresenceService.Instance.SetWebPresence(displayName, "Music", "Listening to Amazon Music");
+                        DiscordPresenceService.Instance.SetWebPresence(displayName, "Music", "Playing Amazon Music");
                         break;
                     case "Spotify":
-                        DiscordPresenceService.Instance.SetWebPresence(displayName, "Music", "Signing in to Spotify");
+                        DiscordPresenceService.Instance.SetWebPresence(displayName, "Music", "Playing Spotify");
                         break;
                     case "SpotifyWidget":
                         DiscordPresenceService.Instance.SetPagePresence(displayName, "Music", "Using the Spotify widget");
                         break;
                     case "Radio":
-                        DiscordPresenceService.Instance.SetPagePresence(displayName, "Radio", "Choosing a radio station");
+                        DiscordPresenceService.Instance.SetPagePresence(displayName, "Radio", "Playing Zink Radio");
                         break;
                     case "RadioDiscovery":
                         DiscordPresenceService.Instance.SetPagePresence(displayName, "Radio", "Discovering radio stations");
                         break;
                     case "LikedRadioSongs":
-                        DiscordPresenceService.Instance.SetPagePresence(displayName, "Radio", "Checking liked radio songs");
+                        DiscordPresenceService.Instance.SetPagePresence(displayName, "Radio", "Viewing liked radio songs");
                         break;
                     case "RadioWidget":
                         DiscordPresenceService.Instance.SetPagePresence(displayName, "Radio", "Using the radio widget");
@@ -2046,10 +2062,13 @@ namespace Zink
                         break;
 
                     case "VideoPlayer":
-                        DiscordPresenceService.Instance.SetPagePresence(displayName, "Video", "Watching videos on Zink");
+                        DiscordPresenceService.Instance.SetPagePresence(displayName, "Video", "Watching a video");
                         break;
                     case "VideoLibrary":
-                        DiscordPresenceService.Instance.SetPagePresence(displayName, "Video", "Browsing their video library");
+                        DiscordPresenceService.Instance.SetPagePresence(displayName, "Video", "Using the video library");
+                        break;
+                    case "DuplicateVideoSearcher":
+                        DiscordPresenceService.Instance.SetPagePresence(displayName, "Video", "Finding duplicate videos");
                         break;
                     case "Netflix":
                     case "PrimeVideo":
@@ -2092,26 +2111,26 @@ namespace Zink
                         DiscordPresenceService.Instance.SetPagePresence(displayName, "Recording", "Setting up a screen recording");
                         break;
                     case "RecordingsLibrary":
-                        DiscordPresenceService.Instance.SetPagePresence(displayName, "Recording", "Browsing saved recordings");
+                        DiscordPresenceService.Instance.SetPagePresence(displayName, "Recording", "Viewing saved recordings");
                         break;
                     case "FpsRecorder":
-                        DiscordPresenceService.Instance.SetPagePresence(displayName, "Gaming", "Monitoring FPS and game clips");
+                        DiscordPresenceService.Instance.SetPagePresence(displayName, "Gaming", "Recording FPS and game clips");
                         break;
 
                     case "Discord":
-                        DiscordPresenceService.Instance.SetWebPresence(displayName, "Social", "Chatting on Discord");
+                        DiscordPresenceService.Instance.SetWebPresence(displayName, "Social", "Using Discord");
                         break;
                     case "TikTok":
-                        DiscordPresenceService.Instance.SetWebPresence(displayName, "Social", "Browsing TikTok");
+                        DiscordPresenceService.Instance.SetWebPresence(displayName, "Social", "Watching TikTok");
                         break;
                     case "Instagram":
-                        DiscordPresenceService.Instance.SetWebPresence(displayName, "Social", "Browsing Instagram");
+                        DiscordPresenceService.Instance.SetWebPresence(displayName, "Social", "Using Instagram");
                         break;
                     case "X":
-                        DiscordPresenceService.Instance.SetWebPresence(displayName, "Social", "Browsing X");
+                        DiscordPresenceService.Instance.SetWebPresence(displayName, "Social", "Using X");
                         break;
                     case "Facebook":
-                        DiscordPresenceService.Instance.SetWebPresence(displayName, "Social", "Browsing Facebook");
+                        DiscordPresenceService.Instance.SetWebPresence(displayName, "Social", "Using Facebook");
                         break;
                     case "Telegram":
                         DiscordPresenceService.Instance.SetWebPresence(displayName, "Social", "Messaging on Telegram");
@@ -2123,25 +2142,25 @@ namespace Zink
                         DiscordPresenceService.Instance.SetWebPresence(displayName, "Social", "Messaging on Messenger");
                         break;
                     case "LinkedIn":
-                        DiscordPresenceService.Instance.SetWebPresence(displayName, "Social", "Browsing LinkedIn");
+                        DiscordPresenceService.Instance.SetWebPresence(displayName, "Social", "Using LinkedIn");
                         break;
                     case "Threads":
-                        DiscordPresenceService.Instance.SetWebPresence(displayName, "Social", "Browsing Threads");
+                        DiscordPresenceService.Instance.SetWebPresence(displayName, "Social", "Using Threads");
                         break;
                     case "Bluesky":
-                        DiscordPresenceService.Instance.SetWebPresence(displayName, "Social", "Browsing Bluesky");
+                        DiscordPresenceService.Instance.SetWebPresence(displayName, "Social", "Using Bluesky");
                         break;
                     case "Mastodon":
-                        DiscordPresenceService.Instance.SetWebPresence(displayName, "Social", "Browsing Mastodon");
+                        DiscordPresenceService.Instance.SetWebPresence(displayName, "Social", "Using Mastodon");
                         break;
                     case "Pinterest":
-                        DiscordPresenceService.Instance.SetWebPresence(displayName, "Social", "Browsing Pinterest");
+                        DiscordPresenceService.Instance.SetWebPresence(displayName, "Social", "Using Pinterest");
                         break;
                     case "Tumblr":
-                        DiscordPresenceService.Instance.SetWebPresence(displayName, "Social", "Browsing Tumblr");
+                        DiscordPresenceService.Instance.SetWebPresence(displayName, "Social", "Using Tumblr");
                         break;
                     case "Reddit":
-                        DiscordPresenceService.Instance.SetWebPresence(displayName, "Social", "Browsing Reddit");
+                        DiscordPresenceService.Instance.SetWebPresence(displayName, "Social", "Using Reddit");
                         break;
                     case "SocialLogin":
                         DiscordPresenceService.Instance.SetPagePresence(displayName, "Zink Social", "Signing in to Zink Social");
@@ -2316,13 +2335,13 @@ namespace Zink
                         DiscordPresenceService.Instance.SetWebPresence(displayName, "Streaming", $"Watching {title}");
                         break;
                     case "YouTubeMusic":
-                        DiscordPresenceService.Instance.SetWebPresence(displayName, "Music", $"Listening to {title}");
+                        DiscordPresenceService.Instance.SetWebPresence(displayName, "Music", $"Playing {title}");
                         break;
                     case "AmazonMusic":
-                        DiscordPresenceService.Instance.SetWebPresence(displayName, "Music", $"Listening to {title}");
+                        DiscordPresenceService.Instance.SetWebPresence(displayName, "Music", $"Playing {title}");
                         break;
                     case "Spotify":
-                        DiscordPresenceService.Instance.SetWebPresence(displayName, "Music", $"Listening to {title}");
+                        DiscordPresenceService.Instance.SetWebPresence(displayName, "Music", $"Playing {title}");
                         break;
                     case "Netflix":
                     case "PrimeVideo":
@@ -2450,11 +2469,15 @@ namespace Zink
             return tag switch
             {
                 "Home" => "Home dashboard",
+                "ZinkConnect" => "Zink Connect",
                 "ZinkVpn" => "Zink VPN",
                 "MusicPlayer" => "Music player",
                 "MusicLibrary" => "Music library",
                 "YouTubeMusic" => "YouTube Music",
                 "AmazonMusic" => "Amazon Music",
+                "RadioDiscovery" => "Radio Discovery",
+                "Equalizer" => "Equalizer",
+                "Visualizer" => "Visualizer",
                 "VideoPlayer" => "Video player",
                 "VideoLibrary" => "Video library",
                 "DuplicateVideoSearcher" => "Duplicate video searcher",
@@ -2472,6 +2495,7 @@ namespace Zink
                 "ParamountPlus" => "Paramount+",
                 "NowTV" => "NOW",
                 "BBCiPlayer" => "BBC iPlayer",
+                "My5" => "My5",
                 "SpotifyWidget" => "Spotify widget",
                 "LikedRadioSongs" => "Liked radio songs",
                 "RadioWidget" => "Radio widget",
@@ -2485,10 +2509,16 @@ namespace Zink
                 "SocialCall" => "Zink Call",
                 "GeForceNow" => "GeForce NOW",
                 "AmazonLuna" => "Amazon Luna",
+                "Boosteroid" => "Boosteroid",
                 "ShadowPC" => "Shadow PC",
+                "FeatureTour" => "Try Zink",
+                "WidgetHub" => "Widget Hub",
+                "Notifications" => "Notifications",
                 "PrivacyPolicy" => "Privacy policy",
                 "LeaveReview" => "Leave a review",
                 "AppCustomization" => "App customization",
+                "Settings" => "Settings",
+                "About" => "About",
                 _ => MakeFriendlyTitle(tag)
             };
         }
@@ -2528,6 +2558,7 @@ namespace Zink
                 if (t == typeof(HomeDashboardPage)) return "Home";
                 if (t == typeof(ZinkConnectPage)) return "ZinkConnect";
                 if (t == typeof(ZinkVpnPage)) return "ZinkVpn";
+                if (t == typeof(ToolsPage)) return "Tools";
                 if (t == typeof(MusicPlayerPage)) return "MusicPlayer";
                 if (t == typeof(MusicLibraryPage)) return "MusicLibrary";
                 if (t == typeof(YouTubeMusicPage)) return "YouTubeMusic";

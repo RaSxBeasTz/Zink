@@ -1,0 +1,243 @@
+<Page
+    x:Class="Zink.Pages.ToolsPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    mc:Ignorable="d"
+    Background="Transparent">
+
+    <Page.Resources>
+        <AcrylicBrush x:Key="Glass" TintColor="#07141D" TintOpacity="0.78" FallbackColor="#F007141D"/>
+        <AcrylicBrush x:Key="GlassCard" TintColor="#17333F" TintOpacity="0.55" FallbackColor="#E817333F"/>
+        <Style x:Key="ToolButton" TargetType="Button">
+            <Setter Property="MinHeight" Value="48"/>
+            <Setter Property="Padding" Value="18,0"/>
+            <Setter Property="CornerRadius" Value="12"/>
+            <Setter Property="Background" Value="#2638FF66"/>
+            <Setter Property="Foreground" Value="White"/>
+            <Setter Property="BorderBrush" Value="#7038FF66"/>
+            <Setter Property="BorderThickness" Value="1"/>
+        </Style>
+    </Page.Resources>
+
+    <Grid Background="{StaticResource Glass}">
+        <ScrollViewer>
+            <StackPanel Padding="28" Spacing="22" MaxWidth="1160" HorizontalAlignment="Center">
+                <Grid>
+                    <StackPanel Spacing="5">
+                        <TextBlock Text="Zink Capture" FontSize="32" FontWeight="SemiBold" Foreground="White"/>
+                        <TextBlock Text="Select any area of your desktop for a 4K screenshot or recording."
+                                   FontSize="15" Foreground="#BFFFFFFF"/>
+                    </StackPanel>
+                    <Border HorizontalAlignment="Right" VerticalAlignment="Center"
+                            Padding="12,6" CornerRadius="999" Background="#2438FF66"
+                            BorderBrush="#7038FF66" BorderThickness="1">
+                        <TextBlock Text="4K UHD • 3840 × 2160" Foreground="#38FF66" FontWeight="SemiBold"/>
+                    </Border>
+                </Grid>
+
+                <Border Padding="20" CornerRadius="20" Background="{StaticResource GlassCard}"
+                        BorderBrush="#34FFFFFF" BorderThickness="1">
+                    <StackPanel Spacing="16">
+                        <Grid ColumnSpacing="14">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="Auto"/>
+                            </Grid.ColumnDefinitions>
+
+                            <Button Style="{StaticResource ToolButton}" Click="ScreenshotAreaButton_Click">
+                                <StackPanel Orientation="Horizontal" Spacing="10">
+                                    <FontIcon Glyph="&#xE91B;" FontFamily="Segoe Fluent Icons"/>
+                                    <TextBlock Text="Screenshot area" VerticalAlignment="Center" FontWeight="SemiBold"/>
+                                </StackPanel>
+                            </Button>
+                            <Button Grid.Column="1" Style="{StaticResource ToolButton}" Click="RecordAreaButton_Click">
+                                <StackPanel Orientation="Horizontal" Spacing="10">
+                                    <FontIcon Glyph="&#xE714;" FontFamily="Segoe Fluent Icons"/>
+                                    <TextBlock Text="Record area" VerticalAlignment="Center" FontWeight="SemiBold"/>
+                                </StackPanel>
+                            </Button>
+                            <Button x:Name="StopRecordingButton" Grid.Column="2"
+                                    MinHeight="48" Padding="18,0" CornerRadius="12"
+                                    Background="#45FF3B30" Foreground="White"
+                                    BorderBrush="#9AFF6B62" BorderThickness="1"
+                                    Click="StopRecordingButton_Click" IsEnabled="False">
+                                <StackPanel Orientation="Horizontal" Spacing="9">
+                                    <FontIcon Glyph="&#xE71A;" FontFamily="Segoe Fluent Icons"/>
+                                    <TextBlock Text="Stop" VerticalAlignment="Center"/>
+                                </StackPanel>
+                            </Button>
+                        </Grid>
+
+                        <Grid ColumnSpacing="12">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="Auto"/>
+                            </Grid.ColumnDefinitions>
+                            <DropDownButton x:Name="VideoQualityButton"
+                                            Content="Video recording quality preset: 4K"
+                                            Style="{StaticResource ToolButton}"
+                                            HorizontalAlignment="Stretch">
+                                <DropDownButton.Flyout>
+                                    <MenuFlyout>
+                                        <MenuFlyoutItem Text="720p recording" Tag="1280x720" Click="VideoQualityPreset_Click"/>
+                                        <MenuFlyoutItem Text="1080p recording" Tag="1920x1080" Click="VideoQualityPreset_Click"/>
+                                        <MenuFlyoutItem Text="1440p recording" Tag="2560x1440" Click="VideoQualityPreset_Click"/>
+                                        <MenuFlyoutItem Text="4K recording" Tag="3840x2160" Click="VideoQualityPreset_Click"/>
+                                    </MenuFlyout>
+                                </DropDownButton.Flyout>
+                            </DropDownButton>
+                            <DropDownButton x:Name="PictureQualityButton"
+                                            Grid.Column="1"
+                                            Content="Picture quality preset: 4K"
+                                            Style="{StaticResource ToolButton}"
+                                            HorizontalAlignment="Stretch">
+                                <DropDownButton.Flyout>
+                                    <MenuFlyout>
+                                        <MenuFlyoutItem Text="720p picture" Tag="1280x720" Click="PictureQualityPreset_Click"/>
+                                        <MenuFlyoutItem Text="1080p picture" Tag="1920x1080" Click="PictureQualityPreset_Click"/>
+                                        <MenuFlyoutItem Text="1440p picture" Tag="2560x1440" Click="PictureQualityPreset_Click"/>
+                                        <MenuFlyoutItem Text="4K picture" Tag="3840x2160" Click="PictureQualityPreset_Click"/>
+                                    </MenuFlyout>
+                                </DropDownButton.Flyout>
+                            </DropDownButton>
+                            <ToggleSwitch x:Name="SystemAudioToggle"
+                                          Grid.Column="2"
+                                          Header="Video sound"
+                                          OnContent="System audio"
+                                          OffContent="No audio"
+                                          IsOn="True"
+                                          VerticalAlignment="Center"/>
+                        </Grid>
+                    </StackPanel>
+                </Border>
+
+                <Border Padding="20" CornerRadius="20" Background="{StaticResource GlassCard}"
+                        BorderBrush="#34FFFFFF" BorderThickness="1">
+                    <StackPanel Spacing="16">
+                        <StackPanel Spacing="5">
+                            <TextBlock Text="File mover" FontSize="20" FontWeight="SemiBold" Foreground="White"/>
+                            <TextBlock Text="Run up to four moves. Every slot stays open so you can see its files and progress while starting another move."
+                                       TextWrapping="Wrap" Foreground="#BFFFFFFF"/>
+                            <TextBlock x:Name="FileMoverStatusText" Text="Four move slots are ready."
+                                       TextWrapping="Wrap" Foreground="#38FF66"/>
+                        </StackPanel>
+
+                        <Grid ColumnSpacing="12" RowSpacing="12">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="*"/>
+                            </Grid.ColumnDefinitions>
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
+                            </Grid.RowDefinitions>
+
+                            <Border Grid.Row="0" Grid.Column="0" Padding="16" CornerRadius="14"
+                                    Background="#2407141D" BorderBrush="#3038FF66" BorderThickness="1">
+                                <StackPanel Spacing="9">
+                                    <Grid ColumnSpacing="10">
+                                        <TextBlock Text="Move 1" FontSize="17" FontWeight="SemiBold" Foreground="White"/>
+                                        <Button x:Name="FileMoverSlot1Button" Tag="0" HorizontalAlignment="Right"
+                                                Style="{StaticResource ToolButton}" Click="FileMoverButton_Click" Content="Choose files"/>
+                                    </Grid>
+                                    <TextBlock x:Name="FileMoverSlot1Status" Text="Ready" Foreground="#38FF66"/>
+                                    <ProgressBar x:Name="FileMoverSlot1Progress" Minimum="0" Maximum="100" Value="0" Height="6"/>
+                                    <TextBlock x:Name="FileMoverSlot1Files" Text="No files selected." MaxHeight="82"
+                                               TextWrapping="Wrap" TextTrimming="CharacterEllipsis" Foreground="#BFFFFFFF"/>
+                                </StackPanel>
+                            </Border>
+
+                            <Border Grid.Row="0" Grid.Column="1" Padding="16" CornerRadius="14"
+                                    Background="#2407141D" BorderBrush="#3038FF66" BorderThickness="1">
+                                <StackPanel Spacing="9">
+                                    <Grid ColumnSpacing="10">
+                                        <TextBlock Text="Move 2" FontSize="17" FontWeight="SemiBold" Foreground="White"/>
+                                        <Button x:Name="FileMoverSlot2Button" Tag="1" HorizontalAlignment="Right"
+                                                Style="{StaticResource ToolButton}" Click="FileMoverButton_Click" Content="Choose files"/>
+                                    </Grid>
+                                    <TextBlock x:Name="FileMoverSlot2Status" Text="Ready" Foreground="#38FF66"/>
+                                    <ProgressBar x:Name="FileMoverSlot2Progress" Minimum="0" Maximum="100" Value="0" Height="6"/>
+                                    <TextBlock x:Name="FileMoverSlot2Files" Text="No files selected." MaxHeight="82"
+                                               TextWrapping="Wrap" TextTrimming="CharacterEllipsis" Foreground="#BFFFFFFF"/>
+                                </StackPanel>
+                            </Border>
+
+                            <Border Grid.Row="1" Grid.Column="0" Padding="16" CornerRadius="14"
+                                    Background="#2407141D" BorderBrush="#3038FF66" BorderThickness="1">
+                                <StackPanel Spacing="9">
+                                    <Grid ColumnSpacing="10">
+                                        <TextBlock Text="Move 3" FontSize="17" FontWeight="SemiBold" Foreground="White"/>
+                                        <Button x:Name="FileMoverSlot3Button" Tag="2" HorizontalAlignment="Right"
+                                                Style="{StaticResource ToolButton}" Click="FileMoverButton_Click" Content="Choose files"/>
+                                    </Grid>
+                                    <TextBlock x:Name="FileMoverSlot3Status" Text="Ready" Foreground="#38FF66"/>
+                                    <ProgressBar x:Name="FileMoverSlot3Progress" Minimum="0" Maximum="100" Value="0" Height="6"/>
+                                    <TextBlock x:Name="FileMoverSlot3Files" Text="No files selected." MaxHeight="82"
+                                               TextWrapping="Wrap" TextTrimming="CharacterEllipsis" Foreground="#BFFFFFFF"/>
+                                </StackPanel>
+                            </Border>
+
+                            <Border Grid.Row="1" Grid.Column="1" Padding="16" CornerRadius="14"
+                                    Background="#2407141D" BorderBrush="#3038FF66" BorderThickness="1">
+                                <StackPanel Spacing="9">
+                                    <Grid ColumnSpacing="10">
+                                        <TextBlock Text="Move 4" FontSize="17" FontWeight="SemiBold" Foreground="White"/>
+                                        <Button x:Name="FileMoverSlot4Button" Tag="3" HorizontalAlignment="Right"
+                                                Style="{StaticResource ToolButton}" Click="FileMoverButton_Click" Content="Choose files"/>
+                                    </Grid>
+                                    <TextBlock x:Name="FileMoverSlot4Status" Text="Ready" Foreground="#38FF66"/>
+                                    <ProgressBar x:Name="FileMoverSlot4Progress" Minimum="0" Maximum="100" Value="0" Height="6"/>
+                                    <TextBlock x:Name="FileMoverSlot4Files" Text="No files selected." MaxHeight="82"
+                                               TextWrapping="Wrap" TextTrimming="CharacterEllipsis" Foreground="#BFFFFFFF"/>
+                                </StackPanel>
+                            </Border>
+                        </Grid>
+                    </StackPanel>
+                </Border>
+
+                <Border MinHeight="430" CornerRadius="24" Background="{StaticResource GlassCard}"
+                        BorderBrush="#30FFFFFF" BorderThickness="1">
+                    <Grid>
+                        <Grid.Background>
+                            <LinearGradientBrush StartPoint="0,0" EndPoint="1,1">
+                                <GradientStop Color="#2511D8E8" Offset="0"/>
+                                <GradientStop Color="#07000000" Offset="0.5"/>
+                                <GradientStop Color="#2038FF66" Offset="1"/>
+                            </LinearGradientBrush>
+                        </Grid.Background>
+                        <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center"
+                                    MaxWidth="590" Spacing="15">
+                            <Border Width="96" Height="96" CornerRadius="48"
+                                    Background="#2438FF66" BorderBrush="#8038FF66" BorderThickness="1">
+                                <FontIcon Glyph="&#xE8C6;" FontFamily="Segoe Fluent Icons"
+                                          FontSize="42" Foreground="#38FF66"
+                                          HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                            </Border>
+                            <TextBlock Text="Draw to capture" FontSize="28" FontWeight="SemiBold"
+                                       Foreground="White" HorizontalAlignment="Center"/>
+                            <TextBlock Text="Choose screenshot or recording, then drag over the exact desktop area you want. Press Esc to cancel."
+                                       TextAlignment="Center" TextWrapping="Wrap" FontSize="15"
+                                       Foreground="#BFFFFFFF"/>
+                            <TextBlock x:Name="StatusText" Text="Ready"
+                                       TextAlignment="Center" TextWrapping="Wrap"
+                                       Foreground="#38FF66" FontWeight="SemiBold"/>
+                            <Button Style="{StaticResource ToolButton}" Click="OpenCapturesButton_Click">
+                                <StackPanel Orientation="Horizontal" Spacing="9">
+                                    <FontIcon Glyph="&#xE838;" FontFamily="Segoe Fluent Icons"/>
+                                    <TextBlock Text="Open Zink Captures" VerticalAlignment="Center"/>
+                                </StackPanel>
+                            </Button>
+                        </StackPanel>
+                    </Grid>
+                </Border>
+
+                <TextBlock Text="Output preserves the selected area's aspect ratio and uses letterboxing when the selection is not 16:9."
+                           TextAlignment="Center" Foreground="#8FFFFFFF" FontSize="12"/>
+            </StackPanel>
+        </ScrollViewer>
+    </Grid>
+</Page>

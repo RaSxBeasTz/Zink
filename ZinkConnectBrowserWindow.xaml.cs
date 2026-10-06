@@ -1,6 +1,7 @@
 using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Controls.Primitives;
 using Microsoft.UI.Xaml.Input;
 using Microsoft.Web.WebView2.Core;
 using System;
@@ -21,6 +22,7 @@ namespace Zink
         private const string HomeUrl = "https://www.bing.com/";
         public const string LaunchBrowserOnlySettingKey = "ZinkConnect.LaunchBrowserOnly";
         private const string BrowsingHistoryEnabledSettingKey = "ZinkConnect.BrowsingHistoryEnabled";
+        private const string RememberSignInAndCookiePreferencesSettingKey = "ZinkConnect.RememberSignInAndCookiePreferences";
         private const string DeleteBrowsingDataOnCloseSettingKey = "ZinkConnect.DeleteBrowsingDataOnClose";
         private const int MaxHistoryEntries = 500;
         private static ZinkConnectBrowserWindow? _current;
@@ -34,12 +36,15 @@ namespace Zink
         private bool _browserFullscreen;
         private bool _ublockLoadAttempted;
         private bool _browsingHistoryEnabled = true;
+        private bool _rememberSignInAndCookiePreferences = true;
         private bool _deleteBrowsingDataOnClose;
         private bool _clearingBrowsingDataOnClose;
+        private bool _syncingSettingsScrollBar;
 
         private ZinkConnectBrowserWindow()
         {
             InitializeComponent();
+            LocalizationService.RegisterWindow(this);
             Title = "Zink Connect";
             Root.Loaded += ZinkConnectBrowserWindow_Loaded;
             Closed += ZinkConnectBrowserWindow_Closed;
@@ -110,6 +115,21 @@ namespace Zink
             }
         }
 
+        private static bool RememberSignInAndCookiePreferencesEnabled
+        {
+            get
+            {
+                try
+                {
+                    return ApplicationData.Current.LocalSettings.Values[RememberSignInAndCookiePreferencesSettingKey] is not bool enabled || enabled;
+                }
+                catch
+                {
+                    return true;
+                }
+            }
+        }
+
         private async void ZinkConnectBrowserWindow_Loaded(object sender, RoutedEventArgs e)
         {
             if (_loaded)
@@ -127,6 +147,20 @@ namespace Zink
                 var winId = Microsoft.UI.Win32Interop.GetWindowIdFromWindow(hwnd);
                 _appWindow = AppWindow.GetFromWindowId(winId);
                 _appWindow.Title = "Zink Connect";
+
+                ExtendsContentIntoTitleBar = true;
+                SetTitleBar(BrowserTitleBar);
+
+                var titleBar = _appWindow.TitleBar;
+                titleBar.IconShowOptions = IconShowOptions.HideIconAndSystemMenu;
+                titleBar.ButtonBackgroundColor = global::Windows.UI.Color.FromArgb(0, 0, 0, 0);
+                titleBar.ButtonInactiveBackgroundColor = global::Windows.UI.Color.FromArgb(0, 0, 0, 0);
+                titleBar.ButtonForegroundColor = global::Windows.UI.Color.FromArgb(255, 238, 250, 255);
+                titleBar.ButtonInactiveForegroundColor = global::Windows.UI.Color.FromArgb(255, 157, 185, 191);
+                titleBar.ButtonHoverBackgroundColor = global::Windows.UI.Color.FromArgb(90, 31, 92, 108);
+                titleBar.ButtonHoverForegroundColor = global::Windows.UI.Color.FromArgb(255, 238, 250, 255);
+                titleBar.ButtonPressedBackgroundColor = global::Windows.UI.Color.FromArgb(140, 23, 68, 82);
+                titleBar.ButtonPressedForegroundColor = global::Windows.UI.Color.FromArgb(255, 238, 250, 255);
 
                 var display = DisplayArea.GetFromWindowId(winId, DisplayAreaFallback.Primary);
                 var work = display.WorkArea;
@@ -156,9 +190,8 @@ namespace Zink
             if (_environment != null)
                 return _environment;
 
-            var userDataFolder = Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-                "ZinkConnectWebViewData");
+            var userDataFolder = GetBrowserUserDataFolder();
+            TryMigrateLegacyBrowserUserDataFolder(userDataFolder);
 
             Directory.CreateDirectory(userDataFolder);
             var options = new CoreWebView2EnvironmentOptions
@@ -220,6 +253,8 @@ namespace Zink
             core.Settings.IsStatusBarEnabled = true;
             core.Settings.IsZoomControlEnabled = true;
             core.Settings.AreBrowserAcceleratorKeysEnabled = true;
+            core.Settings.IsGeneralAutofillEnabled = _rememberSignInAndCookiePreferences;
+            core.Settings.IsPasswordAutosaveEnabled = _rememberSignInAndCookiePreferences;
             var adBlockEngine = new ZinkConnectAdBlockEngine();
             adBlockEngine.Attach(core);
             _adBlockEngines[browser] = adBlockEngine;
@@ -628,6 +663,8 @@ namespace Zink
             LaunchBrowserOnlyToggle.IsOn = LaunchBrowserOnlyEnabled;
             _browsingHistoryEnabled = BrowsingHistoryEnabled;
             BrowsingHistoryToggle.IsOn = _browsingHistoryEnabled;
+            _rememberSignInAndCookiePreferences = RememberSignInAndCookiePreferencesEnabled;
+            RememberSignInAndCookiePreferencesToggle.IsOn = _rememberSignInAndCookiePreferences;
             _deleteBrowsingDataOnClose = DeleteBrowsingDataOnCloseEnabled;
             DeleteBrowsingDataOnCloseToggle.IsOn = _deleteBrowsingDataOnClose;
         }
@@ -854,6 +891,7 @@ namespace Zink
                 AddressBox.Text = "zink://settings";
                 BackButton.IsEnabled = false;
                 ForwardButton.IsEnabled = false;
+                UpdateSettingsScrollBar();
                 return;
             }
 
@@ -868,6 +906,48 @@ namespace Zink
             var core = CurrentBrowser()?.CoreWebView2;
             BackButton.IsEnabled = core?.CanGoBack == true;
             ForwardButton.IsEnabled = core?.CanGoForward == true;
+        }
+
+        private void SettingsScrollViewer_ViewChanged(object sender, ScrollViewerViewChangedEventArgs e)
+        {
+            UpdateSettingsScrollBar();
+        }
+
+        private void SettingsScrollViewer_SizeChanged(object sender, SizeChangedEventArgs e)
+        {
+            UpdateSettingsScrollBar();
+        }
+
+        private void SettingsScrollBar_ValueChanged(object sender, RangeBaseValueChangedEventArgs e)
+        {
+            if (_syncingSettingsScrollBar)
+                return;
+
+            SettingsScrollViewer.ChangeView(null, e.NewValue, null, true);
+        }
+
+        private void UpdateSettingsScrollBar()
+        {
+            if (_syncingSettingsScrollBar)
+                return;
+
+            double maximum = Math.Max(0, SettingsScrollViewer.ExtentHeight - SettingsScrollViewer.ViewportHeight);
+            double value = Math.Min(maximum, Math.Max(0, SettingsScrollViewer.VerticalOffset));
+
+            _syncingSettingsScrollBar = true;
+            try
+            {
+                SettingsScrollBar.Maximum = maximum;
+                SettingsScrollBar.ViewportSize = Math.Max(0, SettingsScrollViewer.ViewportHeight);
+                SettingsScrollBar.LargeChange = Math.Max(48, SettingsScrollViewer.ViewportHeight * 0.85);
+                SettingsScrollBar.SmallChange = 48;
+                SettingsScrollBar.Value = value;
+                SettingsScrollBar.IsEnabled = maximum > 0;
+            }
+            finally
+            {
+                _syncingSettingsScrollBar = false;
+            }
         }
 
         private void BackButton_Click(object sender, RoutedEventArgs e)
@@ -952,6 +1032,7 @@ namespace Zink
             AddressBox.Text = "zink://settings";
             StatusText.Text = "Settings";
             UpdateControls();
+            DispatcherQueue.TryEnqueue(UpdateSettingsScrollBar);
         }
 
         private void HistoryButton_Click(object sender, RoutedEventArgs e)
@@ -996,6 +1077,23 @@ namespace Zink
             }
         }
 
+        private void RememberSignInAndCookiePreferencesToggle_Toggled(object sender, RoutedEventArgs e)
+        {
+            try
+            {
+                _rememberSignInAndCookiePreferences = RememberSignInAndCookiePreferencesToggle.IsOn;
+                ApplicationData.Current.LocalSettings.Values[RememberSignInAndCookiePreferencesSettingKey] = _rememberSignInAndCookiePreferences;
+                ApplySignInAndCookiePreferenceSettings();
+                StatusText.Text = _rememberSignInAndCookiePreferences
+                    ? "Zink Connect will remember website sign-ins and cookie preferences."
+                    : "Zink Connect will clear website sign-ins and cookie preferences when it closes.";
+            }
+            catch
+            {
+                StatusText.Text = "Settings could not be saved.";
+            }
+        }
+
         private void DeleteBrowsingDataOnCloseToggle_Toggled(object sender, RoutedEventArgs e)
         {
             try
@@ -1009,6 +1107,19 @@ namespace Zink
             catch
             {
                 StatusText.Text = "Settings could not be saved.";
+            }
+        }
+
+        private void ApplySignInAndCookiePreferenceSettings()
+        {
+            foreach (var browser in _tabBrowsers.Values)
+            {
+                var settings = browser.CoreWebView2?.Settings;
+                if (settings == null)
+                    continue;
+
+                settings.IsGeneralAutofillEnabled = _rememberSignInAndCookiePreferences;
+                settings.IsPasswordAutosaveEnabled = _rememberSignInAndCookiePreferences;
             }
         }
 
@@ -1164,6 +1275,20 @@ namespace Zink
             UpdateHistoryView();
         }
 
+        private async Task ClearSignInAndCookiePreferenceDataAsync()
+        {
+            var profile = GetAvailableBrowserProfile();
+            if (profile == null)
+                return;
+
+            await profile.ClearBrowsingDataAsync(
+                CoreWebView2BrowsingDataKinds.Cookies |
+                CoreWebView2BrowsingDataKinds.AllDomStorage |
+                CoreWebView2BrowsingDataKinds.GeneralAutofill |
+                CoreWebView2BrowsingDataKinds.PasswordAutosave |
+                CoreWebView2BrowsingDataKinds.ServiceWorkers);
+        }
+
         private async Task ClearBrowsingDataOnCloseAsync()
         {
             if (!_deleteBrowsingDataOnClose || _clearingBrowsingDataOnClose)
@@ -1173,6 +1298,18 @@ namespace Zink
             try
             {
                 await ClearAllBrowsingDataAsync();
+            }
+            catch { }
+        }
+
+        private async Task ClearSignInAndCookiePreferenceDataOnCloseAsync()
+        {
+            if (_rememberSignInAndCookiePreferences)
+                return;
+
+            try
+            {
+                await ClearSignInAndCookiePreferenceDataAsync();
             }
             catch { }
         }
@@ -1196,6 +1333,7 @@ namespace Zink
         private async void ZinkConnectBrowserWindow_Closed(object sender, WindowEventArgs e)
         {
             await ClearBrowsingDataOnCloseAsync();
+            await ClearSignInAndCookiePreferenceDataOnCloseAsync();
             _current = null;
         }
 
@@ -1298,6 +1436,38 @@ namespace Zink
                 "Zink",
                 "ZinkConnect",
                 "BrowsingHistory.json");
+        }
+
+        private static string GetBrowserUserDataFolder()
+        {
+            return Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                "Zink",
+                "ZinkConnect",
+                "WebViewData");
+        }
+
+        private static string GetLegacyBrowserUserDataFolder()
+        {
+            return Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                "ZinkConnectWebViewData");
+        }
+
+        private static void TryMigrateLegacyBrowserUserDataFolder(string userDataFolder)
+        {
+            try
+            {
+                string legacyFolder = GetLegacyBrowserUserDataFolder();
+                if (!Directory.Exists(legacyFolder) || Directory.Exists(userDataFolder))
+                    return;
+
+                Directory.CreateDirectory(Path.GetDirectoryName(userDataFolder)!);
+                Directory.Move(legacyFolder, userDataFolder);
+            }
+            catch
+            {
+            }
         }
 
         private sealed class BrowserHistoryEntry

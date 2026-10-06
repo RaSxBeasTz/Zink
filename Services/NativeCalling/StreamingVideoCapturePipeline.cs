@@ -13,14 +13,15 @@ using SharpDX;
 
 namespace Zink.Services.NativeCalling
 {
-    public sealed class NativeScreenShareStreamingService : IAsyncDisposable
+    public sealed class StreamingVideoCapturePipeline : IAsyncDisposable
     {
-        public static NativeScreenShareStreamingService Instance { get; } = new NativeScreenShareStreamingService();
+        public static StreamingVideoCapturePipeline Instance { get; } = new StreamingVideoCapturePipeline();
 
         public const int TargetFps = 60;
         private const int LivePreviewFps = 30;
         public const long JpegQuality = 88L;
         private const int ReceiverSafe1080pFps = 24;
+        private const int ReceiverSafeRealtimeFps = 50;
         private const int NonNvidiaSafe1080pFps = IntelH264EncoderPolicy.Safe1080pTwitchFps;
         private const int NonNvidiaSafe1080pBitrate = IntelH264EncoderPolicy.Safe1080pTwitchBitrate;
         internal const bool EnableDirectGpuTexturePath = true;
@@ -51,7 +52,7 @@ namespace Zink.Services.NativeCalling
         private int? _targetFpsOverride;
         private int _emptyEncodeCount;
         private bool _nonNvidia1080pHardwareLimitActive;
-        private WindowsGraphicsCaptureScreenSource? _wgcCapture;
+        private StreamingWindowsGraphicsCaptureScreenSource? _wgcCapture;
         private DxgiScreenCaptureService? _dxgiCapture;
         private DateTimeOffset _streamStartedAtUtc;
         private DateTimeOffset _lastAdaptedAtUtc = DateTimeOffset.MinValue;
@@ -68,20 +69,20 @@ namespace Zink.Services.NativeCalling
 
         public bool IsRunning { get; private set; }
         public ScreenShareQualityPreset QualityPreset => _qualityPreset;
-        public ScreenShareQualityProfile RequestedQuality => ScreenShareQualityProfile.FromPreset(_qualityPreset);
-        public ScreenShareQualityProfile CurrentQuality
+        public StreamingQualityProfile RequestedQuality => StreamingQualityProfile.FromPreset(_qualityPreset);
+        public StreamingQualityProfile CurrentQuality
         {
             get
             {
                 lock (_qualitySync)
                 {
-                    return ScreenShareQualityProfile.FromPreset(_effectiveQualityPreset);
+                    return StreamingQualityProfile.FromPreset(_effectiveQualityPreset);
                 }
             }
         }
 
         public bool IsAdaptiveLatencyModeEnabled { get; private set; } = false;
-        public int CurrentBitrate { get; private set; } = ScreenShareQualityProfile.FromPreset(ScreenShareQualityPreset.Hd720p).Bitrate;
+        public int CurrentBitrate { get; private set; } = StreamingQualityProfile.FromPreset(ScreenShareQualityPreset.Hd720p).Bitrate;
         public int AutoDowngradeCount { get; private set; }
         public int CongestionSignals { get; private set; }
         public string AdaptiveState { get; private set; } = "Locked realtime mode ready";
@@ -111,7 +112,7 @@ namespace Zink.Services.NativeCalling
         public bool EnablePreviewFrames { get; set; } = true;
         public bool PublishPreviewOnlyFrames { get; set; }
         public bool RequiresRealtimeBitmapFrames { get; private set; }
-        public ScreenShareVideoCodec PreferredVideoCodec { get; set; } = ScreenShareVideoCodec.AV1X;
+        public ScreenShareVideoCodec PreferredVideoCodec { get; set; } = ScreenShareVideoCodec.Auto;
         public ScreenShareH264EncoderFamily PreferredH264EncoderFamily { get; set; } = ScreenShareH264EncoderFamily.Nvidia;
         public string ActiveVideoCodec { get; private set; } = ScreenShareCodecNames.H264;
         public bool PrioritizeStreamingPerformance { get; set; }
@@ -128,10 +129,28 @@ namespace Zink.Services.NativeCalling
         public int HardwareEncoderFallbackCount { get; private set; }
         public string? LastFailureMessage { get; private set; }
 
+        public ScreenShareVideoCodec SelectedVideoCodec
+        {
+            get
+            {
+                if (PreferredVideoCodec != ScreenShareVideoCodec.Auto)
+                    return PreferredVideoCodec;
+
+                // H.264 is the WebRTC compatibility baseline. In particular,
+                // Snapdragon receivers may expose Qualcomm H.264 decode but no
+                // usable AV1 output transform.
+                return ScreenShareVideoCodec.H264;
+            }
+        }
+
+        public string SelectedCodecName => SelectedVideoCodec == ScreenShareVideoCodec.AV1X
+            ? ScreenShareCodecNames.Av1
+            : ScreenShareCodecNames.H264;
+
         public event EventHandler<NativeScreenFrameEventArgs>? FrameReady;
         public event EventHandler<string>? StreamingFailed;
 
-        private NativeScreenShareStreamingService()
+        private StreamingVideoCapturePipeline()
         {
         }
 
@@ -149,8 +168,8 @@ namespace Zink.Services.NativeCalling
                 _effectiveQualityPreset = _qualityPreset;
                 _bitrateScalePercent = 100;
                 _nonNvidia1080pHardwareLimitActive = false;
-                CurrentBitrate = GetConfiguredBitrate(ScreenShareQualityProfile.FromPreset(_effectiveQualityPreset));
-                AdaptiveState = $"Locked {ScreenShareQualityProfile.FromPreset(_effectiveQualityPreset).Name} @ {CurrentTargetFps} FPS";
+                CurrentBitrate = GetConfiguredBitrate(StreamingQualityProfile.FromPreset(_effectiveQualityPreset));
+                AdaptiveState = $"Locked {StreamingQualityProfile.FromPreset(_effectiveQualityPreset).Name} @ {CurrentTargetFps} FPS";
                 AutoDowngradeCount = 0;
                 CongestionSignals = 0;
                 _receiverPressureSignals = 0;
@@ -183,10 +202,13 @@ namespace Zink.Services.NativeCalling
             }
 
             DiagnosticLogService.WriteLine("[ScreenShare:UI] Starting Windows Graphics Capture source.");
+            DiagnosticLogService.WriteLine($"[ScreenShare:CAPS] processArch={RuntimeInformation.ProcessArchitecture}; osArch={RuntimeInformation.OSArchitecture}; selectedCodec={SelectedCodecName}; preferredCodec={PreferredVideoCodec}; hardwareRequired={RequireHardwareEncoder}; directX12Required={RequireDirectX12CapturePath}");
+            ScreenShareTestLogService.WriteLine($"start codec={SelectedCodecName}; preferredCodec={PreferredVideoCodec}; quality={CurrentQuality.Name}; targetFps={CurrentTargetFps}; bitrate={CurrentBitrate}; requireHardware={RequireHardwareEncoder}; requireDx12={RequireDirectX12CapturePath}");
             DiagnosticLogService.Flush();
-            _wgcCapture = new WindowsGraphicsCaptureScreenSource();
+            _wgcCapture = new StreamingWindowsGraphicsCaptureScreenSource();
             var wgcStarted = await _wgcCapture.StartAsync();
             DiagnosticLogService.WriteLine($"[ScreenShare:UI] Windows Graphics Capture source start result: {wgcStarted}; available={_wgcCapture.IsAvailable}.");
+                ScreenShareTestLogService.WriteLine($"capture-start result={wgcStarted}; available={_wgcCapture.IsAvailable}");
             if (!wgcStarted)
             {
                 IsRunning = false;
@@ -218,16 +240,18 @@ namespace Zink.Services.NativeCalling
         {
             lock (_qualitySync)
             {
+                var profile = StreamingQualityProfile.FromPreset(preset);
                 _qualityPreset = preset;
                 _effectiveQualityPreset = preset;
+                _targetFpsOverride = profile.TargetFps;
                 _bitrateScalePercent = 100;
                 _nonNvidia1080pHardwareLimitActive = false;
-                CurrentBitrate = GetConfiguredBitrate(ScreenShareQualityProfile.FromPreset(_effectiveQualityPreset));
-                AdaptiveState = $"Locked {ScreenShareQualityProfile.FromPreset(preset).Name} @ {CurrentTargetFps} FPS";
+                CurrentBitrate = GetConfiguredBitrate(StreamingQualityProfile.FromPreset(_effectiveQualityPreset));
+                AdaptiveState = $"Locked {profile.Name} @ {CurrentTargetFps} FPS";
                 _healthyWindows = 0;
                 _receiverPressureSignals = 0;
                 if (IsRunning)
-                    RequestRecoveryKeyFrame($"screen-share quality changed to {ScreenShareQualityProfile.FromPreset(preset).Name}");
+                    RequestRecoveryKeyFrame($"screen-share quality changed to {StreamingQualityProfile.FromPreset(preset).Name}");
             }
         }
 
@@ -236,7 +260,7 @@ namespace Zink.Services.NativeCalling
             lock (_qualitySync)
             {
                 _bitrateOverride = bitrate is > 0 ? bitrate : null;
-                CurrentBitrate = GetConfiguredBitrate(ScreenShareQualityProfile.FromPreset(_effectiveQualityPreset));
+                CurrentBitrate = GetConfiguredBitrate(StreamingQualityProfile.FromPreset(_effectiveQualityPreset));
                 _bitrateScalePercent = 100;
                 if (IsRunning)
                     RequestRecoveryKeyFrame("streaming bitrate changed");
@@ -292,15 +316,18 @@ namespace Zink.Services.NativeCalling
             if (recoveryReason)
                 RequestRecoveryKeyFrame(reason);
 
-            if (receiverPressure && CurrentQuality.Height >= 1080 && IsAdaptiveLatencyModeEnabled)
+            if (receiverPressure && IsAdaptiveLatencyModeEnabled)
             {
                 _receiverPressurePacingUntilUtc = DateTimeOffset.UtcNow + ReceiverPressurePacingWindow;
                 var now = DateTimeOffset.UtcNow;
                 if (now - _lastReceiverPacingLogUtc >= TimeSpan.FromSeconds(2))
                 {
                     _lastReceiverPacingLogUtc = now;
+                    var pacingFps = CurrentQuality.Height >= 1080
+                        ? ReceiverSafe1080pFps
+                        : ReceiverSafeRealtimeFps;
                     Debug.WriteLine(
-                        $"[ScreenShare:H264] Receiver decode pressure active; pacing capture/encode to {ReceiverSafe1080pFps}fps at {CurrentQuality.Name} without dropping encoded H.264 frames. reason={reason}; dropped={droppedReceiveFrames}; renderBacklog={renderBacklog}.");
+                        $"[ScreenShare:H264] Receiver decode pressure active; pacing capture/encode to {pacingFps}fps at {CurrentQuality.Name} without dropping encoded H.264 frames. reason={reason}; dropped={droppedReceiveFrames}; renderBacklog={renderBacklog}.");
                     Debug.WriteLine(
                         $"[ScreenShare:H264] Receiver-safe cadence will stay active for {ReceiverPressurePacingWindow.TotalSeconds:0}s after the latest pressure signal to prevent 60fps rebound delay.");
                 }
@@ -335,7 +362,13 @@ namespace Zink.Services.NativeCalling
                 return;
 
             var now = DateTimeOffset.UtcNow;
-            var bypassThrottle = IsQualityChangeReason(reason);
+            // The encoder can produce its startup IDR before WebRTC has finished
+            // connecting.  That IDR is useful to the JPEG fallback, but it never
+            // reaches the RTP receiver.  A newly-connected transport therefore
+            // needs a fresh IDR immediately; applying the normal warm-up throttle
+            // here leaves the receiver decoding dependent P-frames for seconds.
+            var bypassThrottle = IsQualityChangeReason(reason) ||
+                IsTransportConnectedKeyFrameRequest(reason);
             var startupKeyFrameRequest = IsStartupKeyFrameRequest(reason);
             if (!bypassThrottle)
             {
@@ -382,6 +415,7 @@ namespace Zink.Services.NativeCalling
                 return;
 
             Debug.WriteLine("[ScreenShare:H264] Stop requested.");
+            ScreenShareTestLogService.WriteLine($"stop activeCodec={ActiveVideoCodec}; captureFps={CaptureFps:0.0}; encodedFps={EncodedFps:0.0}; lastFailure={LastFailureMessage ?? "none"}");
             DiagnosticLogService.Flush();
             IsRunning = false;
 
@@ -411,7 +445,9 @@ namespace Zink.Services.NativeCalling
             var mmcssHandle = IntPtr.Zero;
             try
             {
-                Thread.CurrentThread.Priority = ThreadPriority.Highest;
+                // Capture must be responsive, but Highest can pre-empt the game and
+                // Desktop Window Manager long enough to create visible frame-time spikes.
+                Thread.CurrentThread.Priority = ThreadPriority.AboveNormal;
                 mmcssHandle = TryEnableStreamingThreadScheduling();
             }
             catch
@@ -422,9 +458,9 @@ namespace Zink.Services.NativeCalling
             var outputClock = Stopwatch.StartNew();
             var nextFrameDueTicks = outputClock.ElapsedTicks;
                 IH264VideoEncoder? encoder = null;
-            MediaFoundationAv1Encoder? av1Encoder = null;
-            ScreenShareQualityProfile? encoderQuality = null;
-            ScreenShareQualityProfile? av1EncoderQuality = null;
+            StreamingMediaFoundationAv1Encoder? av1Encoder = null;
+            StreamingQualityProfile? encoderQuality = null;
+            StreamingQualityProfile? av1EncoderQuality = null;
             var encoderBitrate = 0;
             var av1EncoderBitrate = 0;
             var encoderFrameRate = 0;
@@ -474,7 +510,7 @@ namespace Zink.Services.NativeCalling
                         var recoveryKeyFrameRequested = Interlocked.Exchange(ref _pendingRecoveryKeyFrame, 0) == 1;
                         var encoderRefreshRequested = Interlocked.Exchange(ref _pendingEncoderRefresh, 0) == 1;
 
-                        if (PreferredVideoCodec == ScreenShareVideoCodec.AV1X && !av1Unavailable)
+                        if (SelectedVideoCodec == ScreenShareVideoCodec.AV1X && !av1Unavailable)
                         {
                             var av1ResolutionChanged =
                                 av1Encoder == null ||
@@ -497,7 +533,7 @@ namespace Zink.Services.NativeCalling
                             {
                                 try
                                 {
-                                    av1Encoder = new MediaFoundationAv1Encoder(quality.Width, quality.Height, bitrate, effectiveTargetFps);
+                                    av1Encoder = new StreamingMediaFoundationAv1Encoder(quality.Width, quality.Height, bitrate, effectiveTargetFps);
                                     av1EncoderBitrate = bitrate;
                                     av1EncoderFrameRate = effectiveTargetFps;
                                     av1Encoder.ForceNextKeyFrame();
@@ -507,17 +543,18 @@ namespace Zink.Services.NativeCalling
                                     EncoderGpuDeviceMode = av1Encoder.IsHardwareAccelerated
                                         ? "Windows AV1X hardware Media Foundation MFT"
                                         : "Windows AV1X software Media Foundation MFT";
-                                    TransportPipeline = "WebRTC RTP AV1X media track with H.264 fallback";
-                                    Debug.WriteLine($"[ScreenShare:AV1X] Encoder created for {quality.Width}x{quality.Height}; H.264 fallback remains available.");
+                                     TransportPipeline = "WebRTC RTP AV1X media track";
+                                     Debug.WriteLine($"[ScreenShare:AV1X] Encoder created for {quality.Width}x{quality.Height}; automatic codec fallback disabled.");
                                 }
                                 catch (Exception ex)
                                 {
-                                    av1Unavailable = true;
                                     av1Encoder?.Dispose();
                                     av1Encoder = null;
-                                    ActiveVideoCodec = ScreenShareCodecNames.H264;
-                                    Debug.WriteLine($"[ScreenShare:AV1X] Windows AV1X encoder unavailable; falling back to H.264. {ex.Message}");
-                                    DiagnosticLogService.WriteLine($"[ScreenShare:AV1X] Windows AV1X encoder unavailable; falling back to H.264. {ex.Message}");
+                                     LastFailureMessage = $"AV1 screen sharing could not start: {ex.Message}";
+                                     Debug.WriteLine($"[ScreenShare:AV1X] Windows AV1X encoder unavailable; automatic codec fallback disabled. {ex.Message}");
+                                     DiagnosticLogService.WriteLine($"[ScreenShare:AV1X] Windows AV1X encoder unavailable; automatic codec fallback disabled. {ex}");
+                                     ScreenShareTestLogService.WriteLine($"av1-start-failed fallback=false error={ex.Message}");
+                                     throw new InvalidOperationException(LastFailureMessage, ex);
                                 }
                             }
 
@@ -552,7 +589,21 @@ namespace Zink.Services.NativeCalling
                                 captureFrameIndex++;
 
                                 var av1EncodeStartedAt = DateTimeOffset.UtcNow;
-                                var av1Frames = av1Encoder.Encode(bitmap);
+                                IReadOnlyList<EncodedVideoFrame> av1Frames;
+                                try
+                                {
+                                    av1Frames = av1Encoder.Encode(bitmap);
+                                }
+                                catch (Exception ex)
+                                {
+                                    av1Encoder.Dispose();
+                                    av1Encoder = null;
+                                     LastFailureMessage = $"AV1 screen sharing failed during encoding: {ex.Message}";
+                                     Debug.WriteLine($"[ScreenShare:AV1X] AV1X encode failed; automatic codec fallback disabled. {ex.Message}");
+                                     DiagnosticLogService.WriteLine($"[ScreenShare:AV1X] AV1X encode failed; automatic codec fallback disabled. {ex}");
+                                     ScreenShareTestLogService.WriteLine($"av1-encode-failed fallback=false error={ex.Message}");
+                                     throw new InvalidOperationException(LastFailureMessage, ex);
+                                }
                                 LastEncodeMilliseconds = (DateTimeOffset.UtcNow - av1EncodeStartedAt).TotalMilliseconds;
                                 encodedInWindow += av1Frames.Count;
 
@@ -589,6 +640,8 @@ namespace Zink.Services.NativeCalling
                                     encodedInWindow = 0;
                                     statsWindowStartedAt = av1Now;
                                     Debug.WriteLine($"[ScreenShare:AV1X:STATS] capture={CaptureFps:0.0}fps encoded={EncodedFps:0.0}fps captureMs={LastCaptureMilliseconds:0.0} encodeMs={LastEncodeMilliseconds:0.0} previewMs={LastPreviewMilliseconds:0.0} loopMs={LastLoopMilliseconds:0.0}");
+                                     DiagnosticLogService.WriteLine($"[ScreenShare:STATS] codec=av1x capture={CaptureFps:0.0}fps encoded={EncodedFps:0.0}fps captureMs={LastCaptureMilliseconds:0.0} encodeMs={LastEncodeMilliseconds:0.0} previewMs={LastPreviewMilliseconds:0.0} loopMs={LastLoopMilliseconds:0.0} emptyPolls={_emptyEncodeCount}");
+                                    ScreenShareTestLogService.WriteLine($"stats codec=av1x captureFps={CaptureFps:0.0}; encodedFps={EncodedFps:0.0}; captureMs={LastCaptureMilliseconds:0.0}; encodeMs={LastEncodeMilliseconds:0.0}; previewMs={LastPreviewMilliseconds:0.0}; loopMs={LastLoopMilliseconds:0.0}");
                                     UpdateAdaptiveState();
                                 }
 
@@ -599,10 +652,26 @@ namespace Zink.Services.NativeCalling
                             }
                         }
 
-                        if (encoderResolutionChanged || encoderBitrateChanged || encoderFrameRateChanged || encoderRefreshRequested)
+                        // Recreating an asynchronous hardware MFT solely to apply a bitrate
+                        // adjustment stops its event pump while frames are live. NVENC takes
+                        // several hundred milliseconds to shut down/start again, which creates
+                        // a visible freeze and also races pending Transform events with
+                        // Shutdown(). Keep the active encoder for bitrate-only adaptation; the
+                        // latest target will be used the next time a structural refresh is
+                        // genuinely required (resolution, frame rate, or explicit refresh).
+                        if (encoderBitrateChanged &&
+                            !encoderResolutionChanged &&
+                            !encoderFrameRateChanged &&
+                            !encoderRefreshRequested)
                         {
-                            if (encoderBitrateChanged)
-                                Debug.WriteLine($"[ScreenShare:H264] Bitrate target changed {encoderBitrate} -> {bitrate}; recreating encoder so the hardware encoder applies the realtime rate.");
+                            Debug.WriteLine(
+                                $"[ScreenShare:H264] Bitrate target changed {encoderBitrate} -> {bitrate}; deferring hardware application until the next structural encoder refresh to keep live video continuous.");
+                            encoderBitrate = bitrate;
+                            encoderBitrateChanged = false;
+                        }
+
+                        if (encoderResolutionChanged || encoderFrameRateChanged || encoderRefreshRequested)
+                        {
                             if (encoderFrameRateChanged)
                                 Debug.WriteLine($"[ScreenShare:H264] Target FPS changed {encoderFrameRate} -> {effectiveTargetFps}; recreating encoder so timestamps and GOP cadence match output.");
                             if (encoderRefreshRequested)
@@ -939,7 +1008,7 @@ namespace Zink.Services.NativeCalling
                         }
 
                         missingGpuFramePolls = newGpuFrame == null ? missingGpuFramePolls + 1 : 0;
-                        if (hasFreshGpuFrame)
+                        if (gpuFrame != null)
                             capturedInWindow++;
 
                         if (EnablePreviewFrames &&
@@ -1032,9 +1101,15 @@ namespace Zink.Services.NativeCalling
                             else
                             {
                                 encodedFramesSinceLastIdr += encodedFrames.Count;
-                                var recoveryInterval = encoder.RecoveryKeyFrameInterval > 0
-                                    ? encoder.RecoveryKeyFrameInterval
-                                    : effectiveTargetFps * 2;
+                                // A healthy screen share does not need a full IDR every two
+                                // seconds. At 720p these frames can exceed 300 KB and create a
+                                // recurring RTP burst that looks like a freeze on the receiver.
+                                // Real loss recovery is handled immediately by the explicit
+                                // PLI/QoS recovery-keyframe path above; this is only the normal
+                                // safety cadence for an otherwise healthy stream.
+                                var recoveryInterval = Math.Max(
+                                    encoder.RecoveryKeyFrameInterval,
+                                    effectiveTargetFps * 8);
                                 var idrAge = lastIdrOutputAtUtc == DateTimeOffset.MinValue
                                     ? TimeSpan.Zero
                                     : DateTimeOffset.UtcNow - lastIdrOutputAtUtc;
@@ -1047,15 +1122,19 @@ namespace Zink.Services.NativeCalling
                                 {
                                     if (isNvidiaEncoder)
                                     {
+                                        lastPeriodicIdrRequestAtUtc = DateTimeOffset.UtcNow;
+                                        encoder.ForceNextKeyFrame();
                                         Debug.WriteLine(
-                                            $"[ScreenShare:H264] NVENC reached the Twitch keyframe boundary without an IDR ({encodedFramesSinceLastIdr} delta outputs); refreshing NVENC so the next output is a real IDR.");
-                                        restartEncoderAfterFrame = true;
+                                            $"[ScreenShare:H264] NVENC reached the recovery boundary without an exposed IDR ({encodedFramesSinceLastIdr} delta outputs); requesting another keyframe while keeping the live async encoder steady.");
                                     }
-                                    else if (idrRequestAge >= TimeSpan.FromSeconds(6))
+                                    else
                                     {
                                         lastPeriodicIdrRequestAtUtc = DateTimeOffset.UtcNow;
                                         Debug.WriteLine(
-                                            $"[ScreenShare:H264] GPU encoder has not exposed an IDR/clean point after {encodedFramesSinceLastIdr} outputs; avoiding repeated forced keyframes on non-NVIDIA hardware.");
+                                            $"[ScreenShare:H264] Non-NVIDIA encoder has not exposed an IDR/clean point after {encodedFramesSinceLastIdr} outputs; refreshing the encoder to restore realtime recovery.");
+                                        DiagnosticLogService.WriteLine(
+                                            $"[ScreenShare:H264] Non-NVIDIA encoder recovery failed after {encodedFramesSinceLastIdr} delta outputs and {idrRequestAge.TotalSeconds:0.0}s; refreshing encoder.");
+                                        restartEncoderAfterFrame = true;
                                     }
                                 }
                                 else if (lastPeriodicIdrRequestAtUtc != DateTimeOffset.MinValue &&
@@ -1064,18 +1143,20 @@ namespace Zink.Services.NativeCalling
                                 {
                                     if (isNvidiaEncoder)
                                     {
+                                        lastPeriodicIdrRequestAtUtc = DateTimeOffset.UtcNow;
+                                        encoder.ForceNextKeyFrame();
                                         Debug.WriteLine(
-                                            $"[ScreenShare:H264] NVENC ignored forced IDR for {idrRequestAge.TotalMilliseconds:0}ms after {encodedFramesSinceLastIdr} delta outputs; refreshing encoder to unblock realtime recovery.");
-                                        restartEncoderAfterFrame = true;
+                                            $"[ScreenShare:H264] NVENC has not exposed the forced IDR after {idrRequestAge.TotalMilliseconds:0}ms and {encodedFramesSinceLastIdr} delta outputs; requesting it again without tearing down the live async encoder.");
                                     }
                                     else
                                     {
                                         lastPeriodicIdrRequestAtUtc = DateTimeOffset.UtcNow;
                                         Debug.WriteLine(
-                                            $"[ScreenShare:H264] GPU encoder has not exposed an IDR/clean point after {encodedFramesSinceLastIdr} outputs; keeping non-NVIDIA encoder steady.");
+                                            $"[ScreenShare:H264] Non-NVIDIA encoder has not exposed an IDR/clean point after {encodedFramesSinceLastIdr} outputs; refreshing after the next recovery interval.");
+                                        restartEncoderAfterFrame = true;
                                     }
                                 }
-                                else if (isNvidiaEncoder && idrAge >= TimeSpan.FromSeconds(2) && idrRequestAge >= TimeSpan.FromSeconds(2))
+                                else if (isNvidiaEncoder && idrAge >= TimeSpan.FromSeconds(8) && idrRequestAge >= TimeSpan.FromSeconds(8))
                                 {
                                     lastPeriodicIdrRequestAtUtc = DateTimeOffset.UtcNow;
                                     encoder.ForceNextKeyFrame();
@@ -1148,7 +1229,9 @@ namespace Zink.Services.NativeCalling
                                 lowFreshCaptureWindows = 0;
                             }
 
-                            Debug.WriteLine($"[ScreenShare:H264:STATS] capture={CaptureFps:0.0}fps encoded={EncodedFps:0.0}fps captureMs={LastCaptureMilliseconds:0.0} encodeMs={LastEncodeMilliseconds:0.0} previewMs={LastPreviewMilliseconds:0.0} loopMs={LastLoopMilliseconds:0.0}");
+                                Debug.WriteLine($"[ScreenShare:H264:STATS] capture={CaptureFps:0.0}fps encoded={EncodedFps:0.0}fps captureMs={LastCaptureMilliseconds:0.0} encodeMs={LastEncodeMilliseconds:0.0} previewMs={LastPreviewMilliseconds:0.0} loopMs={LastLoopMilliseconds:0.0}");
+                                DiagnosticLogService.WriteLine($"[ScreenShare:STATS] codec=h264 capture={CaptureFps:0.0}fps encoded={EncodedFps:0.0}fps captureMs={LastCaptureMilliseconds:0.0} encodeMs={LastEncodeMilliseconds:0.0} previewMs={LastPreviewMilliseconds:0.0} loopMs={LastLoopMilliseconds:0.0} emptyPolls={_emptyEncodeCount}");
+                                ScreenShareTestLogService.WriteLine($"stats codec=h264 captureFps={CaptureFps:0.0}; encodedFps={EncodedFps:0.0}; captureMs={LastCaptureMilliseconds:0.0}; encodeMs={LastEncodeMilliseconds:0.0}; previewMs={LastPreviewMilliseconds:0.0}; loopMs={LastLoopMilliseconds:0.0}");
                             if (EncodedFps < effectiveTargetFps * 0.85 || LastEncodeMilliseconds > 10 || LastLoopMilliseconds > 20)
                             {
                                 Debug.WriteLine($"[ScreenShare:GPU:VIDEO] pressure capture={CaptureFps:0.0}fps encoded={EncodedFps:0.0}fps target={effectiveTargetFps}; captureMs={LastCaptureMilliseconds:0.0}; encodeMs={LastEncodeMilliseconds:0.0}; previewMs={LastPreviewMilliseconds:0.0}; loopMs={LastLoopMilliseconds:0.0}; encoder='{EncoderMode}'; input='{EncoderInputFormat}'; gpu='{EncoderGpuDeviceMode}'; bitrate={CurrentBitrate}; quality={CurrentQuality.Width}x{CurrentQuality.Height}; directGpuTexture={EnableDirectGpuTexturePath}; hardwareRequired={RequireHardwareEncoder}; dx12Required={RequireDirectX12CapturePath}.");
@@ -1223,7 +1306,9 @@ namespace Zink.Services.NativeCalling
                     return IntPtr.Zero;
                 }
 
-                NativeMethods.AvSetMmThreadPriority(handle, AvrtPriority.High);
+                // The MMCSS Capture class already receives realtime scheduling. Normal
+                // priority leaves headroom for the game's render/present threads.
+                NativeMethods.AvSetMmThreadPriority(handle, AvrtPriority.Normal);
                 Debug.WriteLine($"[ScreenShare:H264] MMCSS capture scheduling enabled for realtime streaming; taskIndex={taskIndex}.");
                 return handle;
             }
@@ -1238,15 +1323,20 @@ namespace Zink.Services.NativeCalling
         {
             var targetFps = CurrentTargetFps;
             var quality = CurrentQuality;
-            if (IsAdaptiveLatencyModeEnabled && quality.Height >= 1080 && DateTimeOffset.UtcNow < _receiverPressurePacingUntilUtc)
-                return Math.Min(targetFps, ReceiverSafe1080pFps);
+            if (IsAdaptiveLatencyModeEnabled && DateTimeOffset.UtcNow < _receiverPressurePacingUntilUtc)
+            {
+                var pressureLimit = quality.Height >= 1080
+                    ? ReceiverSafe1080pFps
+                    : ReceiverSafeRealtimeFps;
+                return Math.Min(targetFps, pressureLimit);
+            }
 
             return targetFps;
         }
 
         private bool TryApplyNonNvidia1080pFpsLimit(
             IH264VideoEncoder encoder,
-            ScreenShareQualityProfile quality,
+            StreamingQualityProfile quality,
             int effectiveTargetFps)
         {
             if (RequireHardwareEncoder)
@@ -1374,6 +1464,11 @@ namespace Zink.Services.NativeCalling
             return reason.Contains("quality changed", StringComparison.OrdinalIgnoreCase);
         }
 
+        private static bool IsTransportConnectedKeyFrameRequest(string reason)
+        {
+            return reason.Contains("RTP transport connected", StringComparison.OrdinalIgnoreCase);
+        }
+
         private static bool IsReceiverPlaybackPressureReason(string reason)
         {
             return reason.Contains("receiver GPU playback keyframe requested after realtime queue pressure", StringComparison.OrdinalIgnoreCase) ||
@@ -1384,12 +1479,12 @@ namespace Zink.Services.NativeCalling
         {
             var message = exception.Message;
             var details = exception.ToString();
-            if (details.Contains(nameof(MediaFoundationAv1Encoder), StringComparison.OrdinalIgnoreCase))
+            if (details.Contains(nameof(StreamingMediaFoundationAv1Encoder), StringComparison.OrdinalIgnoreCase))
             {
                 return "The AV1X GPU encoder failed while preparing the preview. Twitch streaming uses H.264, so try again with the Twitch H.264 path.";
             }
 
-            if (details.Contains(nameof(MediaFoundationH264Encoder), StringComparison.OrdinalIgnoreCase) ||
+            if (details.Contains(nameof(StreamingMediaFoundationH264Encoder), StringComparison.OrdinalIgnoreCase) ||
                 details.Contains("EncodeGpuBgraTexture", StringComparison.OrdinalIgnoreCase) ||
                 details.Contains("Transform.ProcessOutput", StringComparison.OrdinalIgnoreCase))
             {
@@ -1406,7 +1501,7 @@ namespace Zink.Services.NativeCalling
         }
 
         private IH264VideoEncoder CreateEncoderWithFallback(
-            ScreenShareQualityProfile quality,
+            StreamingQualityProfile quality,
             int bitrate,
             int frameRate,
             bool preferHardware,
@@ -1418,10 +1513,10 @@ namespace Zink.Services.NativeCalling
                 {
                     DiagnosticLogService.WriteLine(
                         $"[ScreenShare:H264:IntelVPL] Creating official Intel oneVPL encoder with no Media Foundation fallback. quality={quality.Width}x{quality.Height}; fps={frameRate}; bitrate={bitrate / 1000}k.");
-                    return new IntelVplH264Encoder(quality.Width, quality.Height, bitrate, frameRate);
+                    return new StreamingIntelVplH264Encoder(quality.Width, quality.Height, bitrate, frameRate);
                 }
 
-                var encoder = new MediaFoundationH264Encoder(
+                var encoder = new StreamingMediaFoundationH264Encoder(
                     quality.Width,
                     quality.Height,
                     bitrate,
@@ -1439,7 +1534,7 @@ namespace Zink.Services.NativeCalling
                 Debug.WriteLine($"[ScreenShare:H264] Hardware encoder startup failed, falling back to software MFT: {ex.Message}");
                 DiagnosticLogService.WriteLine(
                     $"[ScreenShare:H264] Hardware encoder startup failed; falling back to Microsoft software H.264 so capture/stream can continue. requireHardware={requireHardware}; error={ex.Message}");
-                return new MediaFoundationH264Encoder(
+                return new StreamingMediaFoundationH264Encoder(
                     quality.Width,
                     quality.Height,
                     bitrate,
@@ -1574,7 +1669,7 @@ namespace Zink.Services.NativeCalling
             Debug.WriteLine($"[ScreenShare:GPU:VIDEO] {stage}; device={Environment.MachineName}; target={CurrentTargetFps}fps; quality={quality.Width}x{quality.Height}; bitrate={CurrentBitrate}; requestedPreset={_qualityPreset}; effectivePreset={_effectiveQualityPreset}; captureDx12Required={RequireDirectX12CapturePath}; hardwareEncoderRequired={RequireHardwareEncoder}; directGpuTexture={EnableDirectGpuTexturePath}; dropLateDuplicateFrames={DropLateDuplicateFrames}; encoder='{EncoderMode}'; input='{EncoderInputFormat}'; gpu='{EncoderGpuDeviceMode}'; adaptive='{AdaptiveState}'; log='{DiagnosticLogService.CurrentLogPath}'.");
         }
 
-        private static Bitmap CaptureBitmap(ScreenShareQualityProfile quality)
+        private static Bitmap CaptureBitmap(StreamingQualityProfile quality)
         {
             var bounds = GetVirtualScreenBounds();
             var target = new Bitmap(quality.Width, quality.Height, PixelFormat.Format32bppArgb);
@@ -1612,7 +1707,7 @@ namespace Zink.Services.NativeCalling
             return target;
         }
 
-        private Bitmap? CaptureBitmapWithBestAvailablePath(ScreenShareQualityProfile quality)
+        private Bitmap? CaptureBitmapWithBestAvailablePath(StreamingQualityProfile quality)
         {
             if (_wgcCapture?.IsAvailable == true)
             {
@@ -1632,18 +1727,12 @@ namespace Zink.Services.NativeCalling
             if (RequireDirectX12CapturePath)
                 throw new InvalidOperationException("DirectX 12 Windows Graphics Capture is required, but it is not available.");
 
-            _dxgiCapture ??= new DxgiScreenCaptureService();
-            if (_dxgiCapture.IsAvailable)
-            {
-                var dxgiFrame = _dxgiCapture.TryCapture(quality);
-                if (dxgiFrame != null)
-                    return dxgiFrame;
-            }
-
+            // Live streaming owns its WGC path. Do not fall through to the call-owned
+            // DXGI bitmap service with a screen-share quality contract.
             return CaptureBitmap(quality);
         }
 
-        private static int GetPreviewFrameInterval(ScreenShareQualityProfile quality)
+        private static int GetPreviewFrameInterval(StreamingQualityProfile quality)
         {
             return Math.Max(1, quality.PreviewFrameInterval);
         }
@@ -1654,7 +1743,7 @@ namespace Zink.Services.NativeCalling
         }
 
         private static bool ShouldGeneratePreview(
-            ScreenShareQualityProfile quality,
+            StreamingQualityProfile quality,
             byte[]? latestPreview,
             int captureFrameIndex,
             int previewFrameInterval)
@@ -1668,7 +1757,7 @@ namespace Zink.Services.NativeCalling
             return captureFrameIndex % previewFrameInterval == 0;
         }
 
-        private static byte[] EncodePreviewJpeg(Bitmap bitmap, ScreenShareQualityProfile quality, bool prioritizeStreamingPerformance)
+        private static byte[] EncodePreviewJpeg(Bitmap bitmap, StreamingQualityProfile quality, bool prioritizeStreamingPerformance)
         {
             var jpegQuality = prioritizeStreamingPerformance
                 ? Math.Min(quality.PreviewJpegQuality, 76L)
@@ -1712,12 +1801,12 @@ namespace Zink.Services.NativeCalling
             return ms.ToArray();
         }
 
-        private static int GetBitrate(ScreenShareQualityProfile quality)
+        private static int GetBitrate(StreamingQualityProfile quality)
         {
             return quality.Bitrate;
         }
 
-        private int GetConfiguredBitrate(ScreenShareQualityProfile quality)
+        private int GetConfiguredBitrate(StreamingQualityProfile quality)
         {
             var configured = _bitrateOverride.HasValue
                 ? Math.Max(1_000_000, _bitrateOverride.Value)
@@ -1729,12 +1818,12 @@ namespace Zink.Services.NativeCalling
             return configured;
         }
 
-        private static int GetMinimumBitrate(ScreenShareQualityProfile quality)
+        private static int GetMinimumBitrate(StreamingQualityProfile quality)
         {
             return quality.MinimumBitrate;
         }
 
-        private int GetAdaptiveBitrate(ScreenShareQualityProfile quality, int scalePercent)
+        private int GetAdaptiveBitrate(StreamingQualityProfile quality, int scalePercent)
         {
             var target = GetConfiguredBitrate(quality) * Math.Clamp(scalePercent, 45, 100) / 100;
             if (_bitrateOverride.HasValue)
@@ -1778,7 +1867,7 @@ namespace Zink.Services.NativeCalling
                 if (_bitrateScalePercent < 100)
                 {
                     _bitrateScalePercent = Math.Min(100, _bitrateScalePercent + 10);
-                    CurrentBitrate = GetAdaptiveBitrate(ScreenShareQualityProfile.FromPreset(_effectiveQualityPreset), _bitrateScalePercent);
+                    CurrentBitrate = GetAdaptiveBitrate(StreamingQualityProfile.FromPreset(_effectiveQualityPreset), _bitrateScalePercent);
                     AdaptiveState = $"Realtime recovering bitrate ({_bitrateScalePercent}%)";
                     _healthyWindows = 0;
                     _lastAdaptedAtUtc = DateTimeOffset.UtcNow;
@@ -1787,7 +1876,7 @@ namespace Zink.Services.NativeCalling
 
                 AdaptiveState = _effectiveQualityPreset == _qualityPreset
                     ? "Realtime stable"
-                    : $"Realtime stable at {ScreenShareQualityProfile.FromPreset(_effectiveQualityPreset).Name}";
+                    : $"Realtime stable at {StreamingQualityProfile.FromPreset(_effectiveQualityPreset).Name}";
                 _healthyWindows = 0;
                 _lastAdaptedAtUtc = DateTimeOffset.UtcNow;
             }
@@ -1798,7 +1887,6 @@ namespace Zink.Services.NativeCalling
             if (!IsAdaptiveLatencyModeEnabled || !IsRunning)
                 return;
 
-            var queueRecoveryKeyFrame = false;
             lock (_qualitySync)
             {
                 var now = DateTimeOffset.UtcNow;
@@ -1815,7 +1903,7 @@ namespace Zink.Services.NativeCalling
                     _effectiveQualityPreset = ScreenShareQualityPreset.Hd720p;
                     _bitrateScalePercent = 100;
                     AutoDowngradeCount++;
-                    CurrentBitrate = GetAdaptiveBitrate(ScreenShareQualityProfile.FromPreset(_effectiveQualityPreset), _bitrateScalePercent);
+                    CurrentBitrate = GetAdaptiveBitrate(StreamingQualityProfile.FromPreset(_effectiveQualityPreset), _bitrateScalePercent);
                     AdaptiveState = $"Realtime switched to 720p60: {reason}";
                     _healthyWindows = 0;
                     _lastAdaptedAtUtc = now;
@@ -1827,14 +1915,12 @@ namespace Zink.Services.NativeCalling
                     ? $"Realtime receiver relief bitrate ({_bitrateScalePercent}%): {reason}"
                     : $"Realtime reduced bitrate ({_bitrateScalePercent}%): {reason}";
 
-                CurrentBitrate = GetAdaptiveBitrate(ScreenShareQualityProfile.FromPreset(_effectiveQualityPreset), _bitrateScalePercent);
+                CurrentBitrate = GetAdaptiveBitrate(StreamingQualityProfile.FromPreset(_effectiveQualityPreset), _bitrateScalePercent);
                 _healthyWindows = 0;
                 _lastAdaptedAtUtc = now;
                 Debug.WriteLine($"[ScreenShare:Adaptive] {AdaptiveState}; bitrate={CurrentBitrate}; congestion={CongestionSignals}");
             }
 
-            if (queueRecoveryKeyFrame)
-                RequestRecoveryKeyFrame(reason);
         }
 
         private static ScreenShareQualityPreset GetLowerRealtimePreset(ScreenShareQualityPreset preset)
@@ -1862,7 +1948,7 @@ namespace Zink.Services.NativeCalling
             return new Rectangle(left, top, width, height);
         }
 
-        private static Bitmap ScaleFrame(Bitmap source, ScreenShareQualityProfile quality)
+        private static Bitmap ScaleFrame(Bitmap source, StreamingQualityProfile quality)
         {
             if (source.Width == quality.Width && source.Height == quality.Height)
                 return new Bitmap(source);
@@ -1887,64 +1973,14 @@ namespace Zink.Services.NativeCalling
         }
     }
 
-    public sealed class NativeScreenFrameEventArgs : EventArgs
+    public sealed class StreamingQualityProfile
     {
-        public NativeScreenFrameEventArgs(
-            byte[] frameData,
-            int width,
-            int height,
-            string qualityName,
-            long timestamp,
-            string codec = "jpeg",
-            bool isKeyFrame = true,
-            byte[]? previewFrameData = null,
-            long previewTimestamp = 0)
-        {
-            FrameData = frameData;
-            Width = width;
-            Height = height;
-            QualityName = qualityName;
-            Timestamp = timestamp;
-            Codec = codec;
-            IsKeyFrame = isKeyFrame;
-            PreviewFrameData = previewFrameData ??
-                (ScreenShareCodecNames.IsH264(codec) || ScreenShareCodecNames.IsAv1(codec) ? Array.Empty<byte>() : frameData);
-            PreviewTimestamp = previewTimestamp > 0 ? previewTimestamp : timestamp;
-        }
-
-        public byte[] FrameData { get; }
-        public int Width { get; }
-        public int Height { get; }
-        public string QualityName { get; }
-        public long Timestamp { get; }
-        public string Codec { get; }
-        public bool IsKeyFrame { get; }
-        public byte[] PreviewFrameData { get; }
-        public long PreviewTimestamp { get; }
-    }
-
-    public enum ScreenShareQualityPreset
-    {
-        Performance540p,
-        Hd720p,
-        FullHd1080p,
-        QuadHd2K,
-        UltraHd4K
-    }
-
-    public enum NativeCaptureSourceMode
-    {
-        Desktop,
-        GameOrWindow
-    }
-
-    public sealed class ScreenShareQualityProfile
-    {
-        private ScreenShareQualityProfile(
+        private StreamingQualityProfile(
             ScreenShareQualityPreset preset,
             string name,
             int width,
             int height,
+            int targetFps,
             int bitrate,
             int minimumBitrate,
             int previewFrameInterval,
@@ -1955,6 +1991,7 @@ namespace Zink.Services.NativeCalling
             Name = name;
             Width = width;
             Height = height;
+            TargetFps = targetFps;
             Bitrate = bitrate;
             MinimumBitrate = minimumBitrate;
             PreviewFrameInterval = previewFrameInterval;
@@ -1966,64 +2003,70 @@ namespace Zink.Services.NativeCalling
         public string Name { get; }
         public int Width { get; }
         public int Height { get; }
+        public int TargetFps { get; }
         public int Bitrate { get; }
         public int MinimumBitrate { get; }
         public int PreviewFrameInterval { get; }
         public int PreviewMaxWidth { get; }
         public long PreviewJpegQuality { get; }
 
-        public static ScreenShareQualityProfile FromPreset(ScreenShareQualityPreset preset)
+        public static StreamingQualityProfile FromPreset(ScreenShareQualityPreset preset)
         {
             return preset switch
             {
-                ScreenShareQualityPreset.Performance540p => new ScreenShareQualityProfile(
+                ScreenShareQualityPreset.Performance540p => new StreamingQualityProfile(
                     preset,
                     "540p realtime",
                     960,
                     540,
+                    targetFps: 30,
                     bitrate: 3_500_000,
                     minimumBitrate: 2_500_000,
-                    previewFrameInterval: NativeScreenShareStreamingService.GetLivePreviewFrameInterval(),
+                    previewFrameInterval: StreamingVideoCapturePipeline.GetLivePreviewFrameInterval(),
                     previewMaxWidth: 960,
-                    previewJpegQuality: NativeScreenShareStreamingService.JpegQuality),
-                ScreenShareQualityPreset.Hd720p => new ScreenShareQualityProfile(
+                    previewJpegQuality: StreamingVideoCapturePipeline.JpegQuality),
+                ScreenShareQualityPreset.Hd720p => new StreamingQualityProfile(
                     preset,
                     "720p",
                     1280,
                     720,
+                    targetFps: 30,
                     bitrate: 8_000_000,
                     minimumBitrate: 5_500_000,
-                    previewFrameInterval: NativeScreenShareStreamingService.GetLivePreviewFrameInterval(),
+                    previewFrameInterval: StreamingVideoCapturePipeline.GetLivePreviewFrameInterval(),
                     previewMaxWidth: 1280,
-                    previewJpegQuality: NativeScreenShareStreamingService.JpegQuality),
-                ScreenShareQualityPreset.FullHd1080p => new ScreenShareQualityProfile(
+                    previewJpegQuality: StreamingVideoCapturePipeline.JpegQuality),
+                ScreenShareQualityPreset.FullHd1080p => new StreamingQualityProfile(
                     preset,
                     "1080p",
                     1920,
                     1080,
+                    targetFps: 60,
                     bitrate: 12_000_000,
                     minimumBitrate: 8_000_000,
-                    previewFrameInterval: NativeScreenShareStreamingService.GetLivePreviewFrameInterval(),
+                    previewFrameInterval: StreamingVideoCapturePipeline.GetLivePreviewFrameInterval(),
                     previewMaxWidth: 1920,
-                    previewJpegQuality: NativeScreenShareStreamingService.JpegQuality),
-                ScreenShareQualityPreset.QuadHd2K => new ScreenShareQualityProfile(
+                    previewJpegQuality: StreamingVideoCapturePipeline.JpegQuality),
+                ScreenShareQualityPreset.QuadHd2K => new StreamingQualityProfile(
                     preset,
                     "1440p",
                     2560,
                     1440,
+                    targetFps: 60,
                     bitrate: 22_000_000,
                     minimumBitrate: 14_000_000,
-                    previewFrameInterval: NativeScreenShareStreamingService.TargetFps * 6,
+                    previewFrameInterval: StreamingVideoCapturePipeline.TargetFps * 6,
                     previewMaxWidth: 1280,
                     previewJpegQuality: 68L),
-                ScreenShareQualityPreset.UltraHd4K => new ScreenShareQualityProfile(
+                ScreenShareQualityPreset.UltraHd4K => new StreamingQualityProfile(
                     preset,
                     "4K",
                     3840,
                     2160,
+                    targetFps: 60,
                     bitrate: 36_000_000,
                     minimumBitrate: 24_000_000,
-                    previewFrameInterval: NativeScreenShareStreamingService.TargetFps * 10,
+                    previewFrameInterval: StreamingVideoCapturePipeline.TargetFps * 10,
                     previewMaxWidth: 1280,
                     previewJpegQuality: 68L),
                 _ => FromPreset(ScreenShareQualityPreset.Hd720p)

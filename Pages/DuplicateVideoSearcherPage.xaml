@@ -26,10 +26,15 @@
                 <TextBlock Text="Find videos in your Zink Video Library that appear more than once." Opacity="0.75"/>
             </StackPanel>
 
-            <Button Grid.Column="1"
-                    Content="Refresh"
-                    Click="RefreshButton_Click"
-                    VerticalAlignment="Top"/>
+            <StackPanel Grid.Column="1"
+                        Orientation="Horizontal"
+                        Spacing="8"
+                        VerticalAlignment="Top">
+                <Button Content="Delete all duplicates"
+                        Click="DeleteAllDuplicatesButton_Click"/>
+                <Button Content="Refresh"
+                        Click="RefreshButton_Click"/>
+            </StackPanel>
         </Grid>
 
         <InfoBar x:Name="StatusBar"
@@ -145,6 +150,12 @@
                             <TextBlock x:Name="ZinkDialogMessage"
                                        Opacity="0.78"
                                        TextWrapping="WrapWholeWords"/>
+                            <ComboBox x:Name="BulkDriveComboBox"
+                                      Header="Delete duplicate copies from"
+                                      PlaceholderText="Select a drive"
+                                      DisplayMemberPath="DisplayName"
+                                      Visibility="Collapsed"
+                                      HorizontalAlignment="Stretch"/>
                         </StackPanel>
                     </Grid>
 

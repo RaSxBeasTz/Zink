@@ -5,10 +5,112 @@
     xmlns:local="using:Zink.Pages"
     Background="{ThemeResource ApplicationPageBackgroundThemeBrush}">
 
-    <Grid>
-        <!-- WebView2 will fill the page -->
+    <Grid Background="#020812">
         <WebView2 x:Name="XboxWebView"
-              HorizontalAlignment="Stretch"
-              VerticalAlignment="Stretch" />
+                  HorizontalAlignment="Stretch"
+                  VerticalAlignment="Stretch" />
+
+        <!-- Kept on the Xbox page so the achievement UI cannot affect other pages. -->
+        <Grid x:Name="AchievementOverlay"
+              Width="720"
+              Height="190"
+              Margin="0,0,0,54"
+              HorizontalAlignment="Center"
+              VerticalAlignment="Bottom"
+              Opacity="0"
+              IsHitTestVisible="False"
+              Visibility="Collapsed">
+            <Grid.RenderTransform>
+                <CompositeTransform x:Name="AchievementTransform"
+                                    TranslateY="42"
+                                    ScaleX="0.94"
+                                    ScaleY="0.94"
+                                    CenterX="360"
+                                    CenterY="95" />
+            </Grid.RenderTransform>
+
+            <Border CornerRadius="30"
+                    BorderThickness="2"
+                    BorderBrush="#D411D8E8">
+                <Border.Background>
+                    <LinearGradientBrush StartPoint="0,0" EndPoint="1,1">
+                        <GradientStop Color="#F1071822" Offset="0" />
+                        <GradientStop Color="#F20A2430" Offset="0.55" />
+                        <GradientStop Color="#F004101A" Offset="1" />
+                    </LinearGradientBrush>
+                </Border.Background>
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="180" />
+                        <ColumnDefinition Width="*" />
+                    </Grid.ColumnDefinitions>
+
+                    <Ellipse Width="138" Height="138"
+                             HorizontalAlignment="Center"
+                             VerticalAlignment="Center"
+                             Stroke="#FF38FF66"
+                             StrokeThickness="4">
+                        <Ellipse.Fill>
+                            <RadialGradientBrush>
+                                <GradientStop Color="#B838FF66" Offset="0" />
+                                <GradientStop Color="#2011D8E8" Offset="0.7" />
+                                <GradientStop Color="#0011D8E8" Offset="1" />
+                            </RadialGradientBrush>
+                        </Ellipse.Fill>
+                    </Ellipse>
+                    <Border Grid.Column="0"
+                            Width="92" Height="92"
+                            CornerRadius="46"
+                            Background="#D9061520"
+                            BorderBrush="#FF9AFFAE"
+                            BorderThickness="1">
+                        <FontIcon Glyph="&#xE7E7;"
+                                  FontFamily="Segoe Fluent Icons"
+                                  FontSize="48"
+                                  Foreground="White"
+                                  HorizontalAlignment="Center"
+                                  VerticalAlignment="Center" />
+                    </Border>
+
+                    <StackPanel Grid.Column="1"
+                                Margin="14,25,30,22"
+                                VerticalAlignment="Center"
+                                Spacing="7">
+                        <TextBlock Text="ACHIEVEMENT UNLOCKED"
+                                   Foreground="#FF82FF9D"
+                                   FontSize="17"
+                                   FontWeight="SemiBold"
+                                   CharacterSpacing="180" />
+                        <TextBlock x:Name="AchievementTitleText"
+                                   Text="Achievement unlocked"
+                                   Foreground="White"
+                                   FontSize="32"
+                                   FontWeight="Bold"
+                                   TextTrimming="CharacterEllipsis"
+                                   MaxLines="1" />
+                        <StackPanel Orientation="Horizontal" Spacing="12">
+                            <Border Padding="12,5"
+                                    CornerRadius="12"
+                                    Background="#3038FF66"
+                                    BorderBrush="#FF38FF66"
+                                    BorderThickness="1">
+                                <TextBlock x:Name="AchievementScoreText"
+                                           Text="G"
+                                           Foreground="White"
+                                           FontSize="17"
+                                           FontWeight="Bold" />
+                            </Border>
+                            <TextBlock x:Name="AchievementDescriptionText"
+                                       Text="Xbox achievement added to your profile"
+                                       Foreground="#FFD6E8EA"
+                                       FontSize="16"
+                                       VerticalAlignment="Center"
+                                       TextTrimming="CharacterEllipsis"
+                                       MaxLines="1" />
+                        </StackPanel>
+                    </StackPanel>
+                </Grid>
+            </Border>
+        </Grid>
     </Grid>
 </Page>

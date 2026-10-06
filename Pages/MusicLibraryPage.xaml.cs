@@ -1,17 +1,20 @@
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Navigation;
+using Microsoft.UI.Xaml.Media.Imaging;
 using System.Collections.ObjectModel;
 using System.ComponentModel;
 using Windows.Storage;
 using Windows.Storage.Pickers;
 using Windows.Storage.AccessCache;
+using Windows.Storage.Search;
 using System.Threading.Tasks;
 using System.Collections.Generic;
 using System.Linq;
 using TagLib;
 using System.IO;
 using System;
+using Windows.Storage.Streams;
 
 namespace Zink.Pages
 {
@@ -33,6 +36,7 @@ namespace Zink.Pages
         private string _pickedFolderPath;
         private StorageFolder _pickedFolder;
         private DispatcherTimer _watcherTimer;
+        private int _musicLoadingDepth;
 
         // Prevents multiple prompts in the same page instance
         private bool _emptyLibraryPromptShown;
@@ -46,6 +50,7 @@ namespace Zink.Pages
         {
             this.InitializeComponent();
             this.DataContext = this;
+            this.NavigationCacheMode = NavigationCacheMode.Required;
 
             // NEW: ensure we can show the dialog after the page is actually in the tree
             this.Loaded += MusicLibraryPage_Loaded;
@@ -54,6 +59,12 @@ namespace Zink.Pages
         protected override async void OnNavigatedTo(NavigationEventArgs e)
         {
             base.OnNavigatedTo(e);
+
+            if (_pickedFolder != null)
+            {
+                StartWatcher();
+                return;
+            }
 
             bool loadedAnySongs = false;
 
@@ -137,7 +148,7 @@ namespace Zink.Pages
             var dialog = new ContentDialog
             {
                 Title = "No music found",
-                Content = "You don't have any music here. Would you like to add the folder where you have your music saved and add it to Zink so you can store it here to see, and play?",
+                Content = "Would you like to add the folder where your music is saved? Zink will show the music inside each folder before you add it.",
                 CloseButtonText = "No thanks",          // left
                 PrimaryButtonText = "Yes, okay",        // right (blue)
                 DefaultButton = ContentDialogButton.Primary,
@@ -159,17 +170,9 @@ namespace Zink.Pages
         // Shared picker logic (so the page-load dialog can trigger the same flow)
         private async Task PickFolderAndLoadAsync(bool showSelectedDialog)
         {
-            Songs.Clear();
             StopWatcher();
 
-            var picker = new FolderPicker();
-            picker.SuggestedStartLocation = PickerLocationId.MusicLibrary;
-            picker.FileTypeFilter.Add("*");
-
-            var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(App.MainWindow);
-            WinRT.Interop.InitializeWithWindow.Initialize(picker, hwnd);
-
-            var folder = await picker.PickSingleFolderAsync();
+            var folder = await ShowMusicFolderBrowserAsync();
             if (folder != null)
             {
                 _pickedFolder = folder;
@@ -183,13 +186,13 @@ namespace Zink.Pages
                 {
                     var xamlRoot = GetDialogXamlRoot();
 
-                    // If for some reason it's still null, don't crash�just skip the dialog
+                    // If for some reason it's still null, don't crash—just skip the dialog
                     if (xamlRoot != null)
                     {
                         var dialog = new ContentDialog
                         {
                             Title = "Music Folder Selected",
-                            Content = $"You've selected:\n{folder.Path}\n\nYour music will now be added.",
+                            Content = $"Zink will add the music from:\n{folder.Path}",
                             CloseButtonText = "OK",
                             XamlRoot = xamlRoot
                         };
@@ -200,23 +203,267 @@ namespace Zink.Pages
                 await LoadSongsFromFolder(folder);
                 StartWatcher();
             }
+            else if (_pickedFolder != null)
+            {
+                StartWatcher();
+            }
         }
 
-        private async Task LoadSongsFromFolder(StorageFolder folder)
+        private async Task<StorageFolder> ShowMusicFolderBrowserAsync()
         {
-            var files = await GetAllMusicFilesAsync(folder);
-            Songs.Clear();
-            foreach (var file in files)
+            var xamlRoot = GetDialogXamlRoot();
+            if (xamlRoot == null) return null;
+
+            StorageFolder currentFolder = _pickedFolder;
+            if (currentFolder == null)
             {
-                var song = await LoadSongInfoAsync(file);
-                if (song != null)
-                    Songs.Add(song);
+                try
+                {
+                    var musicPath = Environment.GetFolderPath(Environment.SpecialFolder.MyMusic);
+                    if (!string.IsNullOrWhiteSpace(musicPath))
+                        currentFolder = await StorageFolder.GetFolderFromPathAsync(musicPath);
+                }
+                catch { }
             }
+
+            if (currentFolder == null)
+            {
+                var initialPicker = new FolderPicker { SuggestedStartLocation = PickerLocationId.MusicLibrary };
+                initialPicker.FileTypeFilter.Add("*");
+                var initialHwnd = WinRT.Interop.WindowNative.GetWindowHandle(App.MainWindow);
+                WinRT.Interop.InitializeWithWindow.Initialize(initialPicker, initialHwnd);
+                currentFolder = await initialPicker.PickSingleFolderAsync();
+                if (currentFolder == null) return null;
+            }
+
+            var pathText = new TextBlock
+            {
+                TextWrapping = TextWrapping.Wrap,
+                Opacity = 0.75,
+                FontSize = 12
+            };
+            var statusText = new TextBlock { Opacity = 0.7, FontSize = 12 };
+            var entries = new ObservableCollection<MusicFolderBrowserEntry>();
+            var list = new ListView
+            {
+                ItemsSource = entries,
+                DisplayMemberPath = nameof(MusicFolderBrowserEntry.DisplayName),
+                IsItemClickEnabled = true,
+                SelectionMode = ListViewSelectionMode.None,
+                MinHeight = 330,
+                MaxHeight = 480
+            };
+            var upButton = new Button { Content = "Up" };
+            var anotherLocationButton = new Button { Content = "Choose another location" };
+            var toolbar = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8 };
+            toolbar.Children.Add(upButton);
+            toolbar.Children.Add(anotherLocationButton);
+
+            var content = new StackPanel { Spacing = 10, MinWidth = 620 };
+            content.Children.Add(new TextBlock
+            {
+                Text = "Open a folder to preview its music, then choose Add this folder.",
+                TextWrapping = TextWrapping.Wrap
+            });
+            content.Children.Add(toolbar);
+            content.Children.Add(pathText);
+            content.Children.Add(list);
+            content.Children.Add(statusText);
+
+            var dialog = new ContentDialog
+            {
+                Title = "Add a music folder",
+                Content = content,
+                PrimaryButtonText = "Add this folder",
+                CloseButtonText = "Cancel",
+                DefaultButton = ContentDialogButton.Primary,
+                XamlRoot = xamlRoot
+            };
+
+            async Task ShowFolderAsync(StorageFolder folder)
+            {
+                currentFolder = folder;
+                pathText.Text = folder.Path;
+                statusText.Text = "Loading folder...";
+                entries.Clear();
+                try
+                {
+                    var folders = await folder.GetFoldersAsync();
+                    foreach (var childFolder in folders.OrderBy(f => f.Name, StringComparer.OrdinalIgnoreCase))
+                    {
+                        entries.Add(new MusicFolderBrowserEntry
+                        {
+                            DisplayName = $"📁  {childFolder.Name}",
+                            Folder = childFolder
+                        });
+                    }
+
+                    var musicFiles = (await folder.GetFilesAsync())
+                        .Where(IsSupportedMusicFile)
+                        .OrderBy(f => f.Name, StringComparer.OrdinalIgnoreCase)
+                        .ToList();
+                    foreach (var file in musicFiles)
+                        entries.Add(new MusicFolderBrowserEntry { DisplayName = $"♫  {file.Name}" });
+
+                    statusText.Text = musicFiles.Count == 1
+                        ? "1 music file in this folder"
+                        : $"{musicFiles.Count} music files in this folder";
+                }
+                catch
+                {
+                    statusText.Text = "Zink could not open this folder.";
+                }
+            }
+
+            list.ItemClick += async (_, args) =>
+            {
+                if (args.ClickedItem is MusicFolderBrowserEntry entry && entry.Folder != null)
+                    await ShowFolderAsync(entry.Folder);
+            };
+            upButton.Click += async (_, __) =>
+            {
+                try
+                {
+                    var parent = await currentFolder.GetParentAsync();
+                    if (parent != null) await ShowFolderAsync(parent);
+                }
+                catch { }
+            };
+            anotherLocationButton.Click += async (_, __) =>
+            {
+                var picker = new FolderPicker { SuggestedStartLocation = PickerLocationId.MusicLibrary };
+                picker.FileTypeFilter.Add("*");
+                var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(App.MainWindow);
+                WinRT.Interop.InitializeWithWindow.Initialize(picker, hwnd);
+                var selected = await picker.PickSingleFolderAsync();
+                if (selected != null) await ShowFolderAsync(selected);
+            };
+
+            await ShowFolderAsync(currentFolder);
+            return await dialog.ShowAsync() == ContentDialogResult.Primary ? currentFolder : null;
+        }
+
+        private static bool IsSupportedMusicFile(StorageFile file)
+        {
+            var supportedTypes = new[]
+            {
+                ".mp3", ".mp4", ".flac", ".wav", ".m4a", ".aac", ".wma",
+                ".ogg", ".alac", ".aiff", ".opus"
+            };
+            return supportedTypes.Contains(Path.GetExtension(file.Name), StringComparer.OrdinalIgnoreCase);
+        }
+
+        private sealed class MusicFolderBrowserEntry
+        {
+            public string DisplayName { get; set; }
+            public StorageFolder Folder { get; set; }
+        }
+
+        private async Task LoadSongsFromFolder(StorageFolder folder, bool showLoading = true)
+        {
+            if (showLoading)
+                BeginMusicLoading();
+            try
+            {
+                var files = await GetAllMusicFilesAsync(folder);
+                Songs.Clear();
+                if (showLoading)
+                    UpdateMusicLoadingProgress(0, files.Count);
+
+                var loadedSongs = 0;
+                foreach (var file in files)
+                {
+                    var song = await LoadSongInfoAsync(file);
+                    if (song != null)
+                        Songs.Add(song);
+
+                    loadedSongs++;
+                    if (showLoading)
+                        UpdateMusicLoadingProgress(loadedSongs, files.Count);
+                }
+            }
+            finally
+            {
+                if (showLoading)
+                    EndMusicLoading();
+            }
+        }
+
+        private void BeginMusicLoading()
+        {
+            _musicLoadingDepth++;
+            MusicLibraryLoadingOverlay.Visibility = Visibility.Visible;
+            MusicLibraryLoadingRing.IsActive = true;
+            LibraryStatusRing.Visibility = Visibility.Visible;
+            LibraryStatusRing.IsActive = true;
+            UpdateMusicLoadingProgress(0, 0);
+        }
+
+        private void EndMusicLoading()
+        {
+            if (_musicLoadingDepth > 0)
+                _musicLoadingDepth--;
+
+            if (_musicLoadingDepth != 0)
+                return;
+
+            MusicLibraryLoadingRing.IsActive = false;
+            MusicLibraryLoadingOverlay.Visibility = Visibility.Collapsed;
+            LibraryStatusRing.IsActive = false;
+            LibraryStatusRing.Visibility = Visibility.Collapsed;
+            LibraryStatusText.Text = Songs.Count > 0 ? $"{Songs.Count} songs in your library" : "";
+            SetMusicProgressVisuals(0, false);
+        }
+
+        private void UpdateMusicLoadingProgress(int loaded, int total)
+        {
+            var message = total > 0
+                ? $"Adding the music in your folder {loaded} out of {total}"
+                : "Finding the music in your folder...";
+            var percent = total > 0 ? Math.Clamp((double)loaded / total * 100, 0, 100) : 0;
+
+            MusicLibraryLoadingText.Text = message;
+            LibraryStatusText.Text = message;
+            SetMusicProgressVisuals(percent, total > 0);
+        }
+
+        private void SetMusicProgressVisuals(double percent, bool show)
+        {
+            var visibility = show ? Visibility.Visible : Visibility.Collapsed;
+            var text = show ? $"{percent:0}%" : "";
+            MusicLibraryLoadingProgressBar.Value = percent;
+            MusicLibraryLoadingProgressBar.Visibility = visibility;
+            MusicLibraryLoadingPercentage.Text = text;
+            MusicLibraryLoadingPercentage.Visibility = visibility;
+            LibraryStatusProgressBar.Value = percent;
+            LibraryStatusProgressBar.Visibility = visibility;
+            LibraryStatusProgressText.Text = text;
+            LibraryStatusProgressText.Visibility = visibility;
         }
 
         private async Task<List<StorageFile>> GetAllMusicFilesAsync(StorageFolder folder)
         {
-            var supportedTypes = new[] { ".mp3", ".flac", ".wav", ".m4a", ".aac", ".wma" };
+            var supportedTypes = new[]
+            {
+                ".mp3", ".mp4", ".flac", ".wav", ".m4a", ".aac", ".wma",
+                ".ogg", ".alac", ".aiff", ".opus"
+            };
+
+            try
+            {
+                var options = new QueryOptions(CommonFileQuery.DefaultQuery, supportedTypes)
+                {
+                    FolderDepth = FolderDepth.Deep
+                };
+                var query = folder.CreateFileQueryWithOptions(options);
+                return (await query.GetFilesAsync()).ToList();
+            }
+            catch
+            {
+                // Some folder providers do not support deep queries. Walk those
+                // folders manually so their music can still be loaded.
+            }
+
             var files = new List<StorageFile>();
             var queue = new Queue<StorageFolder>();
             queue.Enqueue(folder);
@@ -227,7 +474,8 @@ namespace Zink.Pages
                 try
                 {
                     var fileList = await current.GetFilesAsync();
-                    files.AddRange(fileList.Where(f => supportedTypes.Contains(Path.GetExtension(f.Name).ToLower())));
+                    files.AddRange(fileList.Where(f => supportedTypes.Contains(
+                        Path.GetExtension(f.Name), StringComparer.OrdinalIgnoreCase)));
                     var subfolders = await current.GetFoldersAsync();
                     foreach (var sub in subfolders)
                         queue.Enqueue(sub);
@@ -239,44 +487,62 @@ namespace Zink.Pages
 
         private async Task<SongInfo> LoadSongInfoAsync(StorageFile file)
         {
+            var song = new SongInfo
+            {
+                Title = file.DisplayName,
+                Artist = "",
+                Album = "",
+                Duration = "",
+                FilePath = file.Path
+            };
+
             try
             {
                 using (var stream = await file.OpenStreamForReadAsync())
                 {
-                    var tagFile = TagLib.File.Create(new StreamFileAbstraction(file.Name, stream, stream));
+                    using var tagFile = TagLib.File.Create(new StreamFileAbstraction(file.Name, stream, stream));
                     var tag = tagFile.Tag;
                     var props = tagFile.Properties;
 
-                    return new SongInfo
-                    {
-                        Title = string.IsNullOrEmpty(tag.Title) ? file.DisplayName : tag.Title,
-                        Artist = tag.FirstPerformer ?? "",
-                        Album = tag.Album ?? "",
-                        Duration = props.Duration.ToString(@"mm\:ss"),
-                        FilePath = file.Path
-                    };
+                    song.Title = string.IsNullOrEmpty(tag.Title) ? file.DisplayName : tag.Title;
+                    song.Artist = tag.FirstPerformer ?? "";
+                    song.Album = tag.Album ?? "";
+                    song.Duration = props.Duration.ToString(@"mm\:ss");
+
+                    var picture = tag.Pictures?.FirstOrDefault();
+                    var artworkBytes = picture?.Data?.Data;
+                    if (artworkBytes != null && artworkBytes.Length > 0)
+                        song.Artwork = await CreateArtworkAsync(artworkBytes);
                 }
             }
             catch
             {
-                return null;
+                // The file is still playable even when its embedded tags or artwork
+                // cannot be read, so keep it in the library using its file name.
             }
+
+            return song;
+        }
+
+        private static async Task<BitmapImage> CreateArtworkAsync(byte[] artworkBytes)
+        {
+            using var stream = new InMemoryRandomAccessStream();
+            using (var writer = new DataWriter(stream.GetOutputStreamAt(0)))
+            {
+                writer.WriteBytes(artworkBytes);
+                await writer.StoreAsync();
+                await writer.FlushAsync();
+            }
+
+            stream.Seek(0);
+            var bitmap = new BitmapImage { DecodePixelWidth = 440 };
+            await bitmap.SetSourceAsync(stream);
+            return bitmap;
         }
 
         private void StartWatcher()
         {
             StopWatcher();
-            if (_pickedFolder == null) return;
-
-            _watcherTimer = new DispatcherTimer
-            {
-                Interval = TimeSpan.FromSeconds(10)
-            };
-            _watcherTimer.Tick += async (s, e) =>
-            {
-                await LoadSongsFromFolder(_pickedFolder);
-            };
-            _watcherTimer.Start();
         }
 
         private void StopWatcher()
@@ -307,18 +573,46 @@ namespace Zink.Pages
         private void PlaySongButton_Click(object sender, RoutedEventArgs e)
         {
             if (sender is Button btn && btn.DataContext is SongInfo song)
+                PlaySong(song);
+        }
+
+        private void SongArtwork_Tapped(object sender, Microsoft.UI.Xaml.Input.TappedRoutedEventArgs e)
+        {
+            if (sender is Border artwork && artwork.DataContext is SongInfo song)
+                PlaySong(song);
+        }
+
+        private void SongArtwork_PointerEntered(object sender, Microsoft.UI.Xaml.Input.PointerRoutedEventArgs e)
+        {
+            if (sender is Border artwork)
             {
-                LibraryData.PlaySongList(new List<SongInfo> { song });
-
-                var main = (MainWindow)App.MainWindow;
-                main.ContentFrame.Navigate(typeof(MusicPlayerPage), "autoplay");
-
-                var playerItem = main.SidebarNav.MenuItems
-                    .OfType<NavigationViewItem>()
-                    .FirstOrDefault(i => (string)i.Tag == "MusicPlayer");
-                if (playerItem != null)
-                    main.SidebarNav.SelectedItem = playerItem;
+                artwork.BorderBrush = new Microsoft.UI.Xaml.Media.SolidColorBrush(
+                    global::Windows.UI.Color.FromArgb(255, 17, 216, 232));
+                artwork.BorderThickness = new Thickness(3);
             }
+        }
+
+        private void SongArtwork_PointerExited(object sender, Microsoft.UI.Xaml.Input.PointerRoutedEventArgs e)
+        {
+            if (sender is Border artwork)
+            {
+                artwork.BorderBrush = null;
+                artwork.BorderThickness = new Thickness(0);
+            }
+        }
+
+        private static void PlaySong(SongInfo song)
+        {
+            LibraryData.PlaySongList(new List<SongInfo> { song });
+
+            var main = (MainWindow)App.MainWindow;
+            main.ContentFrame.Navigate(typeof(MusicPlayerPage), "autoplay");
+
+            var playerItem = main.SidebarNav.MenuItems
+                .OfType<NavigationViewItem>()
+                .FirstOrDefault(i => (string)i.Tag == "MusicPlayer");
+            if (playerItem != null)
+                main.SidebarNav.SelectedItem = playerItem;
         }
 
         private void OnPropertyChanged(string name) =>
@@ -331,6 +625,7 @@ namespace Zink.Pages
             public string Album { get; set; }
             public string Duration { get; set; }
             public string FilePath { get; set; }
+            public BitmapImage Artwork { get; set; }
         }
     }
 

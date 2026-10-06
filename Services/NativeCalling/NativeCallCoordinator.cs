@@ -118,7 +118,7 @@ namespace Zink.Services.NativeCalling
             var callId = Guid.NewGuid().ToString();
 
             await SocialManager.Instance.Realtime.CallUserAsync(targetUserId, callId);
-            Zink.Services.IncomingCallRingtoneService.TryStart();
+            Zink.Services.IncomingCallRingtoneService.TryStartOutgoing();
 
             CallLaunchState.SetOutgoing(callId, targetUserId, isScreenShare);
             SetOutgoing(callId, targetUserId, isScreenShare);
@@ -221,6 +221,10 @@ namespace Zink.Services.NativeCalling
             {
                 AudioPlaybackService.Instance.Stop();
                 AudioActivityService.Instance.UpdateRemoteLevel(0);
+            }
+            else if (CurrentSession.State == NativeCallState.Connected)
+            {
+                AudioPlaybackService.Instance.Start();
             }
         }
 
@@ -402,8 +406,7 @@ namespace Zink.Services.NativeCalling
                         CurrentSession.TargetUserId = e.FromUserId;
                 }
 
-                AudioPlaybackService.Instance.Start();
-                AudioPlaybackService.Instance.Play(e.AudioData);
+                AudioPlaybackService.Instance.QueuePlayback(e.AudioData);
 
                 _receivedAudioChunks++;
                 UpdateAudioFlowStatus();

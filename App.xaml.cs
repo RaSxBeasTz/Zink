@@ -1,7 +1,8 @@
-﻿using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Xaml.Controls;
 using System;
+using System.Diagnostics;
 using System.IO;
 using System.Threading.Tasks;
 using Windows.Media.Playback;
@@ -23,21 +24,28 @@ namespace Zink
 
         private TrayIconService _trayService;
         private bool _exitRequested;
+        private bool _closeChoiceDialogOpen;
+        private Microsoft.UI.Windowing.AppWindow? _mainAppWindow;
 
         private Task? _replayStartupTask;
+        private Task _replayCleanupTask = Task.CompletedTask;
         private bool _replayReady;
         private string? _replayStartupError;
 
         private DateTimeOffset? _replayBufferStartedAtUtc;
-        private static readonly TimeSpan RequiredReplayBufferDuration = TimeSpan.FromSeconds(45);
+        private static TimeSpan RequiredReplayBufferDuration =>
+            TimeSpan.FromSeconds(RecordingPreferences.BackgroundReplayDurationSeconds);
         private static readonly TimeSpan VideoLibraryBackgroundScanInterval = TimeSpan.FromMinutes(5);
         private const string BackgroundRunSettingKey = "ZinkBackgroundRunEnabled";
+        private const string MainInstanceKey = "Zink.MainInstance";
+        private AppLifecycleInstance? _mainInstance;
 
         public App()
         {
             this.InitializeComponent();
             DiagnosticLogService.InitializeFromSettings();
             DiagnosticLogService.WriteLine("Zink app constructor started.");
+            DiagnosticLogService.WriteLaunchContext("constructor");
             HookDiagnosticCrashLogging();
 
             try
@@ -89,7 +97,13 @@ namespace Zink
             {
                 try
                 {
-                    if (IsScreenShareDiagnosticException(e.Exception))
+                    // Qualcomm's async H.264 MFT reports E_UNEXPECTED when a
+                    // best-effort output probe finds no sample. The encoder handles
+                    // that status as "not ready". Writing a full exception and stack
+                    // trace for every probe floods the shared diagnostic lock and can
+                    // delay RTP/audio callbacks while a screen share is active.
+                    if (!IsHandledQualcommOutputNotReady(e.Exception) &&
+                        IsScreenShareDiagnosticException(e.Exception))
                         DiagnosticLogService.WriteLine("First-chance screen-share exception: " + e.Exception);
                 }
                 catch
@@ -117,6 +131,7 @@ namespace Zink
                 try
                 {
                     DiagnosticLogService.WriteLine("Process exit.");
+                    ManualRecordingService.Instance.StopAsync().GetAwaiter().GetResult();
                 }
                 catch
                 {
@@ -141,8 +156,33 @@ namespace Zink
                 stack.Contains("SIPSorcery", StringComparison.OrdinalIgnoreCase);
         }
 
-        protected override void OnLaunched(Microsoft.UI.Xaml.LaunchActivatedEventArgs args)
+        private static bool IsHandledQualcommOutputNotReady(Exception exception)
         {
+            const int EUnexpected = unchecked((int)0x8000FFFF);
+            return exception is SharpDX.SharpDXException sharpDxException &&
+                sharpDxException.ResultCode.Code == EUnexpected;
+        }
+
+        protected override async void OnLaunched(Microsoft.UI.Xaml.LaunchActivatedEventArgs args)
+        {
+            DiagnosticLogService.EnsureLogFile("Visual Studio/app launch");
+            DiagnosticLogService.WriteLaunchContext("OnLaunched", args.Arguments);
+            DiagnosticLogService.Flush();
+            LocalizationService.InitializeForStartup();
+
+            var currentInstance = AppLifecycleInstance.GetCurrent();
+            _mainInstance = AppLifecycleInstance.FindOrRegisterForKey(MainInstanceKey);
+
+            if (!_mainInstance.IsCurrent)
+            {
+                await _mainInstance.RedirectActivationToAsync(currentInstance.GetActivatedEventArgs());
+                Exit();
+                return;
+            }
+
+            _mainInstance.Activated += MainInstance_Activated;
+
+            _replayCleanupTask = Task.Run(ReplayTemporaryFileCleanup.DeleteContents);
             _ = InitializeAppServicesAsync();
 
             SetupTray();
@@ -179,7 +219,7 @@ namespace Zink
             {
                 MainWindow = new MainWindow();
                 MainWindow.SuppressInitialNavigation = true;
-                MainWindow.Closed += OnMainWindowClosed;
+                AttachMainWindowLifecycle(MainWindow);
                 MainWindow.Activate();
 
                 _ = VideoLibraryService.Current.StartAsync(VideoLibraryBackgroundScanInterval);
@@ -200,7 +240,7 @@ namespace Zink
             if (launchedFromStartupTask)
             {
                 MainWindow = new MainWindow();
-                MainWindow.Closed += OnMainWindowClosed;
+                AttachMainWindowLifecycle(MainWindow);
                 MainWindow.Activate();
 
                 MainWindow.DispatcherQueue.TryEnqueue(() =>
@@ -223,7 +263,7 @@ namespace Zink
             }
 
             MainWindow = new MainWindow();
-            MainWindow.Closed += OnMainWindowClosed;
+            AttachMainWindowLifecycle(MainWindow);
             MainWindow.Activate();
 
             _ = VideoLibraryService.Current.StartAsync(VideoLibraryBackgroundScanInterval);
@@ -320,7 +360,7 @@ namespace Zink
                 if (MainWindow == null)
                 {
                     MainWindow = new MainWindow();
-                    MainWindow.Closed += OnMainWindowClosed;
+                    AttachMainWindowLifecycle(MainWindow);
                     MainWindow.Activate();
                 }
 
@@ -391,7 +431,7 @@ namespace Zink
 
                     _trayService?.ShowBalloonTip(
                         "Zink Replay",
-                        $"Replay buffer is still filling: {secondsReady}/45 seconds.");
+                        $"Replay buffer is still filling: {secondsReady}/{(int)RequiredReplayBufferDuration.TotalSeconds} seconds.");
                     return;
                 }
 
@@ -417,26 +457,37 @@ namespace Zink
 
         private void TrayService_ExitClicked(object sender, EventArgs e)
         {
+            if (_exitRequested)
+                return;
+
             try
             {
                 _exitRequested = true;
+                DiagnosticLogService.WriteLine("Tray Exit selected; dismissing app and starting full process shutdown.");
+                DiagnosticLogService.Flush();
 
-                if (MainWindow != null)
+                // Dismiss the app UI first. MainWindow.Close() is deliberately avoided here
+                // because its synchronous Closed handler performs slow media cleanup and can
+                // leave the visible window frozen while that work completes.
+                try
                 {
-                    MainWindow.Close();
-                }
-                else
-                {
-                    NotifyActiveCallEndedBeforeExit();
-
-                    try
+                    if (MainWindow != null)
                     {
-                        _trayService?.Dispose();
+                        StopActiveVideoPlayback(MainWindow);
+                        MainWindow.HideToTray();
                     }
-                    catch { }
-
-                    Environment.Exit(0);
                 }
+                catch { }
+
+                // Once the app UI has gone, remove the shell icon and finish service cleanup
+                // away from the UI thread before terminating the complete process.
+                try
+                {
+                    _trayService?.Dispose();
+                }
+                catch { }
+
+                _ = Task.Run(CompleteTrayExitAsync);
             }
             catch
             {
@@ -451,6 +502,8 @@ namespace Zink
 
             try
             {
+                await _replayCleanupTask;
+
                 if (!RecordingPreferences.IsGamingBackgroundReplayEnabled)
                 {
                     _replayStartupError = "Background replay for gaming is turned off in Settings.";
@@ -478,7 +531,8 @@ namespace Zink
                 var options = new Zink.Models.RecordingOptions
                 {
                     IncludeSystemAudio = true,
-                    IncludeMicrophone = true
+                    IncludeMicrophone = RecordingPreferences.IsBackgroundReplayMicrophoneEnabled,
+                    RetrospectiveSeconds = RecordingPreferences.BackgroundReplayDurationSeconds
                 };
 
                 await service.StartReplayAsync(options);
@@ -595,6 +649,62 @@ namespace Zink
             }
         }
 
+        private async Task CompleteTrayExitAsync()
+        {
+            NotifyActiveCallEndedBeforeExit();
+
+            try { VideoLibraryService.Current.Stop(); } catch { }
+            try { DiscordPresenceService.Instance.Clear(); } catch { }
+            try { DiscordPresenceService.Instance.Shutdown(); } catch { }
+
+            try
+            {
+                await Zink.Services.Recording.ManualRecordingService.Instance.StopAsync();
+            }
+            catch { }
+
+            try { ReplayTemporaryFileCleanup.DeleteContents(); } catch { }
+
+            DiagnosticLogService.WriteLine("Tray Exit cleanup completed; terminating process.");
+            DiagnosticLogService.Flush();
+            Environment.Exit(0);
+        }
+
+        private void MainInstance_Activated(
+            object? sender,
+            Microsoft.Windows.AppLifecycle.AppActivationArguments activatedArgs)
+        {
+            StorageFile? activatedFile = null;
+
+            try
+            {
+                if (activatedArgs.Kind == Microsoft.Windows.AppLifecycle.ExtendedActivationKind.File &&
+                    activatedArgs.Data is IFileActivatedEventArgs fileArgs &&
+                    fileArgs.Files != null &&
+                    fileArgs.Files.Count > 0 &&
+                    fileArgs.Files[0] is StorageFile file)
+                {
+                    activatedFile = file;
+                }
+            }
+            catch (System.Runtime.InteropServices.COMException)
+            {
+            }
+
+            MainWindow?.DispatcherQueue.TryEnqueue(() =>
+            {
+                if (MainWindow == null)
+                    return;
+
+                MainWindow.ShowFromTray();
+
+                if (activatedFile != null)
+                {
+                    NavigateToActivatedMediaFile(activatedFile);
+                }
+            });
+        }
+
         private static bool IsMusicFile(StorageFile file)
         {
             var extension = file.FileType ?? "";
@@ -631,8 +741,103 @@ namespace Zink
                 extension.Equals(".ogg", StringComparison.OrdinalIgnoreCase);
         }
 
+        private void AttachMainWindowLifecycle(MainWindow window)
+        {
+            window.Closed += OnMainWindowClosed;
+
+            var hwnd = window.GetWindowHandle();
+            var windowId = Microsoft.UI.Win32Interop.GetWindowIdFromWindow(hwnd);
+            _mainAppWindow = Microsoft.UI.Windowing.AppWindow.GetFromWindowId(windowId);
+            _mainAppWindow.Closing += OnMainAppWindowClosing;
+        }
+
+        private async void OnMainAppWindowClosing(
+            Microsoft.UI.Windowing.AppWindow sender,
+            Microsoft.UI.Windowing.AppWindowClosingEventArgs args)
+        {
+            if (_exitRequested)
+                return;
+
+            args.Cancel = true;
+
+            if (_closeChoiceDialogOpen)
+                return;
+
+            _closeChoiceDialogOpen = true;
+
+            try
+            {
+                if (MainWindow?.Content is not FrameworkElement root || root.XamlRoot == null)
+                    return;
+
+                var message = new StackPanel
+                {
+                    Spacing = 10,
+                    MaxWidth = 430
+                };
+                message.Children.Add(new TextBlock
+                {
+                    Text = "Do you want to fully close ZINK and shut it down, or minimize it to the system tray? " +
+                    "" +
+                    "Shutting down the app takes a few seconds for zink to fully shut down and close the system tray",
+                    TextWrapping = TextWrapping.Wrap,
+                    FontSize = 15
+                });
+                message.Children.Add(new TextBlock
+                {
+                    Text = "Minimizing keeps ZINK available in the background. You can reopen it from the tray icon.",
+                    TextWrapping = TextWrapping.Wrap,
+                    Opacity = 0.72
+                });
+
+                var dialog = new ContentDialog
+                {
+                    XamlRoot = root.XamlRoot,
+                    Title = "Close ZINK?",
+                    Content = message,
+                    PrimaryButtonText = "Fully close ZINK",
+                    SecondaryButtonText = "Minimize the app",
+                    DefaultButton = ContentDialogButton.Secondary,
+                    Background = new AcrylicBrush
+                    {
+                        TintColor = global::Windows.UI.Color.FromArgb(255, 24, 31, 42),
+                        TintOpacity = 0.78,
+                        FallbackColor = global::Windows.UI.Color.FromArgb(255, 24, 31, 42)
+                    }
+                };
+
+                var result = await dialog.ShowAsync();
+                if (result == ContentDialogResult.Primary)
+                {
+                    _exitRequested = true;
+                    StopActiveVideoPlayback(MainWindow);
+                    DiagnosticLogService.WriteLine("User chose to fully close ZINK.");
+                    DiagnosticLogService.Flush();
+                    sender.Destroy();
+                }
+                else if (result == ContentDialogResult.Secondary)
+                {
+                    StopActiveVideoPlayback(MainWindow);
+                    MainWindow?.HideToTray();
+                    DiagnosticLogService.WriteLine("User chose to minimize ZINK to the system tray.");
+                    DiagnosticLogService.Flush();
+                }
+            }
+            catch (Exception ex)
+            {
+                DiagnosticLogService.WriteLine("Unable to show the close choice dialog: " + ex);
+                DiagnosticLogService.Flush();
+            }
+            finally
+            {
+                _closeChoiceDialogOpen = false;
+            }
+        }
+
         private void OnMainWindowClosed(object sender, Microsoft.UI.Xaml.WindowEventArgs e)
         {
+            StopActiveVideoPlayback(MainWindow);
+
             var hasActiveCall = IsActiveCallState(NativeCallCoordinator.Instance.CurrentSession.State);
             DiagnosticLogService.WriteLine($"Main window closing; exitRequested={_exitRequested}; activeCall={hasActiveCall}.");
             DiagnosticLogService.Flush();
@@ -669,10 +874,18 @@ namespace Zink
             }
             catch { }
 
+            ReplayTemporaryFileCleanup.DeleteContents();
+
             StopAllMediaPlayers(MainWindow);
 
             try
             {
+                if (_mainAppWindow != null)
+                {
+                    _mainAppWindow.Closing -= OnMainAppWindowClosing;
+                    _mainAppWindow = null;
+                }
+
                 if (_trayService != null)
                 {
                     _trayService.OpenClicked -= TrayService_OpenClicked;
@@ -701,7 +914,7 @@ namespace Zink
                     try
                     {
                         DiagnosticLogService.WriteLine("Stopping screen share during app exit.");
-                        await NativeScreenShareStreamingService.Instance.StopAsync();
+                        await ScreenShareCapturePipeline.Instance.StopAsync();
                     }
                     catch
                     {
@@ -740,6 +953,32 @@ namespace Zink
             if (window.Content is FrameworkElement root)
             {
                 StopMediaInElement(root);
+            }
+        }
+
+        private void StopActiveVideoPlayback(Window window)
+        {
+            if (window?.Content is FrameworkElement root)
+            {
+                StopVideoPlaybackInElement(root);
+            }
+        }
+
+        private void StopVideoPlaybackInElement(FrameworkElement element)
+        {
+            if (element is VideoPlayerPage videoPlayerPage)
+            {
+                videoPlayerPage.StopPlaybackForAppClose();
+                return;
+            }
+
+            int childrenCount = VisualTreeHelper.GetChildrenCount(element);
+            for (int i = 0; i < childrenCount; i++)
+            {
+                if (VisualTreeHelper.GetChild(element, i) is FrameworkElement child)
+                {
+                    StopVideoPlaybackInElement(child);
+                }
             }
         }
 

@@ -73,4 +73,45 @@ namespace Zink.Services.Recording
             return _logPath;
         }
     }
+
+    internal static class GameReplayLog
+    {
+        private static readonly SemaphoreSlim Gate = new(1, 1);
+        private static string? _logPath;
+
+        public static async Task WriteAsync(string source, string message)
+        {
+            try
+            {
+                await Gate.WaitAsync();
+                try
+                {
+                    if (string.IsNullOrWhiteSpace(_logPath))
+                    {
+                        StorageFolder recorderLogs = await ApplicationData.Current.LocalFolder.CreateFolderAsync(
+                            "RecorderLogs",
+                            CreationCollisionOption.OpenIfExists);
+                        StorageFolder replayLogs = await recorderLogs.CreateFolderAsync(
+                            "Zink game replay logs",
+                            CreationCollisionOption.OpenIfExists);
+                        StorageFile file = await replayLogs.CreateFileAsync(
+                            $"ZinkGameReplay-{DateTime.Now:yyyy-MM-dd-HHmmss}.txt",
+                            CreationCollisionOption.OpenIfExists);
+                        _logPath = file.Path;
+                    }
+
+                    string line = $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] [{source}] {message}{Environment.NewLine}";
+                    await File.AppendAllTextAsync(_logPath, line, Encoding.UTF8);
+                }
+                finally
+                {
+                    Gate.Release();
+                }
+            }
+            catch
+            {
+                // Diagnostics must never affect replay capture or saving.
+            }
+        }
+    }
 }

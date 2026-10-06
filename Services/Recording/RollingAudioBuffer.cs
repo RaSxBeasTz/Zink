@@ -9,6 +9,7 @@ namespace Zink.Services.Recording
         private readonly object _gate = new();
         private readonly LinkedList<AudioPacket> _packets = new();
         private readonly TimeSpan _duration;
+        private long _bufferedBytes;
 
         public RollingAudioBuffer(TimeSpan duration)
         {
@@ -26,11 +27,23 @@ namespace Zink.Services.Recording
             }
         }
 
+        public long BufferedBytes
+        {
+            get
+            {
+                lock (_gate)
+                {
+                    return _bufferedBytes;
+                }
+            }
+        }
+
         public void Add(AudioPacket packet)
         {
             lock (_gate)
             {
                 _packets.AddLast(packet);
+                _bufferedBytes += packet.PcmData?.Length ?? 0;
                 TrimNoLock();
             }
         }
@@ -51,8 +64,10 @@ namespace Zink.Services.Recording
                 {
                     var packet = _packets.First!.Value;
                     _packets.RemoveFirst();
+                    _bufferedBytes -= packet.PcmData?.Length ?? 0;
                     packet.PcmData = Array.Empty<byte>();
                 }
+                _bufferedBytes = 0;
             }
         }
 
@@ -71,6 +86,7 @@ namespace Zink.Services.Recording
 
                 var old = _packets.First!.Value;
                 _packets.RemoveFirst();
+                _bufferedBytes -= old.PcmData?.Length ?? 0;
                 old.PcmData = Array.Empty<byte>();
             }
         }

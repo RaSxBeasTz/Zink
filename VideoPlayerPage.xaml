@@ -44,11 +44,15 @@
         </Style>
     </Page.Resources>
 
-    <Grid Background="{StaticResource VideoPageBackgroundBrush}">
+    <Grid
+        x:Name="VideoRoot"
+        Background="{StaticResource VideoPageBackgroundBrush}"
+        SizeChanged="VideoRoot_SizeChanged">
         <controls:MediaPlayerElement
             x:Name="mediaPlayerElement"
             AreTransportControlsEnabled="False"
             AutoPlay="False"
+            IsHitTestVisible="False"
             Stretch="Uniform"
             RenderTransformOrigin="0.5,0.5">
             <controls:MediaPlayerElement.RenderTransform>
@@ -83,6 +87,25 @@
             <TextBlock
                 x:Name="VideoFormatBadgeText"
                 Text="SDR"
+                Foreground="{StaticResource GlassTextBrush}"
+                FontSize="14"
+                FontWeight="SemiBold" />
+        </Border>
+
+        <Border
+            x:Name="VideoResolutionBadge"
+            HorizontalAlignment="Right"
+            VerticalAlignment="Top"
+            Margin="0,76,28,0"
+            Background="#CC101820"
+            BorderBrush="{StaticResource GlassPanelBorderBrush}"
+            BorderThickness="1"
+            CornerRadius="16"
+            Padding="14,8"
+            Visibility="Collapsed">
+            <TextBlock
+                x:Name="VideoResolutionBadgeText"
+                Text="HD"
                 Foreground="{StaticResource GlassTextBrush}"
                 FontSize="14"
                 FontWeight="SemiBold" />
@@ -171,7 +194,9 @@
             HorizontalAlignment="Stretch"
             VerticalAlignment="Bottom"
             Margin="24,0,24,24"
-            MaxWidth="1220">
+            MaxWidth="1220"
+            PointerEntered="ControlPanel_PointerEntered"
+            PointerExited="ControlPanel_PointerExited">
 
             <Grid HorizontalAlignment="Stretch">
                 <Grid.RowDefinitions>
@@ -273,6 +298,24 @@
                         </Button>
 
                         <Button
+                            x:Name="AspectRatioButton"
+                            Style="{StaticResource GlassControlButtonStyle}">
+                            <TextBlock
+                                x:Name="AspectRatioButtonLabel"
+                                Text="Aspect ratio" />
+                            <Button.Flyout>
+                                <MenuFlyout>
+                                    <MenuFlyoutItem Text="Original" Tag="Original" Click="AspectRatioMenuItem_Click" />
+                                    <MenuFlyoutItem Text="16:9" Tag="16:9" Click="AspectRatioMenuItem_Click" />
+                                    <MenuFlyoutItem Text="4:3" Tag="4:3" Click="AspectRatioMenuItem_Click" />
+                                    <MenuFlyoutItem Text="21:9" Tag="21:9" Click="AspectRatioMenuItem_Click" />
+                                    <MenuFlyoutSeparator />
+                                    <MenuFlyoutItem Text="Fill screen" Tag="Fill" Click="AspectRatioMenuItem_Click" />
+                                </MenuFlyout>
+                            </Button.Flyout>
+                        </Button>
+
+                        <Button
                             Click="Browse_Click"
                             Content="Browse files"
                             Style="{StaticResource GlassControlButtonStyle}" />
@@ -336,13 +379,6 @@
                     </LinearGradientBrush>
                 </Grid.Background>
 
-                <Border
-                    HorizontalAlignment="Stretch"
-                    VerticalAlignment="Stretch"
-                    BorderBrush="#66FFFFFF"
-                    BorderThickness="2"
-                    Margin="18"
-                    Opacity="0.72" />
             </Grid>
         </Border>
     </Grid>

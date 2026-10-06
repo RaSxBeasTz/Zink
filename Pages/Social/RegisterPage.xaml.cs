@@ -33,6 +33,10 @@ namespace Zink.Pages.Social
                 var auth = await SocialManager.Instance.Api.RegisterAsync(
                     new RegisterRequest(email, password, username, displayName));
 
+                var profileDetails = await ProfileDetailsStore.Instance.GetAsync(auth.UserId);
+                profileDetails.SignedUpAtUtc ??= DateTimeOffset.UtcNow;
+                await ProfileDetailsStore.Instance.SaveAsync(auth.UserId, profileDetails);
+
                 StatusText.Text = $"Registered and logged in as {auth.Username}.";
 
                 try

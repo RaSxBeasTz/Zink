@@ -56,10 +56,10 @@ namespace Zink.Services
             {
             }
 
-            if (!enabled)
-                Clear();
-            else
+            if (enabled)
                 SetAppPresence();
+            else
+                QueuePresence(BuildCommand(null), allowWhenDisabled: true);
         }
 
         public void Initialize()
@@ -102,7 +102,7 @@ namespace Zink.Services
             var activity = CreateBaseActivity(
                 details: "Using Zink",
                 state: string.IsNullOrWhiteSpace(state) ? "Home dashboard" : state,
-                activityType: 0);
+                activityType: 3);
 
             QueuePresence(BuildCommand(activity));
         }
@@ -120,7 +120,7 @@ namespace Zink.Services
                 : $"{pageName} - {category}";
 
             _activityStartedAtUtc = DateTimeOffset.UtcNow;
-            var activity = CreateBaseActivity(details, state, 0);
+            var activity = CreateBaseActivity(details, state, 3);
             QueuePresence(BuildCommand(activity));
         }
 
@@ -135,7 +135,7 @@ namespace Zink.Services
             var activity = CreateBaseActivity(
                 details: Clean(pageTitle, $"Browsing {siteName}"),
                 state: string.IsNullOrWhiteSpace(category) ? siteName : $"{category} on Zink",
-                activityType: 0);
+                activityType: 3);
 
             QueuePresence(BuildCommand(activity));
         }
@@ -192,7 +192,7 @@ namespace Zink.Services
                 state += " - deafened";
 
             _activityStartedAtUtc = DateTimeOffset.UtcNow;
-            var activity = CreateBaseActivity(details, state, 0);
+            var activity = CreateBaseActivity(details, state, 3);
             if (connectedFor.HasValue)
                 activity["timestamps"] = new { start = DateTimeOffset.UtcNow.Subtract(connectedFor.Value).ToUnixTimeSeconds() };
 
@@ -210,12 +210,11 @@ namespace Zink.Services
                 return;
 
             var station = Clean(stationName, "Radio");
-            var title = string.IsNullOrWhiteSpace(songTitle) ? station : songTitle.Trim();
             var artist = string.IsNullOrWhiteSpace(artistName) ? "Zink Radio" : artistName.Trim();
 
             _activityStartedAtUtc = DateTimeOffset.UtcNow;
             var activity = CreateBaseActivity(
-                details: $"Listening to {title}",
+                details: "Listening to a live radio station",
                 state: $"{artist} on {station}",
                 activityType: 2,
                 largeImageKey: CleanAssetKey(stationAssetKey, GetStationAssetKey(station)),
@@ -256,7 +255,7 @@ namespace Zink.Services
             var activity = CreateBaseActivity(
                 details: isLive ? $"Live streaming on {target}" : "Preparing a stream",
                 state: isLive ? "Broadcasting from Zink" : $"Ready to stream on {target}",
-                activityType: 0,
+                activityType: 3,
                 largeImageKey: "zink_1024",
                 largeImageText: "Zink Streaming");
 
@@ -381,9 +380,9 @@ namespace Zink.Services
             };
         }
 
-        private void QueuePresence(object command)
+        private void QueuePresence(object command, bool allowWhenDisabled = false)
         {
-            if (!IsEnabled)
+            if (!allowWhenDisabled && !IsEnabled)
                 return;
 
             var applicationId = GetApplicationId();
