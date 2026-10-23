@@ -141,6 +141,9 @@ namespace Zink.Pages
                 // Resizing the native window presenter during the same transition
                 // can clip the lower controls and stall WebView2 composition.
                 App.MainWindow.SetTwitchPlayerFullscreenLayout(true);
+                // Native fullscreen is required to hide the Windows taskbar.
+                // Keep the player-control CSS and WebView focus untouched.
+                App.MainWindow.EnterFullscreenMode(enableMouseExitHook: false);
             }
             else
             {
@@ -149,6 +152,7 @@ namespace Zink.Pages
                 HostBorder.BorderThickness = _savedHostBorderThickness;
                 Background = _savedPageBackground;
                 App.MainWindow.SetTwitchPlayerFullscreenLayout(false);
+                App.MainWindow.ExitFullscreenMode();
             }
 
             try
