@@ -144,7 +144,21 @@ namespace Zink.Pages
                 // Chromium enters HTML fullscreen. Resizing the WinUI host and
                 // changing the native presenter together clips Twitch's bottom
                 // controls and can break its pointer hit testing.
+                // Make the native window fullscreen before asking Chromium to
+                // recalculate the player layout; Twitch controls are otherwise
+                // initialized against the pre-fullscreen viewport.
                 App.MainWindow.EnterFullscreenMode(enableMouseExitHook: false);
+                DispatcherQueue.TryEnqueue(async () =>
+                {
+                    await System.Threading.Tasks.Task.Delay(350);
+                    if (!_twitchFullscreen || TwitchWebView.CoreWebView2 == null) return;
+                    try
+                    {
+                        await TwitchWebView.CoreWebView2.ExecuteScriptAsync(
+                            "window.dispatchEvent(new Event('resize')); document.dispatchEvent(new Event('mousemove', { bubbles: true }));");
+                    }
+                    catch { }
+                });
             }
             else
             {
