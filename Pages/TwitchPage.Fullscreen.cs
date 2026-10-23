@@ -39,9 +39,9 @@ namespace Zink.Pages
                     {
                         TwitchWebView.UpdateLayout();
                         TwitchWebView.IsHitTestVisible = true;
-                        // Avoid activating the top-level window during a Chromium
-                        // fullscreen transition: that can steal focus from the player.
-                        var focused = TwitchWebView.Focus(FocusState.Programmatic);
+                        // Do not retarget keyboard focus while a native fullscreen
+                        // player has mouse capture or an open settings/quality menu.
+                        var focused = TwitchWebView.FocusState != FocusState.Unfocused;
                         if (TwitchWebView.CoreWebView2 != null)
                             await TwitchWebView.CoreWebView2.ExecuteScriptAsync("window.__zinkTwitchInputTrace?.();");
                         DiagnosticLogService.WriteLine("Twitch fullscreen input restored; browser focused: " + focused);
