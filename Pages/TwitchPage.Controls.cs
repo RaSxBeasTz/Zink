@@ -8,23 +8,11 @@
     if (window.__zinkTwitchControlsGuardInstalled) return;
     window.__zinkTwitchControlsGuardInstalled = true;
 
-    // Preserve Twitch's own layout and hit-testing. Moving the controls with
-    // CSS transforms or forcing every ancestor visible can make buttons appear
-    // clickable while Chromium still routes input to an overlay.
+    // Browser fullscreen must own its layout, hit testing and popover stacking.
+    // Do not override Twitch's native fullscreen player CSS. In particular,
+    // transforms, z-index and pointer-events rules break settings/quality menus.
     const style = document.createElement('style');
-    style.textContent = `
-        :fullscreen .player-controls,
-        :fullscreen .video-player__controls,
-        :fullscreen [data-a-target='player-controls'],
-        :fullscreen [data-test-selector='player-controls'],
-        [data-zink-twitch-fullscreen] .player-controls,
-        [data-zink-twitch-fullscreen] .video-player__controls,
-        [data-zink-twitch-fullscreen] [data-a-target='player-controls'],
-        [data-zink-twitch-fullscreen] [data-test-selector='player-controls'] {
-            visibility: visible !important;
-            pointer-events: auto !important;
-        }
-    `;
+    style.textContent = '';
     function install() {
         if (!style.isConnected) (document.head || document.documentElement)?.appendChild(style);
     }
