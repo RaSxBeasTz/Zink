@@ -134,31 +134,12 @@ namespace Zink.Pages
                 HostBorder.BorderThickness = new Thickness(0);
                 Background = new SolidColorBrush(Microsoft.UI.Colors.Black);
 
-                // The TabView header is a separate XAML row above the Twitch
-                // page. Native HTML fullscreen cannot fill the display until
-                // that row is removed from layout too.
-                // Let Chromium's HTML fullscreen own the player geometry.
-                // Resizing the native window presenter during the same transition
-                // can clip the lower controls and stall WebView2 composition.
-                // Keep the WebView at its normal, working window size while
-                // Chromium enters HTML fullscreen. Resizing the WinUI host and
-                // changing the native presenter together clips Twitch's bottom
-                // controls and can break its pointer hit testing.
-                // Make the native window fullscreen before asking Chromium to
-                // recalculate the player layout; Twitch controls are otherwise
-                // initialized against the pre-fullscreen viewport.
+                // Match the WebView viewport to the actual fullscreen window.
+                // Twitch's HTML fullscreen controls must receive real pointer
+                // events at their displayed coordinates, not synthetic mouse
+                // events dispatched at the old viewport position.
+                App.MainWindow.SetTwitchPlayerFullscreenLayout(true);
                 App.MainWindow.EnterFullscreenMode(enableMouseExitHook: false);
-                DispatcherQueue.TryEnqueue(async () =>
-                {
-                    await System.Threading.Tasks.Task.Delay(350);
-                    if (!_twitchFullscreen || TwitchWebView.CoreWebView2 == null) return;
-                    try
-                    {
-                        await TwitchWebView.CoreWebView2.ExecuteScriptAsync(
-                            "window.dispatchEvent(new Event('resize')); document.dispatchEvent(new Event('mousemove', { bubbles: true }));");
-                    }
-                    catch { }
-                });
             }
             else
             {
@@ -166,6 +147,7 @@ namespace Zink.Pages
                 HostBorder.CornerRadius = _savedHostCornerRadius;
                 HostBorder.BorderThickness = _savedHostBorderThickness;
                 Background = _savedPageBackground;
+                App.MainWindow.SetTwitchPlayerFullscreenLayout(false);
                 App.MainWindow.ExitFullscreenMode();
             }
 
@@ -180,7 +162,6 @@ namespace Zink.Pages
             // During navigation it can otherwise cover player controls even
             // after the page has entered fullscreen.
             LoadingOverlay.IsHitTestVisible = false;
-            QueueTwitchFullscreenInputRestore();
         }
 
         private void TwitchWebView_CoreWebView2Initialized(WebView2 sender, CoreWebView2InitializedEventArgs args)
