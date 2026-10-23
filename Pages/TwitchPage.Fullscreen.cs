@@ -37,14 +37,11 @@ namespace Zink.Pages
                         !ReferenceEquals(App.MainWindow.ContentFrame.Content, this)) return;
                     try
                     {
+                        // WebView2 and Twitch must retain their own pointer capture,
+                        // focus and popup menus. Only refresh the XAML layout.
                         TwitchWebView.UpdateLayout();
                         TwitchWebView.IsHitTestVisible = true;
-                        // Do not retarget keyboard focus while a native fullscreen
-                        // player has mouse capture or an open settings/quality menu.
-                        var focused = TwitchWebView.FocusState != FocusState.Unfocused;
-                        if (TwitchWebView.CoreWebView2 != null)
-                            await TwitchWebView.CoreWebView2.ExecuteScriptAsync("window.__zinkTwitchInputTrace?.();");
-                        DiagnosticLogService.WriteLine("Twitch fullscreen input restored; browser focused: " + focused);
+                        DiagnosticLogService.WriteLine("Twitch fullscreen layout settled.");
                     }
                     catch (Exception error)
                     {
