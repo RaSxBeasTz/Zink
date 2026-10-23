@@ -896,6 +896,68 @@ namespace Zink
             }
         }
 
+        // Twitch uses a borderless monitor-sized overlapped window rather than
+        // changing the AppWindow presenter while Chromium owns HTML fullscreen.
+        // The presenter switch can interrupt WebView2's hover/input pipeline.
+        private Windows.Graphics.RectInt32? _twitchWindowRestoreBounds;
+        private bool _twitchBorderlessFullscreen;
+
+        public void EnterTwitchBorderlessFullscreen()
+        {
+            if (_twitchBorderlessFullscreen || _weAreInFullscreenMode) return;
+            SaveAndHideSidebar();
+            DispatcherQueue.TryEnqueue(() =>
+            {
+                try
+                {
+                    var hwnd = WindowNative.GetWindowHandle(this);
+                    var id = Microsoft.UI.Win32Interop.GetWindowIdFromWindow(hwnd);
+                    var window = AppWindow.GetFromWindowId(id);
+                    var display = DisplayArea.GetFromWindowId(id, DisplayAreaFallback.Nearest);
+                    if (window.Presenter is not OverlappedPresenter presenter) return;
+                    _twitchWindowRestoreBounds = new Windows.Graphics.RectInt32(
+                        window.Position.X, window.Position.Y, window.Size.Width, window.Size.Height);
+                    presenter.SetBorderAndTitleBar(false, false);
+                    window.MoveAndResize(display.OuterBounds);
+                    _twitchBorderlessFullscreen = true;
+                    _weAreInFullscreenMode = true;
+                }
+                catch (Exception error)
+                {
+                    DiagnosticLogService.WriteLine("Twitch borderless fullscreen: " + error);
+                }
+            });
+        }
+
+        public void ExitTwitchBorderlessFullscreen()
+        {
+            DispatcherQueue.TryEnqueue(() =>
+            {
+                try
+                {
+                    if (!_twitchBorderlessFullscreen) return;
+                    var hwnd = WindowNative.GetWindowHandle(this);
+                    var id = Microsoft.UI.Win32Interop.GetWindowIdFromWindow(hwnd);
+                    var window = AppWindow.GetFromWindowId(id);
+                    if (window.Presenter is OverlappedPresenter presenter)
+                        presenter.SetBorderAndTitleBar(true, true);
+                    if (_twitchWindowRestoreBounds.HasValue)
+                        window.MoveAndResize(_twitchWindowRestoreBounds.Value);
+                }
+                catch (Exception error)
+                {
+                    DiagnosticLogService.WriteLine("Twitch restore window: " + error);
+                }
+                finally
+                {
+                    _twitchBorderlessFullscreen = false;
+                    _twitchWindowRestoreBounds = null;
+                    _weAreInFullscreenMode = false;
+                    RestoreSavedSidebar();
+                }
+            });
+        }
+
         public void EnterFullscreenMode(bool enableMouseExitHook = true)
         {
             if (_weAreInFullscreenMode) return;
