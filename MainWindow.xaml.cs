@@ -867,6 +867,35 @@ namespace Zink
             });
         }
 
+        // Twitch HTML5 fullscreen needs the TabView's row removed, not merely
+        // its visibility changed. Restrict this to Twitch so other fullscreen
+        // pages keep their original shell layout and behaviour.
+        private GridLength? _savedTwitchTabStripHeight;
+        public void SetTwitchPlayerFullscreenLayout(bool enabled)
+        {
+            try
+            {
+                var rows = TabStripGlass.Parent as Grid;
+                if (rows == null || rows.RowDefinitions.Count == 0) return;
+                var row = rows.RowDefinitions[0];
+                if (enabled)
+                {
+                    if (!_savedTwitchTabStripHeight.HasValue)
+                        _savedTwitchTabStripHeight = row.Height;
+                    row.Height = new GridLength(0);
+                }
+                else if (_savedTwitchTabStripHeight.HasValue)
+                {
+                    row.Height = _savedTwitchTabStripHeight.Value;
+                    _savedTwitchTabStripHeight = null;
+                }
+            }
+            catch (Exception error)
+            {
+                DiagnosticLogService.WriteLine("Twitch player fullscreen shell layout: " + error.Message);
+            }
+        }
+
         public void EnterFullscreenMode(bool enableMouseExitHook = true)
         {
             if (_weAreInFullscreenMode) return;
