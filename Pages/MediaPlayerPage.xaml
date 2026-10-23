@@ -101,7 +101,7 @@
                     <Grid RowSpacing="12">
                         <Grid.RowDefinitions>
                             <RowDefinition Height="Auto"/>
-                            <RowDefinition Height="*"/>
+                            <RowDefinition Height="Auto"/>
                             <RowDefinition Height="Auto"/>
                         </Grid.RowDefinitions>
 
@@ -119,6 +119,7 @@
 
                         <ListView Grid.Row="1"
                                   x:Name="QueueList"
+                                  MaxHeight="260"
                                   SelectionChanged="QueueList_SelectionChanged"
                                   ScrollViewer.VerticalScrollBarVisibility="Auto"
                                   ScrollViewer.HorizontalScrollBarVisibility="Disabled">
@@ -151,7 +152,25 @@
                             </ListView.ItemTemplate>
                         </ListView>
 
-                        <Border Grid.Row="2" Height="1" Background="{StaticResource HairlineBrush}"/>
+                        <StackPanel Grid.Row="2" Spacing="8" Margin="0,4,0,0">
+                            <TextBlock Text="Lyrics" FontSize="20" FontWeight="SemiBold"
+                                       Foreground="{StaticResource TextBrush}"/>
+                            <TextBlock x:Name="LyricsStatus" Text="Play a song to view local lyrics."
+                                       TextWrapping="Wrap" FontSize="12"
+                                       Foreground="{StaticResource SubtleTextBrush}"/>
+                            <ScrollViewer x:Name="LyricsScrollViewer" Height="480"
+                                          VerticalScrollBarVisibility="Auto"
+                                          HorizontalScrollBarVisibility="Disabled">
+                                <Grid>
+                                    <TextBlock x:Name="LyricsText" TextWrapping="Wrap"
+                                               IsTextSelectionEnabled="True" FontSize="14"
+                                               Foreground="{StaticResource TextBrush}"/>
+                                    <StackPanel x:Name="LyricsLines" Spacing="4" Visibility="Collapsed"
+                                                Loaded="LyricsLines_Loaded"/>
+                                </Grid>
+                            </ScrollViewer>
+                        </StackPanel>
+
                     </Grid>
                 </Border>
 
@@ -235,10 +254,7 @@
 
                                 <Button x:Name="PlayPauseButton"
                                         Click="PlayPause_Click"
-                                        Background="{StaticResource AccentBrush}"
-                                        Foreground="#FF001407"
-                                        BorderBrush="#AAFFFFFF"
-                                        BorderThickness="1"
+                                        Style="{StaticResource GlassButtonStyle}"
                                         Width="60"
                                         Height="60"
                                         Padding="17"
@@ -251,52 +267,55 @@
                                     <SymbolIcon Symbol="Forward"/>
                                 </Button>
 
-                                <ToggleButton x:Name="RepeatButton"
-                                              Click="RepeatButton_Click"
+                                <ToggleButton x:Name="RepeatCurrentButton"
+                                              Click="RepeatCurrentButton_Click"
+                                              ToolTipService.ToolTip="Repeat current song"
+                                              AutomationProperties.Name="Repeat current song"
                                               Style="{StaticResource TransportToggleStyle}">
-                                    <SymbolIcon Symbol="RepeatAll"/>
+                                    <SymbolIcon Symbol="RepeatOne"/>
                                 </ToggleButton>
                             </StackPanel>
+                            <Grid ColumnSpacing="10" Margin="0,12,0,0" MaxWidth="480">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="Auto"/>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="Auto"/>
+                                    <ColumnDefinition Width="Auto"/>
+                                </Grid.ColumnDefinitions>
+                                <SymbolIcon x:Name="VolumeIcon"
+                                            Symbol="Volume"
+                                            Foreground="{StaticResource TextBrush}"
+                                            VerticalAlignment="Center"/>
+                                <Slider Grid.Column="1"
+                                        x:Name="VolumeSlider"
+                                        MinWidth="90"
+                                        Minimum="0"
+                                        Maximum="100"
+                                        ValueChanged="VolumeSlider_ValueChanged"
+                                        StepFrequency="1"
+                                        SmallChange="1"
+                                        LargeChange="10"
+                                        AutomationProperties.Name="Volume percent"
+                                        Foreground="{StaticResource AccentBrush}"/>
+                                <TextBlock Grid.Column="2"
+                                           x:Name="VolumePercent"
+                                           Text="50%"
+                                           FontSize="12"
+                                           Foreground="{StaticResource SubtleTextBrush}"
+                                           VerticalAlignment="Center"/>
+                                <ToggleButton Grid.Column="3"
+                                              x:Name="BackgroundPlaybackToggle"
+                                              Content="Play in Background"
+                                              IsChecked="False"
+                                              Background="{StaticResource ControlSurfaceBrush}"
+                                              Foreground="{StaticResource TextBrush}"
+                                              BorderBrush="{StaticResource HairlineBrush}"
+                                              BorderThickness="1"
+                                              Padding="12,7"
+                                              CornerRadius="14"
+                                              VerticalAlignment="Center"/>
+                            </Grid>
                         </StackPanel>
-
-                        <Grid Grid.Row="2" ColumnSpacing="10" Margin="0,4,0,0">
-                            <Grid.ColumnDefinitions>
-                                <ColumnDefinition Width="Auto"/>
-                                <ColumnDefinition Width="*"/>
-                                <ColumnDefinition Width="Auto"/>
-                                <ColumnDefinition Width="Auto"/>
-                            </Grid.ColumnDefinitions>
-                            <SymbolIcon x:Name="VolumeIcon"
-                                        Symbol="Volume"
-                                        Foreground="{StaticResource TextBrush}"
-                                        VerticalAlignment="Center"/>
-                            <Slider Grid.Column="1"
-                                    x:Name="VolumeSlider"
-                                    MinWidth="90"
-                                    Minimum="0"
-                                    Maximum="1"
-                                    ValueChanged="VolumeSlider_ValueChanged"
-                                    SmallChange="0.05"
-                                    LargeChange="0.1"
-                                    Foreground="{StaticResource AccentBrush}"/>
-                            <TextBlock Grid.Column="2"
-                                       x:Name="VolumePercent"
-                                       Text="50%"
-                                       FontSize="12"
-                                       Foreground="{StaticResource SubtleTextBrush}"
-                                       VerticalAlignment="Center"/>
-                            <ToggleButton Grid.Column="3"
-                                          x:Name="BackgroundPlaybackToggle"
-                                          Content="Play in Background"
-                                          IsChecked="False"
-                                          Background="{StaticResource ControlSurfaceBrush}"
-                                          Foreground="{StaticResource TextBrush}"
-                                          BorderBrush="{StaticResource HairlineBrush}"
-                                          BorderThickness="1"
-                                          Padding="12,7"
-                                          CornerRadius="14"
-                                          VerticalAlignment="Center"/>
-                        </Grid>
 
                         <MediaPlayerElement x:Name="Player"
                                             AreTransportControlsEnabled="False"
@@ -380,16 +399,14 @@
                         </Border>
 
                         <Button Grid.Row="3"
-                                Content="Send to Player"
                                 Click="SendToPlayer_Click"
-                                Background="{StaticResource AccentBrush}"
-                                Foreground="#FF001407"
-                                BorderBrush="#99FFFFFF"
-                                BorderThickness="1"
-                                CornerRadius="10"
-                                Padding="14,11"
-                                HorizontalAlignment="Stretch"
-                                FontWeight="SemiBold"/>
+                                Style="{StaticResource GlassButtonStyle}"
+                                FontWeight="SemiBold">
+                            <TextBlock Text="Send to Player"
+                                       Foreground="{StaticResource TextBrush}"
+                                       FontSize="16"
+                                       FontWeight="SemiBold"/>
+                        </Button>
                     </Grid>
                 </Border>
             </Grid>

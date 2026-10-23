@@ -110,6 +110,8 @@ namespace Zink.Services
                 SaveLast(item);
                 SaveRecent();
 
+                if (kind != ActivityKind.PageVisit && kind != ActivityKind.WebView)
+                    NotificationService.Instance.RecordActivity(item.Title, item.Subtitle);
                 Changed?.Invoke(null, EventArgs.Empty);
             }
             catch { }

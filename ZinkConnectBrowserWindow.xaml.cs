@@ -286,6 +286,11 @@ namespace Zink
             _ = core.AddScriptToExecuteOnDocumentCreatedAsync(YouTubeFullscreenScript);
             _ = core.AddScriptToExecuteOnDocumentCreatedAsync(YouTubeSafeAdShieldScript);
             _ = core.AddScriptToExecuteOnDocumentCreatedAsync(YouTubeHighestQualityScript);
+            _ = OneDriveVideoPlayback.InstallAsync(core, fullscreen =>
+            {
+                if (ReferenceEquals(BrowserTabs.SelectedItem, tab))
+                    SetBrowserFullscreen(fullscreen);
+            });
 
             core.NavigationStarting += (_, args) =>
             {
@@ -426,6 +431,8 @@ namespace Zink
 
             try
             {
+                BrowserTitleBar.Visibility = fullscreen ? Visibility.Collapsed : Visibility.Visible;
+                TitleBarRow.Height = fullscreen ? new GridLength(0) : new GridLength(36);
                 TabsRow.Height = fullscreen ? new GridLength(0) : new GridLength(40);
                 ToolbarRow.Height = fullscreen ? new GridLength(0) : new GridLength(54);
                 FavoritesRow.Height = fullscreen ? new GridLength(0) : new GridLength(42);

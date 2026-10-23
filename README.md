@@ -67,10 +67,10 @@ Build the app for x64:
 dotnet build Zink.csproj -c Debug -p:Platform=x64 -p:RuntimeIdentifier=win-x64
 ```
 
-Build a release package:
+Build the Store bundle for x86, x64, and ARM64:
 
 ```powershell
-.\Build-ZinkAppPackages.ps1 -Configuration Release -Platforms x64
+.\Build-ZinkAppPackages.ps1 -Configuration Release
 ```
 
 Build packages for multiple platforms:
@@ -84,6 +84,8 @@ Build the Store package and a signed local install package at the same time:
 ```powershell
 .\Build-ZinkAppPackages.ps1 -Configuration Release -Platforms x64,arm64 -CreateBundle -CreateInstallPackage
 ```
+
+Bundling is enabled by default, including for a single platform. Upload the file in the `bundle` folder ending in `.msixbundle` to Partner Center. Use `-CreateBundle:$false` to create only individual packages.
 
 Package output is written under:
 

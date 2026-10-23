@@ -152,12 +152,9 @@ namespace Zink.Services.Recording
         {
             try
             {
-                var notification = new AppNotificationBuilder()
-                    .AddText(title)
-                    .AddText(message)
-                    .BuildNotification();
-
-                AppNotificationManager.Default.Show(notification);
+                NotificationService.Instance.Show(title, message,
+                    title.Contains("Error", StringComparison.OrdinalIgnoreCase)
+                        ? Zink.Pages.NotificationPriority.Critical : Zink.Pages.NotificationPriority.Normal);
             }
             catch
             {

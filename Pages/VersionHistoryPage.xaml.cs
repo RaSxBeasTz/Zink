@@ -11,13 +11,42 @@ namespace Zink.Pages
         private readonly Dictionary<string, (string Title, DateTime? Released, string Notes)> _changelog =
             new(StringComparer.OrdinalIgnoreCase)
             {
+                ["4.0.9.0"] = (
+                    Title: "Version 4.0.9.0",
+                    Released: new DateTime(2026, 10, 23),
+                    Notes:
+@"Version 4.0.9.0
+- Added independent tabs for sidebar pages, with right-click opening and page state retained when switching tabs.
+- Added Fluent glass tabs and hover thumbnails for app pages and embedded websites.
+- Aligned the tab strip backdrop with the sidebar spacing and saved glass colour, including light and dark themes.
+- Right-click a Twitch stream link to open it in a separate Twitch tab without replacing the current page.
+- Right-click a Twitch tab to open another instance of its current page. Twitch tabs retain their own stream address.
+- Added playback-state tracking for muted Twitch streams so automatic pauses during tab switching and window focus changes can be resumed, while keeping manual pause and mute controls."
+                ),
+                ["4.0.8.0"] = (
+                    Title: "Version 4.0.8.0",
+                    Released: new DateTime(2026, 10, 18),
+                    Notes:
+@"Version 4.0.8.0
+- Fixed the title bar remaining visible when watching YouTube in full screen in the Zink Connect browser. The title bar now hides in full screen and returns when you exit."
+                ),
+                ["4.0.6.0"] = (
+                    Title: "Version 4.0.6.0",
+                    Released: new DateTime(2026, 10, 18),
+                    Notes:
+@"Version 4.0.6.0
+- Added OneDrive video streaming."
+                ),
                 // 4.0.0.0 is the last major update for a while.
                 ["4.0.0.0"] = (
                     Title: "Version 4.0.0.0",
                     Released: new DateTime(2026, 06, 28),
                     Notes:
-@"Version 4.0.0.0.
+@"Version 4.0.0.0. 
+Version 4.0 is the last major update for a while.
 Bug Fixes: 
+- Fixed when a song is playing on the music player and you navigate to another page and then back again the music volume would be put back at fifty percent. The volume will now stay the same when navigating pages and returning.
+- Fixed a RAM spike for the background recording clip feature so when you record the app will stay under 1GB of ram.
 - Fixed a bug in the call page where it would keep showing some one as speaking even when they are not.
 - Fixed the play with youtube on the liked songs page where the loading for youtube would take some time.
 - Fixed the youtube player for the liked songs play with youtube not playing or getting stuck on loading.
@@ -42,9 +71,8 @@ Updated features:
 - Updated the package certificate to match the app publisher identity and extended the local signing certificate validity to 2046.
 - Updated Discord presence text so each Zink page now describes what that page is doing, such as using the Zink Connect browser, watching a video, playing Spotify, playing Zink Radio, using social pages, or playing on cloud gaming pages.
 
-
-
 - Improvements: 
+- Removed the non working repeat button and replaced it with a newer working version.
 - Improved video seeking so playback can continue smoothly while dragging through the timeline.
 - Reduced background Video Library scan pressure for large folders by spacing automatic deep rescans further apart.
 - Reduced shell/startup memory pressure by decoding large background and startup images at display-friendly sizes.
@@ -62,9 +90,14 @@ Updated features:
 - Improved the packaging setup so Visual Studio local package builds are signed by default while Store upload builds can still opt out when needed.
 - Improved Discord Rich Presence so Zink no longer advertises normal app pages as a main Playing activity, helping games and other Discord activities stay more visible.
 
-
-- New features added: 
-- Added HDR support for the background replay gaming record clips
+- New features added:
+- Added a feature where the music library page would rename songs to the correct naming so the app can find the information it needs to show the art work for song.
+- Added live search to the Music Library by song name, artist, album and filename.
+- Added lryics support to the music player.
+- Added a newer glass effect to the side bar for a cleaner look.
+- Added a repeat button to the music player so you can repeat the current playing song over and over.
+- Control and Z is the background recording clip hotkey on the keyboard.
+- Added HDR support for the background replay gaming record clips.
 - Added support for media paths passed through Explorer command-line launches as well as packaged Windows file activation.
 - Added live video scrubbing to the video player so moving the time bar updates the video frame in real time while choosing where to watch.
 - Added real timeouts to video and audio metadata probing so slow or unusual movie files cannot leave the app waiting forever before playback.

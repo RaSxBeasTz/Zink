@@ -6,19 +6,40 @@
 
     <Page.Resources>
         <AcrylicBrush x:Key="GlassPanelBrush"
-                      TintColor="#111820"
-                      TintOpacity="0.72"
-                      TintLuminosityOpacity="0.50"
-                      FallbackColor="#D1111820"/>
+                      TintColor="#031A24"
+                      TintOpacity="0.62"
+                      TintLuminosityOpacity="0.46"
+                      FallbackColor="#D0031A24"/>
         <AcrylicBrush x:Key="GlassStrongBrush"
-                      TintColor="#0B1219"
-                      TintOpacity="0.88"
-                      TintLuminosityOpacity="0.42"
-                      FallbackColor="#EB0B1219"/>
-        <SolidColorBrush x:Key="GlassTileBrush" Color="#66131D28"/>
-        <SolidColorBrush x:Key="GlassTileHoverBrush" Color="#8A1C2A38"/>
-        <SolidColorBrush x:Key="GlassBorderBrush" Color="#38FFFFFF"/>
-        <SolidColorBrush x:Key="GlassBorderStrongBrush" Color="#5EFFFFFF"/>
+                      TintColor="#02141D"
+                      TintOpacity="0.76"
+                      TintLuminosityOpacity="0.40"
+                      FallbackColor="#E802141D"/>
+        <LinearGradientBrush x:Key="GlassTileBrush" StartPoint="0,0" EndPoint="1,1">
+            <GradientStop Color="#9C021A24" Offset="0"/>
+            <GradientStop Color="#78032935" Offset="0.5"/>
+            <GradientStop Color="#58031320" Offset="1"/>
+        </LinearGradientBrush>
+        <LinearGradientBrush x:Key="GlassTileHoverBrush" StartPoint="0,0" EndPoint="1,1">
+            <GradientStop Color="#B0063440" Offset="0"/>
+            <GradientStop Color="#8A07505A" Offset="0.55"/>
+            <GradientStop Color="#6811D8E8" Offset="1"/>
+        </LinearGradientBrush>
+        <LinearGradientBrush x:Key="GlassTilePressedBrush" StartPoint="0,0" EndPoint="1,1">
+            <GradientStop Color="#C0041119" Offset="0"/>
+            <GradientStop Color="#9A06303A" Offset="0.55"/>
+            <GradientStop Color="#7038FF66" Offset="1"/>
+        </LinearGradientBrush>
+        <LinearGradientBrush x:Key="GlassBorderBrush" StartPoint="0,0" EndPoint="1,1">
+            <GradientStop Color="#8078D9DD" Offset="0"/>
+            <GradientStop Color="#50099AAB" Offset="0.45"/>
+            <GradientStop Color="#4011D8E8" Offset="1"/>
+        </LinearGradientBrush>
+        <LinearGradientBrush x:Key="GlassBorderStrongBrush" StartPoint="0,0" EndPoint="1,1">
+            <GradientStop Color="#B078D9DD" Offset="0"/>
+            <GradientStop Color="#70099AAB" Offset="0.38"/>
+            <GradientStop Color="#6011D8E8" Offset="1"/>
+        </LinearGradientBrush>
         <SolidColorBrush x:Key="MutedTextBrush" Color="#B7D6E2EA"/>
         <SolidColorBrush x:Key="DimTextBrush" Color="#83D6E2EA"/>
         <SolidColorBrush x:Key="CyanBrush" Color="#5AE8E0"/>
@@ -26,16 +47,69 @@
         <SolidColorBrush x:Key="GreenBrush" Color="#7BF5B5"/>
         <SolidColorBrush x:Key="YellowBrush" Color="#FFD56A"/>
         <SolidColorBrush x:Key="RedBrush" Color="#FF6F86"/>
-        <SolidColorBrush x:Key="ButtonBackground" Color="#183947"/>
-        <SolidColorBrush x:Key="ButtonBackgroundPointerOver" Color="#24556A"/>
-        <SolidColorBrush x:Key="ButtonBackgroundPressed" Color="#102A35"/>
+        <LinearGradientBrush x:Key="ButtonBackground" StartPoint="0,0" EndPoint="1,1">
+            <GradientStop Color="#9C021A24" Offset="0"/>
+            <GradientStop Color="#78032935" Offset="0.5"/>
+            <GradientStop Color="#58031320" Offset="1"/>
+        </LinearGradientBrush>
+        <LinearGradientBrush x:Key="ButtonBackgroundPointerOver" StartPoint="0,0" EndPoint="1,1">
+            <GradientStop Color="#B0063440" Offset="0"/>
+            <GradientStop Color="#8A07505A" Offset="0.55"/>
+            <GradientStop Color="#6811D8E8" Offset="1"/>
+        </LinearGradientBrush>
+        <LinearGradientBrush x:Key="ButtonBackgroundPressed" StartPoint="0,0" EndPoint="1,1">
+            <GradientStop Color="#C0041119" Offset="0"/>
+            <GradientStop Color="#9A06303A" Offset="0.55"/>
+            <GradientStop Color="#7038FF66" Offset="1"/>
+        </LinearGradientBrush>
         <SolidColorBrush x:Key="ButtonBackgroundDisabled" Color="#26183947"/>
         <SolidColorBrush x:Key="ButtonForeground" Color="White"/>
         <SolidColorBrush x:Key="ButtonForegroundPointerOver" Color="White"/>
         <SolidColorBrush x:Key="ButtonForegroundPressed" Color="White"/>
-        <SolidColorBrush x:Key="ButtonBorderBrush" Color="#7CBFEFFF"/>
-        <SolidColorBrush x:Key="ButtonBorderBrushPointerOver" Color="#A8D9FFFF"/>
-        <SolidColorBrush x:Key="ButtonBorderBrushPressed" Color="#5AA4D6FF"/>
+        <LinearGradientBrush x:Key="ButtonBorderBrush" StartPoint="0,0" EndPoint="1,1">
+            <GradientStop Color="#B078D9DD" Offset="0"/>
+            <GradientStop Color="#70099AAB" Offset="0.38"/>
+            <GradientStop Color="#6011D8E8" Offset="1"/>
+        </LinearGradientBrush>
+        <SolidColorBrush x:Key="ButtonBorderBrushPointerOver" Color="#B011D8E8"/>
+        <SolidColorBrush x:Key="ButtonBorderBrushPressed" Color="#A038FF66"/>
+
+        <ControlTemplate x:Key="GlassButtonTemplate" TargetType="Button">
+            <Border x:Name="GlassButtonRoot"
+                    Background="{TemplateBinding Background}"
+                    BorderBrush="{TemplateBinding BorderBrush}"
+                    BorderThickness="{TemplateBinding BorderThickness}"
+                    CornerRadius="{TemplateBinding CornerRadius}"
+                    Padding="{TemplateBinding Padding}">
+                <VisualStateManager.VisualStateGroups>
+                    <VisualStateGroup x:Name="CommonStates">
+                        <VisualState x:Name="Normal"/>
+                        <VisualState x:Name="PointerOver">
+                            <VisualState.Setters>
+                                <Setter Target="GlassButtonRoot.Background" Value="{StaticResource GlassTileHoverBrush}"/>
+                                <Setter Target="GlassButtonRoot.BorderBrush" Value="{StaticResource ButtonBorderBrushPointerOver}"/>
+                            </VisualState.Setters>
+                        </VisualState>
+                        <VisualState x:Name="Pressed">
+                            <VisualState.Setters>
+                                <Setter Target="GlassButtonRoot.Background" Value="{StaticResource GlassTilePressedBrush}"/>
+                                <Setter Target="GlassButtonRoot.BorderBrush" Value="{StaticResource ButtonBorderBrushPressed}"/>
+                                <Setter Target="GlassButtonRoot.Opacity" Value="0.92"/>
+                            </VisualState.Setters>
+                        </VisualState>
+                        <VisualState x:Name="Disabled">
+                            <VisualState.Setters>
+                                <Setter Target="GlassButtonRoot.Opacity" Value="0.42"/>
+                            </VisualState.Setters>
+                        </VisualState>
+                    </VisualStateGroup>
+                </VisualStateManager.VisualStateGroups>
+                <ContentPresenter Content="{TemplateBinding Content}"
+                                  ContentTemplate="{TemplateBinding ContentTemplate}"
+                                  HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}"
+                                  VerticalAlignment="{TemplateBinding VerticalContentAlignment}"/>
+            </Border>
+        </ControlTemplate>
 
         <Style x:Key="GlassPanelStyle" TargetType="Border">
             <Setter Property="CornerRadius" Value="28"/>
@@ -50,28 +124,13 @@
             <Setter Property="Padding" Value="0"/>
             <Setter Property="CornerRadius" Value="22"/>
             <Setter Property="BorderThickness" Value="1"/>
-            <Setter Property="BorderBrush" Value="#7CBFEFFF"/>
-            <Setter Property="Background" Value="#183947"/>
+            <Setter Property="BorderBrush" Value="{StaticResource GlassBorderStrongBrush}"/>
+            <Setter Property="Background" Value="{StaticResource GlassTileBrush}"/>
             <Setter Property="Foreground" Value="White"/>
             <Setter Property="HorizontalAlignment" Value="Left"/>
             <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
             <Setter Property="VerticalContentAlignment" Value="Stretch"/>
-            <Setter Property="Template">
-                <Setter.Value>
-                    <ControlTemplate TargetType="Button">
-                        <Border Background="{TemplateBinding Background}"
-                                BorderBrush="{TemplateBinding BorderBrush}"
-                                BorderThickness="{TemplateBinding BorderThickness}"
-                                CornerRadius="{TemplateBinding CornerRadius}"
-                                Padding="{TemplateBinding Padding}">
-                            <ContentPresenter Content="{TemplateBinding Content}"
-                                              ContentTemplate="{TemplateBinding ContentTemplate}"
-                                              HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}"
-                                              VerticalAlignment="{TemplateBinding VerticalContentAlignment}"/>
-                        </Border>
-                    </ControlTemplate>
-                </Setter.Value>
-            </Setter>
+            <Setter Property="Template" Value="{StaticResource GlassButtonTemplate}"/>
         </Style>
 
         <Style x:Key="GlassTileIconStyle" TargetType="FontIcon">
@@ -86,30 +145,15 @@
             <Setter Property="Padding" Value="16,0"/>
             <Setter Property="CornerRadius" Value="22"/>
             <Setter Property="BorderThickness" Value="1"/>
-            <Setter Property="BorderBrush" Value="#7CBFEFFF"/>
-            <Setter Property="Background" Value="#183947"/>
+            <Setter Property="BorderBrush" Value="{StaticResource GlassBorderStrongBrush}"/>
+            <Setter Property="Background" Value="{StaticResource GlassTileBrush}"/>
             <Setter Property="Foreground" Value="White"/>
-            <Setter Property="Template">
-                <Setter.Value>
-                    <ControlTemplate TargetType="Button">
-                        <Border Background="{TemplateBinding Background}"
-                                BorderBrush="{TemplateBinding BorderBrush}"
-                                BorderThickness="{TemplateBinding BorderThickness}"
-                                CornerRadius="{TemplateBinding CornerRadius}"
-                                Padding="{TemplateBinding Padding}">
-                            <ContentPresenter Content="{TemplateBinding Content}"
-                                              ContentTemplate="{TemplateBinding ContentTemplate}"
-                                              HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}"
-                                              VerticalAlignment="{TemplateBinding VerticalContentAlignment}"/>
-                        </Border>
-                    </ControlTemplate>
-                </Setter.Value>
-            </Setter>
+            <Setter Property="Template" Value="{StaticResource GlassButtonTemplate}"/>
         </Style>
 
         <Style x:Key="PrimaryPillButtonStyle" TargetType="Button" BasedOn="{StaticResource PillButtonStyle}">
-            <Setter Property="Background" Value="#D74F95FF"/>
-            <Setter Property="BorderBrush" Value="#86D9F8FF"/>
+            <Setter Property="Background" Value="{StaticResource GlassTileHoverBrush}"/>
+            <Setter Property="BorderBrush" Value="#B038FF66"/>
         </Style>
 
         <Style x:Key="ZinkSubText" TargetType="TextBlock">
@@ -122,8 +166,8 @@
         <Style x:Key="SignalCardStyle" TargetType="Border">
             <Setter Property="CornerRadius" Value="20"/>
             <Setter Property="Padding" Value="15"/>
-            <Setter Property="Background" Value="#51131D28"/>
-            <Setter Property="BorderBrush" Value="#2CFFFFFF"/>
+            <Setter Property="Background" Value="{StaticResource GlassTileBrush}"/>
+            <Setter Property="BorderBrush" Value="{StaticResource GlassBorderBrush}"/>
             <Setter Property="BorderThickness" Value="1"/>
         </Style>
 
@@ -132,39 +176,16 @@
             <Setter Property="Padding" Value="0"/>
             <Setter Property="CornerRadius" Value="20"/>
             <Setter Property="BorderThickness" Value="1"/>
-            <Setter Property="BorderBrush" Value="#7CBFEFFF"/>
-            <Setter Property="Background" Value="#183947"/>
+            <Setter Property="BorderBrush" Value="{StaticResource GlassBorderStrongBrush}"/>
+            <Setter Property="Background" Value="{StaticResource GlassTileBrush}"/>
             <Setter Property="Foreground" Value="White"/>
             <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
             <Setter Property="VerticalContentAlignment" Value="Stretch"/>
-            <Setter Property="Template">
-                <Setter.Value>
-                    <ControlTemplate TargetType="Button">
-                        <Border Background="{TemplateBinding Background}"
-                                BorderBrush="{TemplateBinding BorderBrush}"
-                                BorderThickness="{TemplateBinding BorderThickness}"
-                                CornerRadius="{TemplateBinding CornerRadius}"
-                                Padding="{TemplateBinding Padding}">
-                            <ContentPresenter Content="{TemplateBinding Content}"
-                                              ContentTemplate="{TemplateBinding ContentTemplate}"
-                                              HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}"
-                                              VerticalAlignment="{TemplateBinding VerticalContentAlignment}"/>
-                        </Border>
-                    </ControlTemplate>
-                </Setter.Value>
-            </Setter>
+            <Setter Property="Template" Value="{StaticResource GlassButtonTemplate}"/>
         </Style>
     </Page.Resources>
 
-    <Grid RequestedTheme="Dark">
-        <Grid.Background>
-            <LinearGradientBrush StartPoint="0,0" EndPoint="1,1">
-                <GradientStop Color="#70062D38" Offset="0"/>
-                <GradientStop Color="#74093844" Offset="0.32"/>
-                <GradientStop Color="#780B4450" Offset="0.62"/>
-                <GradientStop Color="#9000080B" Offset="1"/>
-            </LinearGradientBrush>
-        </Grid.Background>
+    <Grid RequestedTheme="Dark" Background="Transparent">
 
         <ScrollViewer VerticalScrollBarVisibility="Auto"
                       HorizontalScrollBarVisibility="Disabled">
@@ -667,10 +688,10 @@
                             </Grid>
                         </Button>
 
-                        <Button x:Name="TileBtn_Spotify" Grid.Column="3" Style="{StaticResource GlassTileButtonStyle}" Height="78" MinHeight="0" Click="Spotify_Click">
-                            <Grid Padding="12" RowSpacing="6">
+                        <Button x:Name="TileBtn_Spotify" Grid.Column="3" Style="{StaticResource GlassTileButtonStyle}" Click="Spotify_Click">
+                            <Grid Padding="16" RowSpacing="10">
                                 <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
-                                <FontIcon Style="{StaticResource GlassTileIconStyle}" Width="28" Height="28" Glyph="&#xE768;" FontFamily="Segoe Fluent Icons" FontSize="22" Foreground="{StaticResource GreenBrush}"/>
+                                <FontIcon Style="{StaticResource GlassTileIconStyle}" Glyph="&#xE768;" FontFamily="Segoe Fluent Icons" FontSize="26" Foreground="{StaticResource GreenBrush}"/>
                                 <StackPanel Grid.Row="1" Spacing="3">
                                     <TextBlock Text="Spotify" Foreground="White" FontWeight="SemiBold"/>
                                     <TextBlock Text="Now playing" Style="{StaticResource ZinkSubText}"/>

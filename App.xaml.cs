@@ -539,7 +539,7 @@ namespace Zink
 
                 NotifyReplayBufferStarted();
 
-                _trayService?.ShowBalloonTip("Zink", "Replay buffer started");
+                _trayService?.ShowBalloonTip("Zink", "background gaming record clipping");
             }
             catch (Exception ex)
             {

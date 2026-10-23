@@ -2,9 +2,9 @@ param(
     [ValidateSet("Debug", "Release")]
     [string]$Configuration = "Release",
 
-    [string[]]$Platforms = @("x64", "arm64"),
+    [string[]]$Platforms = @("x86", "x64", "arm64"),
 
-    [switch]$CreateBundle,
+    [switch]$CreateBundle = $true,
 
     [switch]$CreateInstallPackage,
 
@@ -68,24 +68,40 @@ foreach ($platform in $selectedPlatforms) {
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 }
 
-if ($CreateBundle -and $selectedPlatforms.Count -gt 1) {
-    $primaryPlatform = if ($selectedPlatforms -contains "x64") { "x64" } else { $selectedPlatforms[0] }
-    $bundlePackageDir = ((Join-Path $packageDir "bundle") + "/")
-
-    Write-Host ""
-    Write-Host "Building combined bundle for $bundlePlatforms..."
-    dotnet build $projectPath `
-        -c $Configuration `
-        -p:Platform=$primaryPlatform `
-        -p:GenerateAppxPackageOnBuild=true `
-        -p:ZinkLocalPackageSigningEnabled=false `
-        -p:AppxPackageSigningEnabled=false `
-        -p:AppxBundle=Always `
-        "-p:AppxPackageDir=$bundlePackageDir" `
-        "-p:AppxBuildConfigurationSelection=$bundlePlatforms" `
-        "-p:AppxBundlePlatforms=$bundlePlatforms"
-
-    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+if ($CreateBundle) {
+    $sdkBin = Join-Path ${env:ProgramFiles(x86)} "Windows Kits\10\bin"
+    $makeAppx = Get-ChildItem -LiteralPath $sdkBin -Directory |
+        Where-Object { $_.Name -match '^\d+\.\d+\.\d+\.\d+$' } |
+        Sort-Object { [version]$_.Name } -Descending |
+        ForEach-Object { Join-Path $_.FullName "x64\makeappx.exe" } |
+        Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+    if (!$makeAppx) { throw "Install the Windows SDK to create the Store bundle." }
+    $bundlePackageDir = Join-Path $packageDir "bundle"
+    $bundleInputDir = Join-Path $bundlePackageDir "Input"
+    New-Item -ItemType Directory -Path $bundleInputDir -Force | Out-Null
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $bundleVersion = $null
+    foreach ($platform in $selectedPlatforms) {
+        $packages = @(Get-ChildItem -LiteralPath (Join-Path $packageDir $platform) -Recurse -File -Filter "Zink_*_$platform.msix" |
+            Where-Object { $_.FullName -notmatch '[\\/]Dependencies[\\/]' })
+        if ($packages.Count -ne 1) { throw "Expected one Zink MSIX for $platform; found $($packages.Count)." }
+        $archive = [System.IO.Compression.ZipFile]::OpenRead($packages[0].FullName)
+        try {
+            $reader = [System.IO.StreamReader]::new($archive.GetEntry("AppxManifest.xml").Open())
+            try { [xml]$manifest = $reader.ReadToEnd() } finally { $reader.Dispose() }
+            $version = [string]$manifest.Package.Identity.Version
+            if ($bundleVersion -and $bundleVersion -ne $version) { throw "Package versions differ across architectures." }
+            $bundleVersion = $version
+        } finally { $archive.Dispose() }
+        Copy-Item -LiteralPath $packages[0].FullName -Destination $bundleInputDir
+    }
+    $storeBundle = Join-Path $bundlePackageDir "Zink_${bundleVersion}_neutral.msixbundle"
+    & $makeAppx bundle /o /bv $bundleVersion /d $bundleInputDir /p $storeBundle
+    if ($LASTEXITCODE -ne 0) { throw "Store bundle creation failed (exit $LASTEXITCODE)." }
+    $storeBundles = @(Get-ChildItem -LiteralPath $bundlePackageDir -Recurse -File -Filter *.msixbundle)
+    if ($storeBundles.Count -eq 0) { throw "The build did not create a Store MSIX bundle." }
+    Write-Host "Upload this bundle to Partner Center:"
+    $storeBundles | Select-Object -ExpandProperty FullName | Write-Host
 }
 
 if ($CreateInstallPackage) {
@@ -141,7 +157,7 @@ if ($CreateInstallPackage) {
 }
 
 Write-Host "Package output:"
-Get-ChildItem -LiteralPath $packageRoot -Recurse -File |
+Get-ChildItem -LiteralPath $packageDir -Recurse -File |
     Where-Object { $_.Extension -in ".msixbundle", ".msix", ".msixupload", ".cer", ".ps1" } |
     Sort-Object LastWriteTime -Descending |
     Select-Object -First 10 FullName, Length, LastWriteTime |
@@ -156,3 +172,4 @@ if ($CreateInstallPackage) {
         Select-Object FullName, Length, LastWriteTime |
         Format-Table -AutoSize
 }
+

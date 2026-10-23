@@ -59,7 +59,7 @@ namespace Zink.Services.Recording
         internal event EventHandler<GpuVideoFramePacket>? GpuFrameArrived;
 
         private const int MONITORINFOF_PRIMARY = 0x00000001;
-        private const int MONITOR_DEFAULTTOPRIMARY = 1;
+        private delegate bool MonitorEnumProc(IntPtr monitor, IntPtr hdc, ref RECT rect, IntPtr data);
 
         [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Auto)]
         private struct MONITORINFOEX
@@ -82,15 +82,8 @@ namespace Zink.Services.Recording
             public int bottom;
         }
 
-        [StructLayout(LayoutKind.Sequential)]
-        private struct POINT
-        {
-            public int X;
-            public int Y;
-        }
-
         [DllImport("user32.dll")]
-        private static extern IntPtr MonitorFromPoint(POINT pt, int dwFlags);
+        private static extern bool EnumDisplayMonitors(IntPtr hdc, IntPtr clip, MonitorEnumProc callback, IntPtr data);
 
         [DllImport("user32.dll", CharSet = CharSet.Auto)]
         private static extern bool GetMonitorInfo(IntPtr hMonitor, ref MONITORINFOEX lpmi);
@@ -300,22 +293,24 @@ namespace Zink.Services.Recording
             _targetFps = Math.Min(_targetFps, 60);
         }
 
-        private static string? GetPrimaryMonitorDeviceName()
+        internal static string? GetPrimaryMonitorDeviceName()
         {
-            IntPtr primaryMonitor = MonitorFromPoint(new POINT { X = 0, Y = 0 }, MONITOR_DEFAULTTOPRIMARY);
-            if (primaryMonitor == IntPtr.Zero)
-                return null;
-
-            var info = new MONITORINFOEX();
-            info.cbSize = Marshal.SizeOf<MONITORINFOEX>();
-
-            if (!GetMonitorInfo(primaryMonitor, ref info))
-                return null;
-
-            if ((info.dwFlags & MONITORINFOF_PRIMARY) == 0)
-                return null;
-
-            return info.szDevice;
+            string? deviceName = null;
+            // Use Windows' primary flag rather than display order or coordinates,
+            // which can differ across multi-monitor and mixed-DPI layouts.
+            EnumDisplayMonitors(IntPtr.Zero, IntPtr.Zero,
+                (IntPtr monitor, IntPtr hdc, ref RECT rect, IntPtr data) =>
+                {
+                    var info = new MONITORINFOEX { cbSize = Marshal.SizeOf<MONITORINFOEX>() };
+                    if (GetMonitorInfo(monitor, ref info) &&
+                        (info.dwFlags & MONITORINFOF_PRIMARY) != 0)
+                    {
+                        deviceName = info.szDevice;
+                        return false;
+                    }
+                    return true;
+                }, IntPtr.Zero);
+            return deviceName;
         }
 
         private async Task CaptureLoop(CancellationToken token)

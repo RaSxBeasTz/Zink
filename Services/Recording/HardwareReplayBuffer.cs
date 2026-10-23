@@ -30,9 +30,10 @@ namespace Zink.Services.Recording
         // periodically shift the entire backing array with RemoveRange. Queue keeps
         // expiry incremental and avoids those CPU/GC spikes while preserving every
         // encoded frame at its original quality.
-        private readonly Queue<H264EncodedFrame> _frames = new();
+        private readonly Queue<ReplayFrameStorage.Entry> _frames = new();
+        private readonly ReplayFrameStorage _frameStorage = new();
         private readonly Queue<long> _keyFrameTimestamps = new();
-        private H264EncodedFrame[] _exportFrames = Array.Empty<H264EncodedFrame>();
+        private ReplayFrameStorage.Snapshot? _exportFrames;
         private IH264VideoEncoder? _encoder;
         private SharpDX.Direct3D11.Device? _dedicatedEncoderDevice;
         private int _width;
@@ -306,7 +307,7 @@ namespace Zink.Services.Recording
                 if (receivedPacketCount % 600 == 0)
                 {
                     _ = GameReplayLog.WriteAsync(nameof(HardwareReplayBuffer),
-                        $"Replay buffer health. ReceivedGpuPackets={receivedPacketCount}, EncodedFrames={_frames.Count}, LiveEncodedMB={_liveEncodedBytes / 1048576d:0.0}, ExportFrames={_exportFrames.Length}, ExportMB={_exportFrames.Sum(frame => (long)(frame?.Data.Length ?? 0)) / 1048576d:0.0}, LatestTimestampMs={_latestTimestampMilliseconds}, BufferedDuration={BufferedDuration}, Encoder={_encoder?.EncoderMode ?? "not created"}, {GetProcessMemorySnapshot()}");
+                        $"Replay buffer health. ReceivedGpuPackets={receivedPacketCount}, EncodedFrames={_frames.Count}, LiveEncodedMB={_liveEncodedBytes / 1048576d:0.0}, ExportFrames={(_exportFrames?.Count ?? 0)}, ExportMB={(_exportFrames?.TotalBytes ?? 0) / 1048576d:0.0}, LatestTimestampMs={_latestTimestampMilliseconds}, BufferedDuration={BufferedDuration}, Encoder={_encoder?.EncoderMode ?? "not created"}, {GetProcessMemorySnapshot()}");
                 }
             }
         }
@@ -375,11 +376,11 @@ namespace Zink.Services.Recording
                 return;
             }
 
-            byte[][] frames;
+            ReplayFrameStorage.Snapshot frames;
             lock (_gate)
             {
                 TimeSpan selectedDuration = requestedDuration <= _duration ? requestedDuration : _duration;
-                H264EncodedFrame[] bufferedFrames = _frames.ToArray();
+                ReplayFrameStorage.Entry[] bufferedFrames = _frames.ToArray();
                 long cutoff = bufferedFrames.Length == 0
                     ? 0
                     : bufferedFrames[^1].TimestampMilliseconds - (long)selectedDuration.TotalMilliseconds;
@@ -397,10 +398,11 @@ namespace Zink.Services.Recording
                     .Skip(start)
                     .Take(exactFrameCount)
                     .ToArray();
-                _exportFrames = selectedFrames;
+                _exportFrames?.Dispose();
+                _exportFrames = new ReplayFrameStorage.Snapshot(selectedFrames);
                 _exportDuration = TimeSpan.FromSeconds(
                     selectedFrames.Length / (double)Math.Max(1, _fps));
-                frames = selectedFrames.Select(f => f.Data).ToArray();
+                frames = _exportFrames;
                 if (selectedFrames.Length > 0)
                 {
                     _exportStartTimestamp = TimeSpan.FromMilliseconds(
@@ -414,10 +416,10 @@ namespace Zink.Services.Recording
                 }
 
                 _ = GameReplayLog.WriteAsync(nameof(HardwareReplayBuffer),
-                    $"Replay save snapshot selected. RequestedDuration={requestedDuration}, ExactFrameBudget={exactFrameCount}, AvailableFrames={_frames.Count}, LiveEncodedMB={_liveEncodedBytes / 1048576d:0.0}, SelectedFrames={selectedFrames.Length}, SelectedMB={selectedFrames.Sum(frame => (long)frame.Data.Length) / 1048576d:0.0}, StartIndex={start}, CutoffTimestampMs={cutoff}, ExportStart={_exportStartTimestamp}, MeasuredFps={_exportFps:0.###}, TargetFps={_fps}, HDR10={_exportHdr10}, {GetProcessMemorySnapshot()}");
+                    $"Replay save snapshot selected. RequestedDuration={requestedDuration}, ExactFrameBudget={exactFrameCount}, AvailableFrames={_frames.Count}, LiveEncodedMB={_liveEncodedBytes / 1048576d:0.0}, SelectedFrames={selectedFrames.Length}, SelectedMB={selectedFrames.Sum(frame => (long)frame.Length) / 1048576d:0.0}, StartIndex={start}, CutoffTimestampMs={cutoff}, ExportStart={_exportStartTimestamp}, MeasuredFps={_exportFps:0.###}, TargetFps={_fps}, HDR10={_exportHdr10}, {GetProcessMemorySnapshot()}");
             }
 
-            if (frames.Length == 0)
+            if (frames.Count == 0)
             {
                 await GameReplayLog.WriteAsync(nameof(HardwareReplayBuffer),
                     $"Save rejected: no encoded frames. Encoder={_encoder?.EncoderMode ?? "not created"}, HDR10={_exportHdr10}, Output={_width}x{_height}@{_fps}");
@@ -428,8 +430,8 @@ namespace Zink.Services.Recording
                 return;
 
             await using var stream = new FileStream(outputPath, FileMode.Create, FileAccess.Write, FileShare.None, 1024 * 1024, true);
-            foreach (byte[] frame in frames)
-                await stream.WriteAsync(frame);
+            foreach (H264EncodedFrame frame in frames)
+                await stream.WriteAsync(frame.Data);
         }
 
         public async Task MuxAsync(string h264Path, string? wavePath, string outputPath, TimeSpan requestedDuration)
@@ -471,9 +473,10 @@ namespace Zink.Services.Recording
             }
 
             await GameReplayLog.WriteAsync(nameof(HardwareReplayBuffer),
-                $"Mux starting. Frames={_exportFrames.Length}, Size={_width}x{_height}, MeasuredFps={_exportFps:0.###}, TargetFps={_fps}, Bitrate={_exportBitrate}, HDR10={_exportHdr10}, CombinedAudio={File.Exists(combinedWavePath)}, DesktopAudio={File.Exists(desktopWavePath)}, MicrophoneAudio={File.Exists(microphoneWavePath)}");
+                $"Mux starting. Frames={(_exportFrames?.Count ?? 0)}, Size={_width}x{_height}, MeasuredFps={_exportFps:0.###}, TargetFps={_fps}, Bitrate={_exportBitrate}, HDR10={_exportHdr10}, CombinedAudio={File.Exists(combinedWavePath)}, DesktopAudio={File.Exists(desktopWavePath)}, MicrophoneAudio={File.Exists(microphoneWavePath)}");
 
-            H264EncodedFrame[] exportFrames = _exportFrames;
+            ReplayFrameStorage.Snapshot exportFrames = _exportFrames ??
+                throw new InvalidOperationException("No replay export snapshot is available.");
             try
             {
                 await ZinkNativeMultiTrackMuxer.MuxAsync(
@@ -493,8 +496,9 @@ namespace Zink.Services.Recording
             {
                 lock (_gate)
                 {
+                    exportFrames.Dispose();
                     if (ReferenceEquals(_exportFrames, exportFrames))
-                        _exportFrames = Array.Empty<H264EncodedFrame>();
+                        _exportFrames = null;
                 }
             }
 
@@ -510,7 +514,7 @@ namespace Zink.Services.Recording
                     HasDesktopTrack = File.Exists(desktopWavePath),
                     HasMicrophoneTrack = File.Exists(microphoneWavePath),
                     AudioBitrateKbps = audioBitrateKbps,
-                    EncodedFrameCount = exportFrames.Length,
+                    EncodedFrameCount = exportFrames.Count,
                     MeasuredFrameRate = _exportFps,
                     TargetFrameRate = _fps,
                     GenuineHdr = _exportHdr10,
@@ -521,6 +525,15 @@ namespace Zink.Services.Recording
 
             static string? ExistingPathOrNull(string? path) =>
                 !string.IsNullOrWhiteSpace(path) && File.Exists(path) ? path : null;
+        }
+
+        internal void ReleaseExportSnapshot()
+        {
+            lock (_gate)
+            {
+                _exportFrames?.Dispose();
+                _exportFrames = null;
+            }
         }
 
         private void EnsureEncoder(
@@ -741,7 +754,9 @@ namespace Zink.Services.Recording
                 while (_frames.Count > 0 &&
                        _frames.Peek().TimestampMilliseconds < retainedKeyFrameTimestamp)
                 {
-                    _liveEncodedBytes -= _frames.Dequeue().Data.Length;
+                    var expired = _frames.Dequeue();
+                    _liveEncodedBytes -= expired.Length;
+                    expired.Release();
                 }
             }
 
@@ -751,7 +766,7 @@ namespace Zink.Services.Recording
 
         private void BufferEncodedFrameNoLock(H264EncodedFrame frame)
         {
-            _frames.Enqueue(frame);
+            _frames.Enqueue(_frameStorage.Append(frame));
             _liveEncodedBytes += frame.Data.Length;
             _latestTimestampMilliseconds = Math.Max(
                 _latestTimestampMilliseconds,
@@ -1037,6 +1052,10 @@ namespace Zink.Services.Recording
         {
             try
             {
+                string? primaryDeviceName = CaptureEngine.GetPrimaryMonitorDeviceName();
+                if (string.IsNullOrWhiteSpace(primaryDeviceName))
+                    throw new InvalidOperationException("Could not determine the primary monitor device name.");
+
                 using var factory = new Factory1();
                 int encoderAdapterIndex = FindBestHardwareAdapterIndex(factory);
                 for (int adapterIndex = 0; ; adapterIndex++)
@@ -1070,10 +1089,8 @@ namespace Zink.Services.Recording
                             {
                                 OutputDescription1 description = output6.Description1;
                                 var bounds = description.DesktopCoordinates;
-                                bool containsDesktopOrigin =
-                                    bounds.Left <= 0 && bounds.Top <= 0 &&
-                                    bounds.Right > 0 && bounds.Bottom > 0;
-                                if (!description.AttachedToDesktop || !containsDesktopOrigin)
+                                if (!description.AttachedToDesktop ||
+                                    !string.Equals(description.DeviceName?.Trim(), primaryDeviceName.Trim(), StringComparison.OrdinalIgnoreCase))
                                     continue;
 
                                 bool isHdr = description.BitsPerColor >= 10 &&
@@ -1363,9 +1380,11 @@ namespace Zink.Services.Recording
                 _encoder = null;
                 _dedicatedEncoderDevice?.Dispose();
                 _dedicatedEncoderDevice = null;
-                _frames.Clear();
+                while (_frames.Count > 0) _frames.Dequeue().Release();
+                _frameStorage.Dispose();
                 _keyFrameTimestamps.Clear();
-                _exportFrames = Array.Empty<H264EncodedFrame>();
+                _exportFrames?.Dispose();
+                _exportFrames = null;
                 _liveEncodedBytes = 0;
             }
         }

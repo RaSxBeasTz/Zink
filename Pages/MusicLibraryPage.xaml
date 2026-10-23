@@ -17,6 +17,7 @@
     <Grid Padding="20">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
             <RowDefinition Height="*"/>
         </Grid.RowDefinitions>
 
@@ -30,6 +31,12 @@
                 <Button x:Name="PickFolderButton"
                         Content="Add Music Folder"
                         Click="PickFolderButton_Click"/>
+                <Button Content="Refresh"
+                        Click="RefreshLibraryButton_Click"
+                        ToolTipService.ToolTip="Reload songs and retry missing artwork"/>
+                <Button Content="Open scan log"
+                        Click="OpenScanLogButton_Click"
+                        ToolTipService.ToolTip="Open the text log of song scans and filename changes"/>
                 <Button x:Name="PlayAllButton"
                         Content="Play All"
                         Click="PlayAllButton_Click"/>
@@ -58,9 +65,19 @@
             </StackPanel>
         </StackPanel>
 
+        <!-- Search filters the displayed cards without changing the library or playback queue. -->
+        <StackPanel Grid.Row="1" Spacing="8" Margin="0,12,0,12">
+            <AutoSuggestBox x:Name="MusicSearchBox"
+                            PlaceholderText="Search by song name, artist, album, or filename"
+                            QueryIcon="Find"
+                            TextChanged="MusicSearchBox_TextChanged"
+                            AutomationProperties.Name="Search music library"/>
+            <TextBlock Text="{Binding SearchResultsText}" Opacity="0.7" FontSize="12"/>
+        </StackPanel>
+
         <!-- Album-style cards mirror the Video Library thumbnail layout. -->
-        <GridView Grid.Row="1"
-                  ItemsSource="{Binding Songs}"
+        <GridView Grid.Row="2"
+                  ItemsSource="{Binding VisibleSongs}"
                   IsItemClickEnabled="False"
                   SelectionMode="None"
                   ScrollViewer.VerticalScrollBarVisibility="Visible"

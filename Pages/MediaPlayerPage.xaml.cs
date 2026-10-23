@@ -35,7 +35,17 @@ namespace Zink
         private DispatcherTimer _timer;
         private ObservableCollection<MusicTrack> _queue = new();
         private ObservableCollection<MusicTrack> _selectedTracks = new();
+        private readonly Dictionary<string, BitmapImage> _artworkByPath = new(StringComparer.OrdinalIgnoreCase);
         private int _currentIndex = -1;
+        private IReadOnlyList<ZinkLyrics.LyricLine> _timedLyrics = Array.Empty<ZinkLyrics.LyricLine>();
+        private int _activeLyricIndex = -1;
+        private int _activeWordIndex = -1;
+        private string? _loadedLyricsPath;
+        private string? _lyricsPlaybackPath;
+        private int _lyricsRequestId;
+        private System.Threading.CancellationTokenSource? _lyricsCancellation;
+        private readonly ZinkLyrics.LyricsReader _lyricsReader = new(
+            Path.Combine(ApplicationData.Current.LocalFolder.Path, "LyricsCache"));
         private bool _isShuffle = false;
         private bool _isRepeat = false;
         private Random _random = new();
@@ -102,22 +112,23 @@ namespace Zink
 
         public MusicPlayerPage()
         {
+            double currentVolume = _mediaPlayer.Volume;
             this.InitializeComponent();
             this.NavigationCacheMode = NavigationCacheMode.Required;
 
             Player.SetMediaPlayer(_mediaPlayer);
 
             _mediaPlayer.MediaFailed += (s, args) =>
-                Debug.WriteLine($"MediaFailed: {args.Error} – {args.ErrorMessage}");
+                Debug.WriteLine($"MediaFailed: {args.Error} ï¿½ {args.ErrorMessage}");
 
             _mediaPlayer.PlaybackSession.PlaybackStateChanged += PlaybackSession_PlaybackStateChanged;
 
             _mediaPlayer.MediaOpened += MediaPlayer_MediaOpened;
 
-            _mediaPlayer.Volume = 0.5;
-            VolumeSlider.Value = 0.5;
+            VolumeSlider.Value = currentVolume * 100;
+            _mediaPlayer.Volume = currentVolume;
 
-            _timer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(500) };
+            _timer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(100) };
             _timer.Tick += Timer_Tick;
 
             QueueList.ItemsSource = _queue;
@@ -126,6 +137,40 @@ namespace Zink
             LibraryData.QueueOverrideRequested += (_, songs) =>
             {
                 DispatcherQueue.TryEnqueue(() => OverrideQueueFromLibrary(songs));
+            };
+            LibraryData.SongRenamed += (previousPath, newPath) =>
+            {
+                foreach (var track in _queue.Concat(_selectedTracks))
+                    if (string.Equals(track.FilePath, previousPath, StringComparison.OrdinalIgnoreCase))
+                        track.FilePath = newPath;
+                if (_artworkByPath.TryGetValue(previousPath, out var artwork))
+                {
+                    _artworkByPath.Remove(previousPath);
+                    _artworkByPath[newPath] = artwork;
+                }
+                if (string.Equals(_currentlyPlayingPath, previousPath, StringComparison.OrdinalIgnoreCase))
+                    _currentlyPlayingPath = newPath;
+            };
+            LibraryData.SongUpdated += song =>
+            {
+                foreach (var track in _queue.Concat(_selectedTracks))
+                    if (string.Equals(track.FilePath, song.FilePath, StringComparison.OrdinalIgnoreCase))
+                    {
+                        track.Title = song.Title;
+                        track.Artist = song.Artist;
+                    }
+                if (song.Artwork != null)
+                    _artworkByPath[song.FilePath] = song.Artwork;
+                var current = _queue.ElementAtOrDefault(_currentIndex);
+                if (current != null && string.Equals(current.FilePath, song.FilePath, StringComparison.OrdinalIgnoreCase))
+                {
+                    TrackTitle.Text = current.Title;
+                    TrackArtist.Text = current.Artist;
+                    if (song.Artwork != null)
+                        AlbumArt.Source = song.Artwork;
+                    PushNowPlayingToService(current,
+                        _mediaPlayer.PlaybackSession.PlaybackState == MediaPlaybackState.Playing);
+                }
             };
 
             try
@@ -150,14 +195,16 @@ namespace Zink
             {
                 _queue = new ObservableCollection<MusicTrack>(_savedState.Queue);
                 QueueList.ItemsSource = _queue;
-                VolumeSlider.Value = _savedState.Volume;
+                VolumeSlider.Value = _savedState.Volume * 100;
                 _mediaPlayer.Volume = _savedState.Volume;
 
                 if (_savedState.CurrentIndex >= 0 && _savedState.CurrentIndex < _queue.Count)
                 {
                     _currentIndex = _savedState.CurrentIndex;
+                    _lyricsPlaybackPath = _queue[_currentIndex].FilePath;
                     TrackTitle.Text = _queue[_currentIndex].Title;
                     TrackArtist.Text = _queue[_currentIndex].Artist;
+                    _ = LoadLocalLyricsAsync(_queue[_currentIndex]);
                     PlayPauseButton.Content = new SymbolIcon(Symbol.Pause);
 
                     if (_mediaPlayer.PlaybackSession.PlaybackState != MediaPlaybackState.Playing)
@@ -182,6 +229,7 @@ namespace Zink
                 {
                     TrackTitle.Text = track.Title;
                     TrackArtist.Text = track.Artist;
+                    _ = LoadLocalLyricsAsync(track);
                     PlayPauseButton.Content = new SymbolIcon(Symbol.Pause);
 
                     if (AlbumArt.Source is null or BitmapImage { UriSource: null })
@@ -202,11 +250,7 @@ namespace Zink
                 var songs = LibraryData.CurrentQueue;
                 if (songs?.Any() == true)
                 {
-                    var tracks = songs.Select(s => new MusicTrack(
-                        s.Title,
-                        s.Artist,
-                        s.FilePath,
-                        "ms-appx:///Assets/DefaultAlbumArt.jpg")).ToList();
+                    var tracks = songs.Select(CreateLibraryTrack).ToList();
 
                     LoadQueue(new ObservableCollection<MusicTrack>(tracks));
                     return;
@@ -224,8 +268,7 @@ namespace Zink
                     new MusicTrack(title, "", storageFile.Path, "ms-appx:///Assets/DefaultAlbumArt.jpg")
                 };
 
-                var resume = GetSavedPositionSeconds(storageFile.Path);
-                LoadQueue(one, resumeSeconds: resume);
+                LoadQueue(one);
                 return;
             }
 
@@ -241,8 +284,7 @@ namespace Zink
                     new MusicTrack(name, "", maybePath, "ms-appx:///Assets/DefaultAlbumArt.jpg")
                 };
 
-                var resume = GetSavedPositionSeconds(maybePath);
-                LoadQueue(one, resumeSeconds: resume);
+                LoadQueue(one);
                 return;
             }
 
@@ -293,15 +335,15 @@ namespace Zink
             base.OnNavigatedFrom(e);
         }
 
-        private void LoadQueue(ObservableCollection<MusicTrack> tracks, double? resumeSeconds = null)
+        private void LoadQueue(ObservableCollection<MusicTrack> tracks)
         {
             _queue = tracks;
             QueueList.ItemsSource = _queue;
             if (_queue.Count > 0)
-                PlayTrack(0, resumeSeconds.HasValue ? TimeSpan.FromSeconds(resumeSeconds.Value) : null);
+                PlayTrack(0);
         }
 
-        private async void PlayTrack(int index, TimeSpan? startPosition = null, bool forceReloadArt = false)
+        private async void PlayTrack(int index, bool forceReloadArt = false)
         {
             if (index < 0 || index >= _queue.Count)
                 return;
@@ -311,6 +353,7 @@ namespace Zink
             try
             {
                 var track = _queue[index];
+                _ = LoadLocalLyricsAsync(track);
                 if (string.IsNullOrWhiteSpace(track.FilePath))
                     return;
 
@@ -321,6 +364,7 @@ namespace Zink
                 var isPlaying = _mediaPlayer.PlaybackSession.PlaybackState == MediaPlaybackState.Playing;
                 if (_currentlyPlayingPath == file.Path && isPlaying && !forceReloadArt)
                 {
+                    _lyricsPlaybackPath = file.Path;
                     PlayPauseButton.Content = new SymbolIcon(Symbol.Pause);
                     _timer.Start();
 
@@ -332,18 +376,12 @@ namespace Zink
                 }
 
                 _mediaPlayer.Source = MediaSource.CreateFromStorageFile(file);
+                _lyricsPlaybackPath = file.Path;
                 _mediaPlayer.Play();
                 _currentlyPlayingPath = file.Path;
 
-                if (!startPosition.HasValue)
-                {
-                    var resume = GetSavedPositionSeconds(file.Path);
-                    if (resume > 1)
-                        startPosition = TimeSpan.FromSeconds(resume);
-                }
-
-                if (startPosition.HasValue)
-                    _mediaPlayer.PlaybackSession.Position = startPosition.Value;
+                // Each newly loaded song starts fresh, including after an app restart.
+                _mediaPlayer.PlaybackSession.Position = TimeSpan.Zero;
 
                 TrackTitle.Text = track.Title;
                 TrackArtist.Text = track.Artist;
@@ -379,6 +417,153 @@ namespace Zink
             }
         }
 
+        private async Task LoadLocalLyricsAsync(MusicTrack track)
+        {
+            _lyricsCancellation?.Cancel();
+            _lyricsCancellation?.Dispose();
+            _lyricsCancellation = new System.Threading.CancellationTokenSource();
+            var cancellationToken = _lyricsCancellation.Token;
+            int requestId = ++_lyricsRequestId;
+            _loadedLyricsPath = track.FilePath;
+            _timedLyrics = Array.Empty<ZinkLyrics.LyricLine>();
+            _activeLyricIndex = -1;
+            _activeWordIndex = -1;
+            LyricsLines.Children.Clear();
+            LyricsLines.Visibility = Visibility.Collapsed;
+            LyricsText.Visibility = Visibility.Visible;
+            LyricsText.Text = "";
+            LyricsStatus.Text = "Loading lyrics...";
+            LyricsScrollViewer.ChangeView(null, 0, null);
+            try
+            {
+                var result = await _lyricsReader.ReadAsync(track.FilePath, track.Title, track.Artist, cancellationToken);
+                // Ignore a read that finishes after the user switches songs.
+                if (requestId != _lyricsRequestId) return;
+                RenderLyrics(result);
+            }
+            catch (OperationCanceledException) { }
+            catch (Exception ex)
+            {
+                Debug.WriteLine("Local lyrics: " + ex.Message);
+                if (requestId != _lyricsRequestId) return;
+                LyricsStatus.Text = "No readable local lyrics found. Add a matching .lrc or .txt file beside this song.";
+            }
+        }
+
+        private void RenderLyrics(ZinkLyrics.LyricsResult result)
+        {
+            double duration = string.Equals(_loadedLyricsPath, _lyricsPlaybackPath, StringComparison.OrdinalIgnoreCase)
+                ? _mediaPlayer.PlaybackSession.NaturalDuration.TotalSeconds : 0;
+            _timedLyrics = ZinkLyrics.TimedLyrics.CreateTimeline(result, duration);
+            _activeLyricIndex = -1;
+            _activeWordIndex = -1;
+            LyricsLines.Children.Clear();
+            LyricsText.Text = result.Text;
+            LyricsText.Visibility = Visibility.Visible;
+            LyricsLines.Visibility = Visibility.Collapsed;
+            LyricsStatus.Text = result.Source;
+            if (_timedLyrics.Count > 0)
+            {
+                LyricsText.Visibility = Visibility.Collapsed;
+                LyricsLines.Visibility = Visibility.Visible;
+                foreach (var line in _timedLyrics)
+                {
+                    LyricsLines.Children.Add(new Border
+                    {
+                        Padding = new Thickness(10, 8, 10, 8),
+                        CornerRadius = new CornerRadius(8),
+                        Child = new TextBlock
+                        {
+                            Text = line.Text,
+                            TextWrapping = TextWrapping.Wrap,
+                            FontSize = 15,
+                            MinHeight = 20,
+                            IsTextSelectionEnabled = true,
+                            Foreground = (Microsoft.UI.Xaml.Media.Brush)Resources["SubtleTextBrush"]
+                        }
+                    });
+                }
+                LyricsStatus.Text += _timedLyrics.Any(line => line.Words.Count > 0)
+                    ? " - timed word highlighting" : " - timed lines; word timings unavailable";
+                UpdateCurrentLyric(forceScroll: true);
+            }
+            else if (result.HasLyrics)
+            {
+                LyricsStatus.Text += " - plain lyrics; vocal timings unavailable";
+            }
+        }
+
+        private void LyricsLines_Loaded(object sender, RoutedEventArgs e)
+        {
+            UpdateCurrentLyric(forceScroll: true);
+        }
+
+        private void UpdateCurrentLyric(bool forceScroll = false)
+        {
+            if (_timedLyrics.Count == 0 || !string.Equals(_loadedLyricsPath, _lyricsPlaybackPath,
+                StringComparison.OrdinalIgnoreCase)) return;
+            double position = _mediaPlayer.PlaybackSession.Position.TotalSeconds;
+            int current = ZinkLyrics.TimedLyrics.FindCurrentLine(_timedLyrics, position);
+            bool lineChanged = current != _activeLyricIndex;
+            if (lineChanged || forceScroll)
+            {
+                if (_activeLyricIndex >= 0 && _activeLyricIndex < LyricsLines.Children.Count)
+                    SetLyricHighlight(_activeLyricIndex, false);
+                _activeLyricIndex = current;
+                _activeWordIndex = -1;
+                if (current < 0)
+                {
+                    if (position < _timedLyrics[0].Seconds) LyricsScrollViewer.ChangeView(null, 0, null);
+                    return;
+                }
+                SetLyricHighlight(current, true);
+            }
+            if (current < 0) return;
+            var row = (Border)LyricsLines.Children[current];
+            var text = (TextBlock)row.Child;
+            int wordIndex = ZinkLyrics.TimedLyrics.FindCurrentWord(_timedLyrics[current], position,
+                current + 1 < _timedLyrics.Count ? _timedLyrics[current + 1].Seconds : null);
+            if (wordIndex != _activeWordIndex)
+            {
+                text.TextHighlighters.Clear();
+                _activeWordIndex = wordIndex;
+                if (wordIndex >= 0)
+                {
+                    var word = _timedLyrics[current].Words[wordIndex];
+                    var highlight = new Microsoft.UI.Xaml.Documents.TextHighlighter
+                    {
+                        Background = (Microsoft.UI.Xaml.Media.Brush)Resources["AccentBrush"],
+                        Foreground = new Microsoft.UI.Xaml.Media.SolidColorBrush(global::Windows.UI.Color.FromArgb(255, 4, 12, 18))
+                    };
+                    highlight.Ranges.Add(new Microsoft.UI.Xaml.Documents.TextRange
+                        { StartIndex = word.StartIndex, Length = word.Length });
+                    text.TextHighlighters.Add(highlight);
+                }
+            }
+            if (!lineChanged && !forceScroll) return;
+            if (row.ActualHeight <= 0)
+            {
+                // Retry once layout has measured the new lyric rows.
+                _activeLyricIndex = -1;
+                return;
+            }
+            double top = row.TransformToVisual(LyricsLines).TransformPoint(new global::Windows.Foundation.Point(0, 0)).Y;
+            double offset = Math.Max(0, top - (LyricsScrollViewer.ViewportHeight - row.ActualHeight) / 2);
+            LyricsScrollViewer.ChangeView(null, Math.Min(offset, LyricsScrollViewer.ScrollableHeight), null);
+        }
+
+        private void SetLyricHighlight(int index, bool active)
+        {
+            var row = (Border)LyricsLines.Children[index];
+            var text = (TextBlock)row.Child;
+            text.TextHighlighters.Clear();
+            bool timedWords = _timedLyrics[index].Words.Count > 0;
+            text.Foreground = (Microsoft.UI.Xaml.Media.Brush)Resources[
+                active ? timedWords ? "TextBrush" : "AccentBrush" : "SubtleTextBrush"];
+            text.FontWeight = active ? Microsoft.UI.Text.FontWeights.SemiBold : Microsoft.UI.Text.FontWeights.Normal;
+            row.Background = active ? (Microsoft.UI.Xaml.Media.Brush)Resources["ControlSurfaceBrush"] : null;
+        }
+
         private void PushNowPlayingToService(MusicTrack track, bool isPlaying)
         {
             try
@@ -411,6 +596,9 @@ namespace Zink
         {
             try
             {
+                if (track == null)
+                    return;
+
                 var artist = track?.Artist?.Trim() ?? "";
                 var title = track?.Title?.Trim() ?? "";
 
@@ -443,22 +631,17 @@ namespace Zink
                 {
                     try
                     {
-                        AlbumArt.Source = new BitmapImage(artUri);
+                        var artwork = new BitmapImage(artUri);
+                        _artworkByPath[track.FilePath] = artwork;
+                        if (!IsCurrentArtworkTrack(track))
+                            return;
+                        AlbumArt.Source = artwork;
+                        PushNowPlayingToService(track,
+                            _mediaPlayer.PlaybackSession.PlaybackState == MediaPlaybackState.Playing);
                     }
                     catch { }
                 });
 
-                try
-                {
-                    AppPlaybackService.Instance.SetGenericNowPlaying(
-                        AppPlaybackService.MediaKind.Music,
-                        primary: track?.Title ?? "",
-                        secondary: track?.Artist ?? "",
-                        artworkUri: artUri,
-                        isPlaying: _mediaPlayer.PlaybackSession.PlaybackState == MediaPlaybackState.Playing
-                    );
-                }
-                catch { }
             }
             catch { }
         }
@@ -484,6 +667,14 @@ namespace Zink
 
         private async Task ReloadAlbumArtAsync(MusicTrack track)
         {
+            if (!IsCurrentArtworkTrack(track))
+                return;
+            if (_artworkByPath.TryGetValue(track.FilePath, out var cachedArtwork))
+            {
+                AlbumArt.Source = cachedArtwork;
+                return;
+            }
+
             try
             {
                 var file = await StorageFile.GetFileFromPathAsync(track.FilePath);
@@ -492,17 +683,32 @@ namespace Zink
                 {
                     var bmp = new BitmapImage();
                     await bmp.SetSourceAsync(thumb);
-                    AlbumArt.Source = bmp;
+                    // An online lookup may have finished while the thumbnail loaded.
+                    if (!_artworkByPath.ContainsKey(track.FilePath))
+                        _artworkByPath[track.FilePath] = bmp;
+                    if (IsCurrentArtworkTrack(track))
+                        AlbumArt.Source = _artworkByPath[track.FilePath];
                 }
                 else
                 {
-                    AlbumArt.Source = new BitmapImage(new Uri("ms-appx:///Assets/DefaultAlbumArt.jpg"));
+                    ApplyArtworkFallback(track);
                 }
             }
             catch
             {
-                AlbumArt.Source = new BitmapImage(new Uri("ms-appx:///Assets/DefaultAlbumArt.jpg"));
+                ApplyArtworkFallback(track);
             }
+        }
+
+        private bool IsCurrentArtworkTrack(MusicTrack track) => track != null &&
+            string.Equals(_queue.ElementAtOrDefault(_currentIndex)?.FilePath,
+                track.FilePath, StringComparison.OrdinalIgnoreCase);
+
+        private void ApplyArtworkFallback(MusicTrack track)
+        {
+            if (IsCurrentArtworkTrack(track))
+                AlbumArt.Source = _artworkByPath.TryGetValue(track.FilePath, out var artwork)
+                    ? artwork : new BitmapImage(new Uri("ms-appx:///Assets/DefaultAlbumArt.jpg"));
         }
 
         private void PlayPause_Click(object sender, RoutedEventArgs e)
@@ -578,8 +784,28 @@ namespace Zink
         private void ShuffleButton_Click(object sender, RoutedEventArgs e) =>
             _isShuffle = ShuffleButton.IsChecked == true;
 
-        private void RepeatButton_Click(object sender, RoutedEventArgs e) =>
-            _isRepeat = RepeatButton.IsChecked == true;
+        private void RepeatCurrentButton_Click(object sender, RoutedEventArgs e)
+        {
+            try
+            {
+                bool repeatCurrent = RepeatCurrentButton.IsChecked == true;
+                _mediaPlayer.IsLoopingEnabled = repeatCurrent;
+                ToolTipService.SetToolTip(RepeatCurrentButton,
+                    repeatCurrent ? "Repeat current song: on" : "Repeat current song: off");
+
+                // Restart a paused or finished song; an already playing song keeps its position.
+                if (repeatCurrent &&
+                    _mediaPlayer.PlaybackSession.PlaybackState != MediaPlaybackState.Playing &&
+                    _currentIndex >= 0 && _currentIndex < _queue.Count)
+                {
+                    PlayTrack(_currentIndex, forceReloadArt: true);
+                }
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine("RepeatCurrentButton_Click error: " + ex.Message);
+            }
+        }
 
         private void SeekSlider_ValueChanged(object sender, RangeBaseValueChangedEventArgs e)
         {
@@ -596,9 +822,10 @@ namespace Zink
 
         private void VolumeSlider_ValueChanged(object sender, RangeBaseValueChangedEventArgs e)
         {
-            _mediaPlayer.Volume = e.NewValue;
-            int pct = (int)(e.NewValue * 100);
-            VolumePercent.Text = $"{pct}%";
+            _mediaPlayer.Volume = e.NewValue / 100.0;
+            int pct = (int)Math.Round(e.NewValue);
+            if (VolumePercent != null)
+                VolumePercent.Text = $"{pct}%";
             if (VolumeIcon != null)
                 VolumeIcon.Symbol = pct == 0 ? Symbol.Mute : Symbol.Volume;
         }
@@ -608,6 +835,7 @@ namespace Zink
             try
             {
                 var session = _mediaPlayer.PlaybackSession;
+                UpdateCurrentLyric();
                 if (session.NaturalDuration.TotalSeconds > 0)
                 {
                     SeekSlider.Maximum = session.NaturalDuration.TotalSeconds;
@@ -688,14 +916,17 @@ namespace Zink
 
         public void OverrideQueueFromLibrary(IEnumerable<MusicLibraryPage.SongInfo> songs)
         {
-            var tracks = songs.Select(s => new MusicTrack(
-                             s.Title,
-                             s.Artist,
-                             s.FilePath,
-                             "ms-appx:///Assets/DefaultAlbumArt.jpg"))
-                             .ToList();
+            var tracks = songs.Select(CreateLibraryTrack).ToList();
 
             LoadQueue(new ObservableCollection<MusicTrack>(tracks));
+        }
+
+        private MusicTrack CreateLibraryTrack(MusicLibraryPage.SongInfo song)
+        {
+            if (song.Artwork != null)
+                _artworkByPath[song.FilePath] = song.Artwork;
+            return new MusicTrack(song.Title, song.Artist, song.FilePath,
+                "ms-appx:///Assets/DefaultAlbumArt.jpg");
         }
 
         private class MusicPlayerState
@@ -713,12 +944,7 @@ namespace Zink
 
             try
             {
-                var builder = new AppNotificationBuilder()
-                    .AddText(track.Title)
-                    .AddText(track.Artist);
-
-                var notification = builder.BuildNotification();
-                AppNotificationManager.Default.Show(notification);
+                NotificationService.Instance.Show(track.Title, track.Artist, store: false);
             }
             catch (Exception ex)
             {

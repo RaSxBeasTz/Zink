@@ -513,6 +513,7 @@ namespace Zink.Services.Recording
                     }
                     finally
                     {
+                        hardwareReplay.ReleaseExportSnapshot();
                         TryDeleteFile(tempH264);
                         TryDeleteFile(tempWave);
                         TryDeleteFile(tempDesktopWave);

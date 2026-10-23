@@ -119,7 +119,40 @@
                                         <ColumnDefinition Width="*"/>
                                         <ColumnDefinition Width="Auto"/>
                                     </Grid.ColumnDefinitions>
-                                    <TextBlock Text="Version 3.0.34.0" Foreground="White" FontWeight="SemiBold" VerticalAlignment="Center"/>
+                                    <TextBlock Text="Version 4.0.9.0" Foreground="White" FontWeight="SemiBold" VerticalAlignment="Center"/>
+                                    <Button x:Name="LearnMore4090Button" Grid.Column="1" Style="{StaticResource GlassButtonStyle}" Content="Learn More" Click="LearnMore4090Button_Click"/>
+                                </Grid>
+                            </Border>
+
+                            <Border Style="{StaticResource VersionRowStyle}">
+                                <Grid ColumnSpacing="12">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*"/>
+                                        <ColumnDefinition Width="Auto"/>
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock Text="Version 4.0.8.0" Foreground="White" FontWeight="SemiBold" VerticalAlignment="Center"/>
+                                    <Button x:Name="LearnMore4080Button" Grid.Column="1" Style="{StaticResource GlassButtonStyle}" Content="Learn More" Click="LearnMore4080Button_Click"/>
+                                </Grid>
+                            </Border>
+
+                            <Border Style="{StaticResource VersionRowStyle}">
+                                <Grid ColumnSpacing="12">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*"/>
+                                        <ColumnDefinition Width="Auto"/>
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock Text="Version 4.0.6.0" Foreground="White" FontWeight="SemiBold" VerticalAlignment="Center"/>
+                                    <Button x:Name="LearnMore4060Button" Grid.Column="1" Style="{StaticResource GlassButtonStyle}" Content="Learn More" Click="LearnMore4060Button_Click"/>
+                                </Grid>
+                            </Border>
+
+                            <Border Style="{StaticResource VersionRowStyle}">
+                                <Grid ColumnSpacing="12">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*"/>
+                                        <ColumnDefinition Width="Auto"/>
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock Text="Version 4.0.0.0" Foreground="White" FontWeight="SemiBold" VerticalAlignment="Center"/>
                                     <Button x:Name="LearnMore4000Button" Grid.Column="1" Style="{StaticResource GlassButtonStyle}" Content="Learn More" Click="LearnMore4000Button_Click"/>
                                 </Grid>
                             </Border>

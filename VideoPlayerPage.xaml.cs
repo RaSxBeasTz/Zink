@@ -61,6 +61,9 @@ namespace Zink
     public sealed partial class VideoPlayerPage : Page
     {
         private bool isFullScreen;
+        internal bool IsVideoPlayingForNotifications => _useCompatibilityPlaybackEngine
+            ? (_vlcMediaPlayer?.IsPlaying ?? false)
+            : mediaPlayerElement?.MediaPlayer?.PlaybackSession?.PlaybackState == MediaPlaybackState.Playing;
         private bool _isFullScreenTransitionInProgress;
         private bool _isPointerOverControlPanel;
         private GridLength _sidebarWidthBeforeFullScreen;
@@ -5482,7 +5485,7 @@ namespace Zink
             catch { }
         }
 
-        private static void SuppressNvidiaOverlayWindows()
+        internal static void SuppressNvidiaOverlayWindows()
         {
             try
             {

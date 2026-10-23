@@ -250,6 +250,11 @@ namespace Zink
 
             await InstallYouTubeCleanupScriptAsync(tab.View.CoreWebView2);
             await InstallFullScreenBridgeScriptAsync(tab.View.CoreWebView2);
+            await Services.OneDriveVideoPlayback.InstallAsync(tab.View.CoreWebView2, fullscreen =>
+            {
+                if (ReferenceEquals(_activeTab, tab))
+                    SetWebVideoFullScreen(fullscreen, allowImmediateExit: true);
+            });
             await InstallSiteHistoryBridgeScriptAsync(tab.View.CoreWebView2);
             await UpdateDocumentStartBlockerStateAsync(tab.View.CoreWebView2);
             await UpdatePageAdBlockingStateAsync(tab.View.CoreWebView2);

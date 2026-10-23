@@ -24,6 +24,7 @@ namespace Zink.Pages
         private bool _isLoadingReplayState;
         private bool _isLoadingHotkeyClipRecordingState;
         private bool _isLoadingDiagnosticLogState;
+        private bool _isLoadingDiscordRichPresenceState;
         private bool _isLoadingLanguage;
         private string? _latestHealthReportPath;
         private string? _latestSupportBundlePath;
@@ -71,6 +72,7 @@ namespace Zink.Pages
             LoadReplaySettingState();
             LoadHotkeyClipRecordingSettingState();
             LoadDiagnosticLogSettingState();
+            LoadDiscordRichPresenceSettingState();
             _ = LoadStartupTaskStateAsync();
         }
 
@@ -424,9 +426,11 @@ namespace Zink.Pages
                 RecordingPreferences.SetGamingBackgroundReplayEnabled(false);
                 RecordingPreferences.SetHotkeyGameClipRecordingEnabled(true);
                 DiagnosticLogService.SetEnabled(true);
+                DiscordPresenceService.Instance.SetEnabled(true);
                 LoadReplaySettingState();
                 LoadHotkeyClipRecordingSettingState();
                 LoadDiagnosticLogSettingState();
+                LoadDiscordRichPresenceSettingState();
 
                 var startupTask = await StartupTask.GetAsync("ZinkStartupTask");
                 var newState = await startupTask.RequestEnableAsync();
@@ -594,6 +598,48 @@ namespace Zink.Pages
                 DiagnosticLogToggleKnobTransform,
                 DiagnosticLogToggleOnLabel,
                 DiagnosticLogToggleOffLabel,
+                enabled,
+                animate);
+
+        private void LoadDiscordRichPresenceSettingState()
+        {
+            _isLoadingDiscordRichPresenceState = true;
+
+            try
+            {
+                bool enabled = DiscordPresenceService.GetEnabledSetting();
+                DiscordRichPresenceToggle.IsChecked = enabled;
+                UpdateDiscordRichPresenceToggleVisual(enabled, false);
+                DiscordRichPresenceStatusText.Text = enabled
+                    ? "Zink activity is visible on your Discord profile."
+                    : "Zink activity is hidden from your Discord profile.";
+            }
+            finally
+            {
+                _isLoadingDiscordRichPresenceState = false;
+            }
+        }
+
+        private void DiscordRichPresenceToggle_Toggled(object sender, RoutedEventArgs e)
+        {
+            if (_isLoadingDiscordRichPresenceState)
+                return;
+
+            bool enabled = DiscordRichPresenceToggle.IsChecked == true;
+            UpdateDiscordRichPresenceToggleVisual(enabled, true);
+            DiscordRichPresenceStatusText.Text = enabled
+                ? "Zink activity is visible on your Discord profile."
+                : "Zink activity is hidden from your Discord profile.";
+            DiscordPresenceService.Instance.SetEnabled(enabled);
+            StatusText.Text = "Discord Rich Presence setting saved.";
+        }
+
+        private void UpdateDiscordRichPresenceToggleVisual(bool enabled, bool animate) =>
+            UpdateSlidingToggleVisual(
+                DiscordRichPresenceToggleTrack,
+                DiscordRichPresenceToggleKnobTransform,
+                DiscordRichPresenceToggleOnLabel,
+                DiscordRichPresenceToggleOffLabel,
                 enabled,
                 animate);
 

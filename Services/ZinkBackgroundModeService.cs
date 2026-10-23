@@ -225,7 +225,7 @@ namespace Zink.Services
                 ? e.FromDisplayName
                 : (!string.IsNullOrWhiteSpace(e.FromUsername) ? e.FromUsername : $"User {e.FromUserId}");
 
-            ShowNotification("Incoming Zink call", $"{caller} is calling you.");
+            ShowNotification("Incoming Zink call", $"{caller} is calling you.", Zink.Pages.NotificationPriority.Call);
         }
 
         private void Realtime_IncomingMessage(object? sender, IncomingMessageEventArgs e)
@@ -241,14 +241,15 @@ namespace Zink.Services
             ShowNotification(senderName, preview);
         }
 
-        private static void ShowNotification(string title, string message)
+        private static void ShowNotification(string title, string message,
+            Zink.Pages.NotificationPriority priority = Zink.Pages.NotificationPriority.Normal)
         {
             if (!BackgroundModePreferences.AreBackgroundNotificationsEnabled)
                 return;
 
             try
             {
-                NotificationService.Instance.Show(title, message);
+                NotificationService.Instance.Show(title, message, priority);
             }
             catch
             {

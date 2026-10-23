@@ -92,8 +92,12 @@ namespace Zink.Services
                     !line.Contains("achievement", StringComparison.OrdinalIgnoreCase) &&
                     !GamerscorePattern.IsMatch(line)) ?? "Added to your Xbox profile";
 
+                NotificationService.Instance.RecordActivity($"Xbox achievement: {title}", $"{score} — {description}", showBanner: false);
                 _dispatcherQueue.TryEnqueue(() =>
-                    XboxAchievementOverlayWindow.Show(title, score, description));
+                {
+                    if (App.MainWindow?.AreRoutineNotificationsSuppressed != true)
+                        XboxAchievementOverlayWindow.Show(title, score, description);
+                });
             }
             catch (Exception ex)
             {

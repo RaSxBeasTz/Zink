@@ -14,7 +14,7 @@
   <Identity
     Name="FrancisHayle.Zink-MusicVideoPlayer"
     Publisher="CN=3FFFC630-A58A-41F5-B554-BA1A779ED16E"
-    Version="4.0.2.0" />
+    Version="4.0.8.0" />
 
   <Properties>
     <DisplayName>Zink.</DisplayName>

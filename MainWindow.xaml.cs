@@ -70,6 +70,22 @@ namespace Zink
         private ElementTheme _currentAppTheme = ElementTheme.Dark;
 
         private bool _windowIsActivated = false;
+        private Zink.Controls.ZinkNotificationHost? _notificationHost;
+        internal bool IsNotificationWindowActive => _windowIsActivated;
+        internal bool AreRoutineNotificationsSuppressed
+        {
+            get
+            {
+                if (_weAreInFullscreenMode) return true;
+                var hwnd = WindowNative.GetWindowHandle(this);
+                var id = Microsoft.UI.Win32Interop.GetWindowIdFromWindow(hwnd);
+                if (AppWindow.GetFromWindowId(id)?.Presenter.Kind == AppWindowPresenterKind.FullScreen) return true;
+                if (ContentFrame.Content is VideoPlayerPage video && video.IsVideoPlayingForNotifications) return true;
+                var playback = AppPlaybackService.Instance;
+                return (playback.CurrentKind == AppPlaybackService.MediaKind.Video && playback.IsPlaying) ||
+                    NotificationVideoGuard.IsPlaying(ContentFrame.Content as DependencyObject);
+            }
+        }
 
         private bool _incomingCallDialogShowing = false;
         private bool _realtimeConnectAttempted = false;
@@ -101,8 +117,15 @@ namespace Zink
             SidebarNav.IsPaneOpen = true;
             SetSidebarColumnForPaneState(true);
 
+            InitializeNavigationTabs();
+
             ContentFrame.Navigating += ContentFrame_Navigating;
             ContentFrame.Navigated += ContentFrame_Navigated;
+            _notificationHost = new Zink.Controls.ZinkNotificationHost(this);
+            Grid.SetColumnSpan(_notificationHost, 2);
+            Canvas.SetZIndex(_notificationHost, 10001);
+            RootGrid.Children.Add(_notificationHost);
+            AppActivityNotificationBridge.Attach(RootGrid);
             RootGrid.Loaded += RootGrid_Loaded_StartInitialNavigation;
             RootGrid.Loaded += (_, _) => LocalizationService.Apply(RootGrid);
             RootGrid.Loaded += RootGrid_Loaded_StartXboxAchievementListener;
@@ -757,7 +780,11 @@ namespace Zink
                 SuppressInitialNavigation = true;
                 MaximizeWindow();
                 DiagnosticLogService.WriteLine("File activation navigation started for " + pageType.Name + ".");
-                ContentFrame.Navigate(pageType, parameter);
+                if (InitialContentFrame.Content == null && InitialContentFrame.CurrentSourcePageType == null)
+                {
+                    InitialContentFrame.Navigate(typeof(HomeDashboardPage));
+                }
+                OpenSidebarTab(pageType, parameter);
                 ClearStartupOverlayImmediately();
 
                 DispatcherQueue.TryEnqueue(() =>
@@ -806,6 +833,7 @@ namespace Zink
             {
                 try
                 {
+                    TabStripGlass.Visibility = Visibility.Collapsed;
                     SidebarNav.IsPaneVisible = false;
                     SidebarNav.Visibility = Visibility.Collapsed;
                     SidebarColumn.Width = new GridLength(0);
@@ -822,6 +850,7 @@ namespace Zink
             {
                 try
                 {
+                    TabStripGlass.Visibility = Visibility.Visible;
                     SidebarNav.IsPaneVisible = _savedSidebarVisible;
                     SidebarNav.IsPaneOpen = _savedPaneOpen;
                     SidebarNav.PaneDisplayMode = _savedPaneDisplayMode;
@@ -838,7 +867,7 @@ namespace Zink
             });
         }
 
-        public void EnterFullscreenMode()
+        public void EnterFullscreenMode(bool enableMouseExitHook = true)
         {
             if (_weAreInFullscreenMode) return;
 
@@ -854,7 +883,7 @@ namespace Zink
                     appWindow.SetPresenter(AppWindowPresenterKind.FullScreen);
                     _weAreInFullscreenMode = true;
 
-                    StartFullscreenMouseExitHook();
+                    if (enableMouseExitHook) StartFullscreenMouseExitHook();
                     StartFullscreenMonitor(appWindow);
                 }
                 catch { }
@@ -885,6 +914,7 @@ namespace Zink
 
         public void RestoreSidebar()
         {
+            TabStripGlass.Visibility = Visibility.Visible;
             SidebarNav.PaneDisplayMode = NavigationViewPaneDisplayMode.Left;
             SidebarNav.IsPaneOpen = true;
             SidebarNav.IsPaneVisible = true;
@@ -1073,19 +1103,19 @@ namespace Zink
             }
         }
 
+        // Sidebar selection is synchronized by navigation; invocation opens a separate tab.
         private void SidebarNav_SelectionChanged(NavigationView sender, NavigationViewSelectionChangedEventArgs args)
         {
-            if (args.SelectedItem is not NavigationViewItem item)
-                return;
+        }
 
-            if ((item.Tag as string) == "ZinkConnect" && ZinkConnectBrowserWindow.LaunchBrowserOnlyEnabled)
-            {
-                ZinkConnectBrowserWindow.ShowOrActivate();
-                HideToTray();
-                return;
-            }
+        private void SidebarNav_ItemInvoked(NavigationView sender, NavigationViewItemInvokedEventArgs args)
+        {
+            if (!_syncingTabSelection && args.InvokedItemContainer is NavigationViewItem item &&
+                GetSidebarPageType(item.Tag) is Type pageType)
+                OpenSidebarTab(pageType);
+        }
 
-            var targetPage = item.Tag switch
+        private static Type? GetSidebarPageType(object tag) => tag switch
             {
                 "Search" => typeof(SearchResultsPage),
                 "Home" => typeof(HomeDashboardPage),
@@ -1100,6 +1130,7 @@ namespace Zink
                 "Visualizer" => typeof(VisualizerPage),
                 "VideoPlayer" => typeof(VideoPlayerPage),
                 "VideoLibrary" => typeof(VideoLibraryPage),
+                "OneDriveStreaming" => typeof(OneDriveStreamingPage),
                 "DuplicateVideoSearcher" => typeof(DuplicateVideoSearcherPage),
                 "ScreenRecorder" => typeof(RecorderPage),
                 "RecordingsLibrary" => typeof(RecordingsLibraryPage),
@@ -1140,6 +1171,7 @@ namespace Zink
                 "Pinterest" => typeof(PinterestPage),
                 "Tumblr" => typeof(TumblrPage),
                 "Reddit" => typeof(RedditPage),
+                "ZinkSocial" => typeof(SocialLockedPage),
                 "SocialLogin" => typeof(LoginPage),
                 "SocialRegister" => typeof(RegisterPage),
                 "SocialDeveloperSettings" => typeof(DeveloperSettingsPage),
@@ -1163,13 +1195,7 @@ namespace Zink
                 "Settings" => typeof(SettingsPage),
                 "About" => typeof(AboutPage),
                 _ => null
-            };
-
-            if (targetPage is not null && ContentFrame.CurrentSourcePageType != targetPage)
-            {
-                ContentFrame.Navigate(targetPage);
-            }
-        }
+        };
 
         private bool TrySetDesktopAcrylicBackdrop()
         {
@@ -1207,6 +1233,8 @@ namespace Zink
 
         private void MainWindow_Closed(object sender, WindowEventArgs args)
         {
+            _notificationHost?.Dispose();
+            _notificationHost = null;
             SocialManager.Instance.Realtime.IncomingCall -= Realtime_IncomingCall_Global;
             VideoLibraryService.Current.BusyChanged -= VideoLibraryService_BusyChanged;
 
@@ -1310,15 +1338,30 @@ namespace Zink
             SetBrushColor("NavigationViewItemBackgroundPointerOver", hover);
             SetBrushColor("NavigationViewItemBackgroundSelected", selected);
             SetBrushColor("NavigationViewItemBackgroundPressed", pressed);
+            // Match the reference panel while retaining the user's light theme and tint settings.
+            SetBrushColor("NavigationViewItemBackgroundPointerOver", useLightTheme ? WithAlpha(tint, 18) : WithAlpha(ZinkCyanAccent, 18));
+            SetBrushColor("NavigationViewItemBackgroundPressed", useLightTheme ? WithAlpha(tint, 30) : WithAlpha(ZinkCyanAccent, 28));
+            SetBrushColor("NavigationViewItemForegroundSelectedPointerOver", sidebarPrimaryText);
+            SetBrushColor("NavigationViewItemForegroundSelectedPressed", sidebarPrimaryText);
+            SidebarPanelTop.Color = useLightTheme ? WithAlpha(MixWithWhite(tint, 235), 180) : WithAlpha(Darken(tint, 70), 156);
+            SidebarPanelMiddle.Color = useLightTheme ? WithAlpha(MixWithWhite(tint, 225), 160) : WithAlpha(Darken(tint, 42), 120);
+            SidebarPanelBottom.Color = useLightTheme ? WithAlpha(MixWithWhite(tint, 240), 140) : WithAlpha(Darken(tint, 80), 88);
+
             SetBrushColor("NavigationViewItemForeground", sidebarMutedText);
             SetBrushColor("NavigationViewItemForegroundPointerOver", sidebarPrimaryText);
             SetBrushColor("NavigationViewItemForegroundSelected", sidebarPrimaryText);
             SetBrushColor("NavigationViewItemIconForeground", sidebarMutedText);
             SetBrushColor("NavigationViewItemIconForegroundPointerOver", sidebarPrimaryText);
-            SetBrushColor("NavigationViewItemIconForegroundSelected", sidebarPrimaryText);
+            SetBrushColor("NavigationViewItemIconForegroundSelected", useLightTheme ? Darken(ZinkNeonAccent, 140) : ZinkNeonAccent);
             SetBrushColor("NavigationViewItemHeaderForeground", sidebarMutedText);
             SetBrushColor("NavigationViewItemSeparatorForeground", sidebarMutedText);
             ApplyTitleBarGlass(tint, useLightTheme);
+            if (RootGrid.Resources["NavigationTabGlassBrush"] is AcrylicBrush tabGlass)
+            {
+                tabGlass.TintColor = useLightTheme ? MixWithWhite(tint, 220) : tint;
+                tabGlass.TintLuminosityOpacity = useLightTheme ? 0.75 : 0.35;
+                tabGlass.FallbackColor = useLightTheme ? WithAlpha(MixWithWhite(tint, 220), 180) : WithAlpha(tint, 176);
+            }
 
             SidebarNav.Foreground = new SolidColorBrush(sidebarPrimaryText);
             ApplySidebarItemTextColor(sidebarMutedText);
@@ -1791,7 +1834,7 @@ namespace Zink
 
                             if (navItem.Icon is FontIcon fontIcon)
                             {
-                                fontIcon.Foreground = brush;
+                                fontIcon.ClearValue(FontIcon.ForegroundProperty);
                             }
 
                             if (navItem.MenuItems != null && navItem.MenuItems.Count > 0)
@@ -1909,7 +1952,20 @@ namespace Zink
 
         private void ContentFrame_Navigating(object sender, NavigatingCancelEventArgs e)
         {
-            if (ContentFrame.Content is DependencyObject outgoingPage)
+            var navigatingFrame = (Frame)sender;
+            if (e.SourcePageType != typeof(SocialLockedPage) &&
+                e.SourcePageType?.Namespace == typeof(SocialLockedPage).Namespace)
+            {
+                e.Cancel = true;
+                DispatcherQueue.TryEnqueue(() =>
+                {
+                    if (navigatingFrame.CurrentSourcePageType != typeof(SocialLockedPage))
+                        navigatingFrame.Navigate(typeof(SocialLockedPage));
+                });
+                return;
+            }
+
+            if (navigatingFrame.Content is DependencyObject outgoingPage)
             {
                 // Keep Spotify's authenticated WebView alive while using its widget.
                 // Closing it here stops playback and destroys the controller target.
@@ -1948,14 +2004,17 @@ namespace Zink
 
         private void ContentFrame_Navigated(object sender, NavigationEventArgs e)
         {
+            if (!ReferenceEquals(sender, ContentFrame)) return;
             try
             {
+                UpdateSelectedTabTitle();
                 var t = e?.SourcePageType;
                 if (t == null) return;
 
                 if (ContentFrame.Content is FrameworkElement content)
                 {
                     content.RequestedTheme = _currentAppTheme;
+                    NotificationVideoGuard.TrackTree(content);
                 }
 
                 ApplyGlassTintToCurrentPage();
@@ -2567,6 +2626,7 @@ namespace Zink
                 if (t == typeof(VisualizerPage)) return "Visualizer";
                 if (t == typeof(VideoPlayerPage)) return "VideoPlayer";
                 if (t == typeof(VideoLibraryPage)) return "VideoLibrary";
+                if (t == typeof(OneDriveStreamingPage)) return "OneDriveStreaming";
                 if (t == typeof(DuplicateVideoSearcherPage)) return "DuplicateVideoSearcher";
                 if (t == typeof(RecorderPage)) return "ScreenRecorder";
                 if (t == typeof(RecordingsLibraryPage)) return "RecordingsLibrary";

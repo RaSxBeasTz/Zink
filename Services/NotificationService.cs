@@ -1,6 +1,7 @@
 using System;
 using System.Collections.ObjectModel;
 using System.Linq;
+using System.IO;
 using System.Text.Json;
 using Microsoft.Windows.AppNotifications;
 using Microsoft.Windows.AppNotifications.Builder;
@@ -12,6 +13,7 @@ namespace Zink.Services
     public sealed class NotificationService
     {
         private const string StoredNotificationsKey = "Zink.Notifications.Stored";
+        private static string HistoryPath => Path.Combine(ApplicationData.Current.LocalFolder.Path, "notifications.json");
         public const string AppUpdateNotificationKind = "AppUpdateAvailable";
         public const string AppUpdateNotificationTitle = "Zink app update ready";
         public const string AppUpdateNotificationMessage = "The Zink app has a new update ready to be installed. Installing the update is recommended because it can contain bug fixes, performance improvements and new features.";
@@ -21,10 +23,29 @@ namespace Zink.Services
 
         public static NotificationService Instance => _instance;
         public ObservableCollection<Notification> Notifications { get; } = new();
+        public event Action<Notification>? BannerRequested;
 
         private NotificationService()
         {
             LoadStoredNotifications();
+        }
+
+        // Activity is stored and presented in-app, without creating a desktop toast.
+        public void RecordActivity(string title, string message, NotificationPriority priority = NotificationPriority.Normal,
+            bool showBanner = true)
+        {
+            Publish(title, message, priority, store: true, allowDesktopToast: false, showBanner: showBanner);
+        }
+
+        private static bool DispatchToUI(Action action)
+        {
+            var dispatcher = App.MainWindow?.DispatcherQueue;
+            if (dispatcher != null && !dispatcher.HasThreadAccess)
+            {
+                dispatcher.TryEnqueue(() => action());
+                return true;
+            }
+            return false;
         }
 
         public void Show(string title, string message)
@@ -34,6 +55,35 @@ namespace Zink.Services
 
         public void Show(string title, string message, bool store)
         {
+            Show(title, message, NotificationPriority.Normal, store);
+        }
+
+        public void Show(string title, string message, NotificationPriority priority, bool store = true)
+        {
+            Publish(title, message, priority, store, allowDesktopToast: true);
+        }
+
+        private void Publish(string title, string message, NotificationPriority priority, bool store,
+            bool allowDesktopToast, bool showBanner = true)
+        {
+            if (DispatchToUI(() => Publish(title, message, priority, store, allowDesktopToast, showBanner))) return;
+            if (store)
+                AddStoredNotification(title, message, priority);
+
+            if (!showBanner) return;
+            if (priority == NotificationPriority.Normal && App.MainWindow?.AreRoutineNotificationsSuppressed == true)
+                return;
+
+            if (App.MainWindow?.IsNotificationWindowActive == true && BannerRequested != null)
+            {
+                BannerRequested.Invoke(new Notification
+                {
+                    Title = title ?? "", Message = message ?? "", Priority = priority, Timestamp = DateTime.Now
+                });
+                return;
+            }
+
+            if (!allowDesktopToast) return;
             try
             {
                 var notification = new AppNotificationBuilder()
@@ -48,8 +98,6 @@ namespace Zink.Services
                 System.Diagnostics.Debug.WriteLine("Notification FAILED: " + ex);
             }
 
-            if (store)
-                AddStoredNotification(title, message);
         }
 
         public void ShowAppUpdateReady()
@@ -69,6 +117,7 @@ namespace Zink.Services
 
         public void Delete(Notification notification)
         {
+            if (DispatchToUI(() => Delete(notification))) return;
             if (notification == null)
                 return;
 
@@ -89,6 +138,7 @@ namespace Zink.Services
 
         public void DeleteAll()
         {
+            if (DispatchToUI(DeleteAll)) return;
             try
             {
                 Notifications.Clear();
@@ -99,8 +149,9 @@ namespace Zink.Services
             }
         }
 
-        private void AddStoredNotification(string title, string message)
+        private void AddStoredNotification(string title, string message, NotificationPriority priority = NotificationPriority.Normal)
         {
+            if (DispatchToUI(() => AddStoredNotification(title, message, priority))) return;
             try
             {
                 Notifications.Insert(0, new Notification
@@ -108,6 +159,7 @@ namespace Zink.Services
                     Id = Guid.NewGuid().ToString("N"),
                     Title = title ?? "",
                     Message = message ?? "",
+                    Priority = priority,
                     Timestamp = DateTime.Now
                 });
 
@@ -125,6 +177,7 @@ namespace Zink.Services
             string actionLabel,
             string actionUri)
         {
+            if (DispatchToUI(() => AddOrUpdateStoredNotification(kind, title, message, actionLabel, actionUri))) return;
             try
             {
                 var existing = Notifications.FirstOrDefault(item =>
@@ -166,9 +219,9 @@ namespace Zink.Services
         {
             try
             {
-                if (!ApplicationData.Current.LocalSettings.Values.TryGetValue(StoredNotificationsKey, out var value) ||
-                    value is not string json ||
-                    string.IsNullOrWhiteSpace(json))
+                var json = File.Exists(HistoryPath) ? File.ReadAllText(HistoryPath) :
+                    ApplicationData.Current.LocalSettings.Values[StoredNotificationsKey] as string;
+                if (string.IsNullOrWhiteSpace(json))
                 {
                     return;
                 }
@@ -196,7 +249,9 @@ namespace Zink.Services
             try
             {
                 var json = JsonSerializer.Serialize(Notifications.ToArray());
-                ApplicationData.Current.LocalSettings.Values[StoredNotificationsKey] = json;
+                var temporaryPath = HistoryPath + ".tmp";
+                File.WriteAllText(temporaryPath, json);
+                File.Move(temporaryPath, HistoryPath, overwrite: true);
             }
             catch
             {

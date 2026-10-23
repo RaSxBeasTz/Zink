@@ -174,7 +174,6 @@ namespace Zink.Pages
                 RefreshNotifications();
                 RefreshQuickStartMode();
                 _ = RefreshSocialSummaryAsync();
-                _ = ShowQuickStartDialogIfNeededAsync();
             }
             catch { }
         }

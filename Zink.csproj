@@ -91,6 +91,10 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <!-- Include the Desktop Runtime in every self-contained build and package. -->
+    <FrameworkReference Include="Microsoft.WindowsDesktop.App" />
+    <Compile Remove="ZinkLyrics\**\*.cs" />
+    <ProjectReference Include="ZinkLyrics\ZinkLyrics.csproj" />
     <Compile Remove="Av1xSmokeTest\**\*.cs" />
     <Compile Remove="bin\**\*.cs" />
     <Compile Remove="obj\**\*.cs" />
@@ -119,6 +123,25 @@
     </AppxPackagePayload>
   </ItemGroup>
 
+  <Target Name="IncludeZinkDotNetRuntimeInPackage" AfterTargets="_ComputeAppxPackagePayload" BeforeTargets="_GenerateAppxPackageRecipe;_GenerateAppxPackageFile;_CreatePackageLayout" Condition="'$(SelfContained)' == 'true'">
+    <ItemGroup>
+      <AppxPackagePayload Include="@(RuntimePackAsset)" Exclude="@(AppxPackagePayload)">
+        <TargetPath>%(RuntimePackAsset.DestinationSubPath)</TargetPath>
+      </AppxPackagePayload>
+    </ItemGroup>
+  </Target>
+
+  <Target Name="CopyZinkDotNetRuntimeToAppxLayouts" AfterTargets="Build;_CreatePackageLayout" Condition="'$(SelfContained)' == 'true'">
+    <ItemGroup>
+      <_ZinkAppxDependency Include="@(ReferenceCopyLocalPaths)" Condition="'%(ReferenceCopyLocalPaths.Filename)' != 'Common.Logging' And '%(ReferenceCopyLocalPaths.Filename)' != 'Common.Logging.Core'">
+        <TargetPath>%(ReferenceCopyLocalPaths.DestinationSubDirectory)%(ReferenceCopyLocalPaths.Filename)%(ReferenceCopyLocalPaths.Extension)</TargetPath>
+      </_ZinkAppxDependency>
+    </ItemGroup>
+    <Copy SourceFiles="@(_ZinkAppxDependency)" DestinationFiles="@(_ZinkAppxDependency->'$(OutDir)AppX\%(TargetPath)')" SkipUnchangedFiles="true" Condition="Exists('$(OutDir)AppX')" />
+    <Copy SourceFiles="@(RuntimePackAsset->'$(OutDir)%(DestinationSubPath)')" DestinationFiles="@(RuntimePackAsset->'$(OutDir)AppX\%(DestinationSubPath)')" SkipUnchangedFiles="true" Condition="Exists('$(OutDir)AppX')" />
+    <Copy SourceFiles="@(RuntimePackAsset->'$(OutDir)%(DestinationSubPath)')" DestinationFiles="@(RuntimePackAsset->'$(AppxLayoutDir)%(DestinationSubPath)')" SkipUnchangedFiles="true" Condition="'$(AppxLayoutDir)' != '' And Exists('$(AppxLayoutDir)')" />
+  </Target>
+
   <Target Name="CopyZinkSquare44IconsToAppxLayouts" AfterTargets="Build;_CreatePackageLayout">
     <MakeDir Directories="$(OutDir)AppX\Assets" Condition="Exists('$(OutDir)AppX')" />
     <Copy SourceFiles="@(ZinkSquare44PackageIcon)" DestinationFiles="@(ZinkSquare44PackageIcon->'$(OutDir)AppX\Assets\%(Filename)%(Extension)')" SkipUnchangedFiles="true" Condition="Exists('$(OutDir)AppX')" />
@@ -131,23 +154,24 @@
     <PackageReference Include="CommunityToolkit.Mvvm" Version="8.4.2" />
     <PackageReference Include="Concentus" Version="2.2.2" />
     <PackageReference Include="fdk-aac" Version="2.0.3" />
-    <PackageReference Include="LibVLCSharp.WinUI" Version="3.10.1" />
+    <PackageReference Include="LibVLCSharp.WinUI" Version="3.10.2" />
     <PackageReference Include="Microsoft.AspNetCore.WebSockets" Version="2.3.13" />
-    <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.4191.47" />
+    <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.4258.31" />
+    <PackageReference Include="Microsoft.Identity.Client" Version="4.91.1" />
     <PackageReference Include="Microsoft.Windows.CsWinRT" Version="2.3.1" />
-    <PackageReference Include="Microsoft.WindowsAppSDK" Version="2.4.0" />
+    <PackageReference Include="Microsoft.WindowsAppSDK" Version="2.5.1" />
     <PackageReference Include="Microsoft.Windows.SDK.BuildTools" Version="10.0.28000.2705" />
-    <PackageReference Include="NAudio.Core" Version="3.1.0" />
-    <PackageReference Include="NAudio.WinMM" Version="3.1.0" />
+    <PackageReference Include="NAudio.Core" Version="3.3.0" />
+    <PackageReference Include="NAudio.WinMM" Version="3.3.0" />
     <PackageReference Include="SharpDX" Version="4.2.0" />
     <PackageReference Include="SharpDX.Direct3D11" Version="4.2.0" />
     <PackageReference Include="SharpDX.D3DCompiler" Version="4.2.0" />
     <PackageReference Include="SharpDX.DXGI" Version="4.2.0" />
     <PackageReference Include="SharpDX.MediaFoundation" Version="4.2.0" />
-    <PackageReference Include="SIPSorcery" Version="10.0.16" />
-    <PackageReference Include="System.Drawing.Common" Version="10.0.12" />
+    <PackageReference Include="SIPSorcery" Version="10.0.17" />
+    <PackageReference Include="System.Drawing.Common" Version="10.0.13" />
     <PackageReference Include="TagLibSharp" Version="2.3.0" />
-    <PackageReference Include="VideoLAN.LibVLC.Windows" Version="3.0.23.1" />
+    <PackageReference Include="VideoLAN.LibVLC.Windows" Version="3.0.24" />
     <PackageReference Include="Vortice.Direct3D12" Version="3.8.3" />
   </ItemGroup>
 
@@ -341,9 +365,6 @@
     <Content Update="Assets\Discord\zink_1024.png">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
-    <Content Update="Assets\StoreLogo.png">
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-    </Content>
     <Content Update="Assets\splashScreen.png">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
@@ -513,7 +534,7 @@
     <GenerateAppInstallerFile>False</GenerateAppInstallerFile>
 
     <!-- Store: ALWAYS create a bundle for upload -->
-    <AppxBundle>Never</AppxBundle>
+    <AppxBundle>Always</AppxBundle>
     <AppxBundlePlatforms>x64</AppxBundlePlatforms>
 
     <AppxPackageSigningTimestampDigestAlgorithm>SHA256</AppxPackageSigningTimestampDigestAlgorithm>
@@ -527,7 +548,7 @@
     <HoursBetweenUpdateChecks>0</HoursBetweenUpdateChecks>
 
     <!-- Keep package outputs outside OneDrive so packaging does not sync generated installers. -->
-    <AppxPackageDir>C:\Users\franc\Desktop\New folder %282%29\</AppxPackageDir>
+    <AppxPackageDir>$(LOCALAPPDATA)\Zink\PackageOutput\Packages\</AppxPackageDir>
     <ZinkPackageArtifactDir>$(LOCALAPPDATA)\Zink\PackageOutput\BundleArtifacts\</ZinkPackageArtifactDir>
 
     <SupportedOSPlatformVersion>10.0.19041.0</SupportedOSPlatformVersion>

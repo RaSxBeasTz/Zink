@@ -15,12 +15,45 @@ using TagLib;
 using System.IO;
 using System;
 using Windows.Storage.Streams;
+using System.Text.Json;
 
 namespace Zink.Pages
 {
     public sealed partial class MusicLibraryPage : Page, INotifyPropertyChanged
     {
         public ObservableCollection<SongInfo> Songs { get; set; } = new();
+
+        private string _searchText = "";
+
+        public IEnumerable<SongInfo> VisibleSongs => string.IsNullOrWhiteSpace(_searchText)
+            ? Songs
+            : Songs.Where(MatchesSearch).ToList();
+
+        public string SearchResultsText => string.IsNullOrWhiteSpace(_searchText)
+            ? ""
+            : VisibleSongs.Any()
+                ? $"{VisibleSongs.Count()} of {Songs.Count} songs"
+                : "No songs match your search. Try another name or clear the search.";
+
+        private bool MatchesSearch(SongInfo song)
+        {
+            var terms = _searchText.Split((char[])null, StringSplitOptions.RemoveEmptyEntries);
+            var fields = new[] { song.Title, song.Artist, song.Album, Path.GetFileName(song.FilePath) };
+            return terms.All(term => fields.Any(field =>
+                field?.IndexOf(term, StringComparison.OrdinalIgnoreCase) >= 0));
+        }
+
+        private void MusicSearchBox_TextChanged(AutoSuggestBox sender, AutoSuggestBoxTextChangedEventArgs args)
+        {
+            _searchText = sender.Text ?? "";
+            UpdateSearchResults();
+        }
+
+        private void UpdateSearchResults()
+        {
+            OnPropertyChanged(nameof(VisibleSongs));
+            OnPropertyChanged(nameof(SearchResultsText));
+        }
 
         public string PickedFolderPath
         {
@@ -37,6 +70,39 @@ namespace Zink.Pages
         private StorageFolder _pickedFolder;
         private DispatcherTimer _watcherTimer;
         private int _musicLoadingDepth;
+        private bool _checkingNewSongs;
+        private bool _enrichmentRunning;
+        private bool _updatingSongList;
+        private readonly Queue<(StorageFile File, SongInfo Song, bool Verified, string Title, int Separator)> _pendingEnrichments = new();
+        private static readonly object ScanLogLock = new();
+        private static string ScanLogPath => Path.Combine(
+            ApplicationData.Current.LocalFolder.Path, "MusicLibraryScan.txt");
+
+        private static void LogMusicScan(string message)
+        {
+            try
+            {
+                lock (ScanLogLock)
+                    System.IO.File.AppendAllText(ScanLogPath,
+                        $"[{DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss zzz}] {message}{Environment.NewLine}");
+            }
+            catch { }
+        }
+
+        private async void OpenScanLogButton_Click(object sender, RoutedEventArgs e)
+        {
+            try
+            {
+                LogMusicScan("Scan log opened.");
+                await global::Windows.System.Launcher.LaunchFileAsync(
+                    await StorageFile.GetFileFromPathAsync(ScanLogPath));
+            }
+            catch (Exception ex)
+            {
+                Zink.Services.NotificationService.Instance.RecordActivity(
+                    "Music scan log", $"Log location: {ScanLogPath}\n{ex.Message}");
+            }
+        }
 
         // Prevents multiple prompts in the same page instance
         private bool _emptyLibraryPromptShown;
@@ -50,6 +116,13 @@ namespace Zink.Pages
         {
             this.InitializeComponent();
             this.DataContext = this;
+            Zink.Services.MusicLibraryMetadataLookup.Instance.EnableDiskCache(
+                Path.Combine(ApplicationData.Current.LocalFolder.Path, "MusicMetadataCache.json"));
+            Songs.CollectionChanged += (_, _) =>
+            {
+                if (!_updatingSongList && !string.IsNullOrWhiteSpace(_searchText))
+                    UpdateSearchResults();
+            };
             this.NavigationCacheMode = NavigationCacheMode.Required;
 
             // NEW: ensure we can show the dialog after the page is actually in the tree
@@ -59,9 +132,12 @@ namespace Zink.Pages
         protected override async void OnNavigatedTo(NavigationEventArgs e)
         {
             base.OnNavigatedTo(e);
+            LogMusicScan($"Library opened. Cached songs: {Songs.Count}; folder: {_pickedFolder?.Path ?? "not loaded"}.");
 
             if (_pickedFolder != null)
             {
+                // Keep the existing cards and artwork when returning to this cached page.
+                // The watcher imports only files that have not been added yet.
                 StartWatcher();
                 return;
             }
@@ -165,6 +241,19 @@ namespace Zink.Pages
         private async void PickFolderButton_Click(object sender, RoutedEventArgs e)
         {
             await PickFolderAndLoadAsync(showSelectedDialog: true);
+        }
+
+        private async void RefreshLibraryButton_Click(object sender, RoutedEventArgs e)
+        {
+            await RefreshLibraryAsync();
+        }
+
+        private async Task RefreshLibraryAsync()
+        {
+            if (_pickedFolder == null || _musicLoadingDepth > 0 || _checkingNewSongs || _enrichmentRunning)
+                return;
+
+            await LoadSongsFromFolder(_pickedFolder);
         }
 
         // Shared picker logic (so the page-load dialog can trigger the same flow)
@@ -361,11 +450,15 @@ namespace Zink.Pages
 
         private async Task LoadSongsFromFolder(StorageFolder folder, bool showLoading = true)
         {
+            var scanTimer = System.Diagnostics.Stopwatch.StartNew();
             if (showLoading)
                 BeginMusicLoading();
             try
             {
                 var files = await GetAllMusicFilesAsync(folder);
+                LogMusicScan($"Full scan: {folder.Path}; files found: {files.Count}.");
+                var previousSongs = Songs.ToDictionary(s => s.FilePath, StringComparer.OrdinalIgnoreCase);
+                _updatingSongList = true;
                 Songs.Clear();
                 if (showLoading)
                     UpdateMusicLoadingProgress(0, files.Count);
@@ -373,7 +466,18 @@ namespace Zink.Pages
                 var loadedSongs = 0;
                 foreach (var file in files)
                 {
-                    var song = await LoadSongInfoAsync(file);
+                    SongInfo song;
+                    if (previousSongs.TryGetValue(file.Path, out var previous) &&
+                        previous.Artwork != null && !string.IsNullOrWhiteSpace(previous.Artist) &&
+                        Zink.Services.MusicFilenameMetadataMatcher.IsCanonicalFilename(file.Name,
+                            $"{previous.Artist} - {previous.Title}{Path.GetExtension(file.Name)}") &&
+                        await HasUnchangedSongFileAsync(file, previous))
+                    {
+                        song = previous;
+                        LogMusicScan($"Scan reused identified song and artwork: {file.Path}");
+                    }
+                    else
+                        song = await LoadSongInfoAsync(file);
                     if (song != null)
                         Songs.Add(song);
 
@@ -384,8 +488,12 @@ namespace Zink.Pages
             }
             finally
             {
+                LogMusicScan($"Local scan ready: {Songs.Count} songs; {scanTimer.Elapsed.TotalSeconds:0.00}s; background updates pending: {_pendingEnrichments.Count}.");
+                _updatingSongList = false;
+                UpdateSearchResults();
                 if (showLoading)
                     EndMusicLoading();
+                _ = ProcessPendingEnrichmentsAsync();
             }
         }
 
@@ -487,6 +595,8 @@ namespace Zink.Pages
 
         private async Task<SongInfo> LoadSongInfoAsync(StorageFile file)
         {
+            LogMusicScan($"Import: {file.Path}");
+            var hasMetadataTitle = false;
             var song = new SongInfo
             {
                 Title = file.DisplayName,
@@ -498,30 +608,307 @@ namespace Zink.Pages
 
             try
             {
+                var basicProperties = await file.GetBasicPropertiesAsync();
+                song.FileModified = basicProperties.DateModified;
+                song.FileSize = basicProperties.Size;
+            }
+            catch { }
+
+            try
+            {
                 using (var stream = await file.OpenStreamForReadAsync())
                 {
-                    using var tagFile = TagLib.File.Create(new StreamFileAbstraction(file.Name, stream, stream));
-                    var tag = tagFile.Tag;
-                    var props = tagFile.Properties;
-
-                    song.Title = string.IsNullOrEmpty(tag.Title) ? file.DisplayName : tag.Title;
-                    song.Artist = tag.FirstPerformer ?? "";
-                    song.Album = tag.Album ?? "";
-                    song.Duration = props.Duration.ToString(@"mm\:ss");
-
-                    var picture = tag.Pictures?.FirstOrDefault();
-                    var artworkBytes = picture?.Data?.Data;
+                    var metadata = await Task.Run(() =>
+                    {
+                        using var tagFile = TagLib.File.Create(new StreamFileAbstraction(file.Name, stream, stream));
+                        var tag = tagFile.Tag;
+                        return (Title: tag.Title, Artist: string.IsNullOrWhiteSpace(tag.FirstPerformer)
+                            ? tag.FirstAlbumArtist : tag.FirstPerformer,
+                            Album: tag.Album, Duration: tagFile.Properties.Duration,
+                            Artwork: tag.Pictures?.FirstOrDefault()?.Data?.Data);
+                    });
+                    song.Title = metadata.Title?.Trim() ?? "";
+                    hasMetadataTitle = !string.IsNullOrWhiteSpace(metadata.Title);
+                    song.Artist = metadata.Artist?.Trim() ?? "";
+                    song.Album = metadata.Album ?? "";
+                    song.Duration = metadata.Duration.ToString(@"mm\:ss");
+                    var artworkBytes = metadata.Artwork;
                     if (artworkBytes != null && artworkBytes.Length > 0)
                         song.Artwork = await CreateArtworkAsync(artworkBytes);
                 }
             }
-            catch
+            catch (Exception ex)
             {
                 // The file is still playable even when its embedded tags or artwork
                 // cannot be read, so keep it in the library using its file name.
+                LogMusicScan($"Embedded metadata failed: {file.Path}; {ex.Message}");
             }
 
+            // Windows can read metadata from formats/providers that TagLib cannot.
+            if (string.IsNullOrWhiteSpace(song.Artist) || string.IsNullOrWhiteSpace(song.Title) ||
+                song.Title == file.DisplayName)
+            {
+                try
+                {
+                    var properties = await file.Properties.GetMusicPropertiesAsync();
+                    if ((string.IsNullOrWhiteSpace(song.Title) || song.Title == file.DisplayName) &&
+                        !string.IsNullOrWhiteSpace(properties.Title))
+                    {
+                        song.Title = properties.Title.Trim();
+                        hasMetadataTitle = true;
+                    }
+                    if (string.IsNullOrWhiteSpace(song.Artist))
+                        song.Artist = (string.IsNullOrWhiteSpace(properties.Artist)
+                            ? properties.AlbumArtist : properties.Artist)?.Trim() ?? "";
+                    if (string.IsNullOrWhiteSpace(song.Album))
+                        song.Album = properties.Album ?? "";
+                }
+                catch (Exception ex)
+                {
+                    LogMusicScan($"Windows metadata failed: {file.Path}; {ex.Message}");
+                }
+            }
+
+            var hasVerifiedMetadata = !string.IsNullOrWhiteSpace(song.Artist) &&
+                hasMetadataTitle;
+
+            // Untagged downloads commonly use "Artist - Song" as their filename.
+            // Only fill missing information; embedded metadata remains authoritative.
+            var fileTitle = file.DisplayName;
+            var separator = fileTitle.IndexOf(" - ", StringComparison.Ordinal);
+            if (separator > 0 && separator + 3 < fileTitle.Length)
+            {
+                var inferredFileTitle = fileTitle;
+                var unnumberedTitle = Zink.Services.MusicFilenameMetadataMatcher.RemoveCollisionSuffix(fileTitle);
+                if (!hasMetadataTitle && unnumberedTitle != fileTitle && System.IO.File.Exists(Path.Combine(
+                    Path.GetDirectoryName(file.Path), unnumberedTitle + Path.GetExtension(file.Name))))
+                {
+                    // A collision number distinguishes files, not song versions.
+                    inferredFileTitle = unnumberedTitle;
+                    LogMusicScan($"Numbered duplicate recognized: {file.Path}");
+                }
+                if (string.IsNullOrWhiteSpace(song.Artist))
+                    song.Artist = fileTitle.Substring(0, separator).Trim();
+                if (string.IsNullOrWhiteSpace(song.Title) || song.Title == fileTitle)
+                    song.Title = inferredFileTitle.Substring(separator + 3).Trim();
+            }
+
+            if (string.IsNullOrWhiteSpace(song.Title))
+                song.Title = fileTitle;
+
+            // Local import never waits for the internet. Identified files can be
+            // renamed immediately; other songs are enriched after the list loads.
+            if (hasVerifiedMetadata)
+                await RenameIdentifiedSongAsync(file, song);
+            _pendingEnrichments.Enqueue((file, song, hasVerifiedMetadata, fileTitle, separator));
             return song;
+        }
+
+        private async Task EnrichSongAsync(StorageFile file, SongInfo song,
+            bool hasVerifiedMetadata, string fileTitle, int separator)
+        {
+            if (string.IsNullOrWhiteSpace(song.Artist) || (!hasVerifiedMetadata &&
+                Zink.Services.MusicFilenameMetadataMatcher.PrepareSearchTitle(fileTitle) != fileTitle))
+            {
+                try
+                {
+                    hasVerifiedMetadata = await ResolveFilenameMetadataAsync(song, fileTitle);
+                }
+                catch (Exception ex)
+                {
+                    LogMusicScan($"Filename lookup failed: {file.Path}; {ex.Message}");
+                }
+            }
+
+            LogMusicScan($"Identified: {file.Name}; artist='{song.Artist}'; title='{song.Title}'; verified={hasVerifiedMetadata}; artwork={song.Artwork != null}.");
+            // Normalize the source filename as part of scanning/importing the file,
+            // before starting the optional artwork download.
+            if (hasVerifiedMetadata)
+                await RenameIdentifiedSongAsync(file, song);
+            else if (!string.IsNullOrWhiteSpace(song.Artist) && separator > 0 &&
+                Zink.Services.MusicFilenameMetadataMatcher.IsCanonicalFilename(file.Name,
+                    $"{song.Artist} - {song.Title}{Path.GetExtension(file.Name)}"))
+                LogMusicScan($"Rename unnecessary: {file.Path}; artist/title filename already present.");
+            else
+                LogMusicScan($"Rename skipped: {file.Path}; no verified artist/title metadata or exact online match.");
+
+            if (song.Artwork == null && !string.IsNullOrWhiteSpace(song.Artist))
+            {
+                try
+                {
+                    await ResolveLibraryArtworkAsync(song);
+                }
+                catch (Exception ex)
+                {
+                    // An unavailable artwork service must not prevent importing music.
+                    LogMusicScan($"Artwork lookup failed: {file.Path}; {ex.Message}");
+                }
+            }
+
+        }
+
+        private async Task ProcessPendingEnrichmentsAsync()
+        {
+            if (_enrichmentRunning || _musicLoadingDepth > 0)
+                return;
+            _enrichmentRunning = true;
+            var enrichmentTimer = System.Diagnostics.Stopwatch.StartNew();
+            var completed = 0;
+            try
+            {
+                while (_pendingEnrichments.Count > 0)
+                {
+                    var item = _pendingEnrichments.Dequeue();
+                    if (!Songs.Contains(item.Song))
+                        continue;
+                    LibraryStatusRing.Visibility = Visibility.Visible;
+                    LibraryStatusRing.IsActive = true;
+                    LibraryStatusText.Text = $"{Songs.Count} songs ready · Updating song info and artwork {completed + 1} of {completed + _pendingEnrichments.Count + 1}";
+                    try
+                    {
+                        await EnrichSongAsync(item.File, item.Song, item.Verified, item.Title, item.Separator);
+                        LibraryData.NotifySongUpdated(item.Song);
+                        if (!string.IsNullOrWhiteSpace(_searchText))
+                            UpdateSearchResults();
+                    }
+                    catch (Exception ex)
+                    {
+                        LogMusicScan($"Background song update failed: {item.Song.FilePath}; {ex.Message}");
+                    }
+                    completed++;
+                    if (completed % 8 == 0)
+                        await Task.Yield();
+                }
+            }
+            finally
+            {
+                LogMusicScan($"Background updates finished: {completed} songs; {enrichmentTimer.Elapsed.TotalSeconds:0.00}s.");
+                _enrichmentRunning = false;
+                if (_musicLoadingDepth == 0)
+                {
+                    LibraryStatusRing.IsActive = false;
+                    LibraryStatusRing.Visibility = Visibility.Collapsed;
+                    LibraryStatusText.Text = $"{Songs.Count} songs in your library";
+                }
+            }
+        }
+
+        private static async Task<bool> HasUnchangedSongFileAsync(StorageFile file, SongInfo song)
+        {
+            if (song.FileModified == default)
+                return false;
+            try
+            {
+                var properties = await file.GetBasicPropertiesAsync();
+                return properties.DateModified == song.FileModified && properties.Size == song.FileSize;
+            }
+            catch { return false; }
+        }
+
+        private static async Task RenameIdentifiedSongAsync(StorageFile file, SongInfo song)
+        {
+            static string SafePart(string value) => new string(value
+                .Where(c => !Path.GetInvalidFileNameChars().Contains(c)).ToArray()).Trim().TrimEnd('.');
+
+            var artist = SafePart(song.Artist);
+            var title = SafePart(song.Title);
+            if (artist.Length == 0 || title.Length == 0)
+                return;
+
+            var name = $"{artist} - {title}{Path.GetExtension(file.Name)}";
+            if (Zink.Services.MusicFilenameMetadataMatcher.IsCanonicalFilename(file.Name, name))
+            {
+                LogMusicScan($"Rename unnecessary: {file.Path}; already named correctly.");
+                return;
+            }
+
+            try
+            {
+                // Never replace another song, and keep playback pointed at the renamed file.
+                var previousName = file.Name;
+                var previousPath = song.FilePath;
+                LogMusicScan($"Rename attempt: {file.Path} → {name}");
+                await file.RenameAsync(name, NameCollisionOption.GenerateUniqueName);
+                song.FilePath = file.Path;
+                LibraryData.NotifySongRenamed(previousPath, song.FilePath);
+                LogMusicScan($"Rename succeeded: {previousName} → {file.Path}");
+                Zink.Services.NotificationService.Instance.RecordActivity(
+                    "Song renamed", $"{previousName} → {file.Name}\nFolder: {Path.GetDirectoryName(file.Path)}");
+            }
+            catch (Exception ex)
+            {
+                // Read-only folders, playing files and name collisions must not block imports.
+                LogMusicScan($"Rename failed: {song.FilePath} → {name}; HRESULT=0x{ex.HResult:X8}; {ex.Message}");
+                Zink.Services.NotificationService.Instance.RecordActivity(
+                    "Song rename failed", $"{file.Name} → {name}\nFolder: {Path.GetDirectoryName(song.FilePath)}\n{ex.Message}");
+            }
+        }
+
+        private static async Task<bool> ResolveFilenameMetadataAsync(SongInfo song, string filenameTitle)
+        {
+            var searchTitle = Zink.Services.MusicFilenameMetadataMatcher.PrepareSearchTitle(filenameTitle);
+            if (string.IsNullOrWhiteSpace(searchTitle))
+                return false;
+            using var document = JsonDocument.Parse(await
+                Zink.Services.MusicLibraryMetadataLookup.Instance.SearchAsync(searchTitle, LogMusicScan));
+            if (!document.RootElement.TryGetProperty("results", out var results))
+                return false;
+
+            LogMusicScan($"Filename lookup: '{filenameTitle}'; cleaned search: '{searchTitle}'; results: {results.GetArrayLength()}.");
+            foreach (var result in results.EnumerateArray())
+            {
+                if (!result.TryGetProperty("artistName", out var artistProperty) ||
+                    !result.TryGetProperty("trackName", out var titleProperty))
+                    continue;
+
+                var artist = artistProperty.GetString();
+                var title = titleProperty.GetString();
+                if (string.IsNullOrWhiteSpace(artist) || string.IsNullOrWhiteSpace(title))
+                    continue;
+
+                LogMusicScan($"Lookup candidate: artist='{artist}'; title='{title}'.");
+
+                // A title alone is ambiguous. Require both names to match the
+                // filename before assigning metadata from an online result.
+                if (!Zink.Services.MusicFilenameMetadataMatcher.Matches(searchTitle, artist, title))
+                    continue;
+
+                song.Artist = artist;
+                song.Title = title;
+                if (string.IsNullOrWhiteSpace(song.Album) &&
+                    result.TryGetProperty("collectionName", out var albumProperty))
+                    song.Album = albumProperty.GetString() ?? "";
+                if (song.Artwork == null && result.TryGetProperty("artworkUrl100", out var artworkProperty) &&
+                    Uri.TryCreate(artworkProperty.GetString()?.Replace("100x100", "300x300"),
+                        UriKind.Absolute, out var artworkUri))
+                    song.Artwork = new BitmapImage(artworkUri) { DecodePixelWidth = 440 };
+                return true;
+            }
+            return false;
+        }
+
+        private static async Task ResolveLibraryArtworkAsync(SongInfo song)
+        {
+            var term = $"{song.Artist} {song.Title}";
+            using var document = JsonDocument.Parse(await
+                Zink.Services.MusicLibraryMetadataLookup.Instance.SearchAsync(term, LogMusicScan));
+            if (!document.RootElement.TryGetProperty("results", out var results))
+                return;
+
+            foreach (var result in results.EnumerateArray())
+            {
+                if (!result.TryGetProperty("artistName", out var artist) ||
+                    !result.TryGetProperty("trackName", out var title) ||
+                    !Zink.Services.MusicFilenameMetadataMatcher.Matches(
+                        Zink.Services.MusicFilenameMetadataMatcher.PrepareSearchTitle(term),
+                        artist.GetString() ?? "", title.GetString() ?? ""))
+                    continue;
+                if (result.TryGetProperty("artworkUrl100", out var artwork) &&
+                    Uri.TryCreate(artwork.GetString()?.Replace("100x100", "300x300"),
+                        UriKind.Absolute, out var uri))
+                    song.Artwork = new BitmapImage(uri) { DecodePixelWidth = 440 };
+                return;
+            }
         }
 
         private static async Task<BitmapImage> CreateArtworkAsync(byte[] artworkBytes)
@@ -543,6 +930,54 @@ namespace Zink.Pages
         private void StartWatcher()
         {
             StopWatcher();
+            if (_pickedFolder == null)
+                return;
+
+            _watcherTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(10) };
+            _watcherTimer.Tick += WatcherTimer_Tick;
+            _watcherTimer.Start();
+        }
+
+        private async void WatcherTimer_Tick(object sender, object e)
+        {
+            if (_checkingNewSongs || _musicLoadingDepth > 0 || _pickedFolder == null)
+                return;
+
+            _checkingNewSongs = true;
+            var folder = _pickedFolder;
+            try
+            {
+                var files = await GetAllMusicFilesAsync(folder);
+                if (_watcherTimer == null || folder != _pickedFolder || _musicLoadingDepth > 0)
+                    return;
+
+                var knownPaths = new HashSet<string>(Songs.Select(s => s.FilePath),
+                    StringComparer.OrdinalIgnoreCase);
+                var newFileCount = files.Count(f => !knownPaths.Contains(f.Path));
+                if (newFileCount > 0)
+                    LogMusicScan($"Incremental scan: {folder.Path}; new files: {newFileCount}.");
+                foreach (var file in files.Where(f => !knownPaths.Contains(f.Path)))
+                {
+                    if (_watcherTimer == null || folder != _pickedFolder)
+                        break;
+                    var song = await LoadSongInfoAsync(file);
+                    if (_watcherTimer == null || folder != _pickedFolder)
+                        break;
+                    Songs.Add(song);
+                    knownPaths.Add(song.FilePath);
+                }
+                if (_musicLoadingDepth == 0)
+                    LibraryStatusText.Text = $"{Songs.Count} songs in your library";
+            }
+            catch
+            {
+                // A temporarily unavailable folder can be retried on the next tick.
+            }
+            finally
+            {
+                _checkingNewSongs = false;
+                _ = ProcessPendingEnrichmentsAsync();
+            }
         }
 
         private void StopWatcher()
@@ -554,20 +989,9 @@ namespace Zink.Pages
             }
         }
 
-        private void PlayAllButton_Click(object sender, RoutedEventArgs e)
+        private async void PlayAllButton_Click(object sender, RoutedEventArgs e)
         {
-            if (Songs.Count == 0) return;
-
-            LibraryData.PlaySongList(Songs.ToList());
-
-            var main = (MainWindow)App.MainWindow;
-            main.ContentFrame.Navigate(typeof(MusicPlayerPage), "autoplay");
-
-            var playerItem = main.SidebarNav.MenuItems
-                .OfType<NavigationViewItem>()
-                .FirstOrDefault(i => (string)i.Tag == "MusicPlayer");
-            if (playerItem != null)
-                main.SidebarNav.SelectedItem = playerItem;
+            await ShowPlayAllOptionsAsync();
         }
 
         private void PlaySongButton_Click(object sender, RoutedEventArgs e)
@@ -618,14 +1042,26 @@ namespace Zink.Pages
         private void OnPropertyChanged(string name) =>
             PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(name));
 
-        public class SongInfo
+        public class SongInfo : INotifyPropertyChanged
         {
-            public string Title { get; set; }
-            public string Artist { get; set; }
-            public string Album { get; set; }
-            public string Duration { get; set; }
-            public string FilePath { get; set; }
-            public BitmapImage Artwork { get; set; }
+            internal DateTimeOffset FileModified { get; set; }
+            internal ulong FileSize { get; set; }
+            private string _title, _artist, _album, _duration, _filePath;
+            private BitmapImage _artwork;
+            public event PropertyChangedEventHandler PropertyChanged;
+            public string Title { get => _title; set => SetValue(ref _title, value, nameof(Title)); }
+            public string Artist { get => _artist; set => SetValue(ref _artist, value, nameof(Artist)); }
+            public string Album { get => _album; set => SetValue(ref _album, value, nameof(Album)); }
+            public string Duration { get => _duration; set => SetValue(ref _duration, value, nameof(Duration)); }
+            public string FilePath { get => _filePath; set => SetValue(ref _filePath, value, nameof(FilePath)); }
+            public BitmapImage Artwork { get => _artwork; set => SetValue(ref _artwork, value, nameof(Artwork)); }
+
+            private void SetValue<T>(ref T field, T value, string property)
+            {
+                if (EqualityComparer<T>.Default.Equals(field, value)) return;
+                field = value;
+                PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(property));
+            }
         }
     }
 
@@ -657,6 +1093,13 @@ namespace Zink.Pages
         public static List<MusicLibraryPage.SongInfo> CurrentQueue { get; private set; } = new();
 
         public static event EventHandler<List<MusicLibraryPage.SongInfo>> QueueOverrideRequested;
+        public static event Action<string, string> SongRenamed;
+        public static event Action<MusicLibraryPage.SongInfo> SongUpdated;
+
+        public static void NotifySongUpdated(MusicLibraryPage.SongInfo song) => SongUpdated?.Invoke(song);
+
+        public static void NotifySongRenamed(string previousPath, string newPath) =>
+            SongRenamed?.Invoke(previousPath, newPath);
 
         public static void PlaySongList(List<MusicLibraryPage.SongInfo> songs)
         {

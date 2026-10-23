@@ -153,6 +153,57 @@
                         Padding="20">
                     <StackPanel Spacing="14">
                         <StackPanel Spacing="4">
+                            <TextBlock Text="Integrations"
+                                       FontSize="20"
+                                       FontWeight="SemiBold"
+                                       Foreground="White"/>
+                            <TextBlock Text="Control how Zink connects with other apps."
+                                       Foreground="{StaticResource MutedTextBrush}"
+                                       FontSize="13"/>
+                        </StackPanel>
+
+                        <Border Style="{StaticResource GlassSettingRowStyle}">
+                            <Grid ColumnSpacing="18">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="Auto"/>
+                                </Grid.ColumnDefinitions>
+
+                                <StackPanel Spacing="6"
+                                            VerticalAlignment="Center">
+                                    <TextBlock Text="Discord Rich Presence"
+                                               Foreground="White"
+                                               FontWeight="SemiBold"/>
+                                    <TextBlock x:Name="DiscordRichPresenceStatusText"
+                                               Text=""
+                                               Foreground="{StaticResource MutedTextBrush}"
+                                               TextWrapping="WrapWholeWords"/>
+                                </StackPanel>
+
+                                <primitives:ToggleButton x:Name="DiscordRichPresenceToggle"
+                                                         Grid.Column="1"
+                                                         Style="{StaticResource SettingsSlidingToggleStyle}"
+                                                         Click="DiscordRichPresenceToggle_Toggled">
+                                    <Grid Width="128" Height="42">
+                                        <Border x:Name="DiscordRichPresenceToggleTrack" CornerRadius="21" BorderThickness="1"/>
+                                        <TextBlock x:Name="DiscordRichPresenceToggleOffLabel" Text="Off" Margin="46,0,14,0" Foreground="White" FontWeight="SemiBold" HorizontalAlignment="Right" VerticalAlignment="Center"/>
+                                        <TextBlock x:Name="DiscordRichPresenceToggleOnLabel" Text="On" Margin="14,0,46,0" Foreground="White" FontWeight="SemiBold" HorizontalAlignment="Left" VerticalAlignment="Center"/>
+                                        <Border Width="34" Height="34" Margin="4" CornerRadius="17" Background="White" HorizontalAlignment="Left" VerticalAlignment="Center">
+                                            <Border.RenderTransform>
+                                                <TranslateTransform x:Name="DiscordRichPresenceToggleKnobTransform"/>
+                                            </Border.RenderTransform>
+                                        </Border>
+                                    </Grid>
+                                </primitives:ToggleButton>
+                            </Grid>
+                        </Border>
+                    </StackPanel>
+                </Border>
+
+                <Border Style="{StaticResource GlassPanelStyle}"
+                        Padding="20">
+                    <StackPanel Spacing="14">
+                        <StackPanel Spacing="4">
                             <TextBlock Text="Background"
                                        FontSize="20"
                                        FontWeight="SemiBold"
