@@ -137,8 +137,10 @@ namespace Zink.Pages
                 // The TabView header is a separate XAML row above the Twitch
                 // page. Native HTML fullscreen cannot fill the display until
                 // that row is removed from layout too.
+                // Let Chromium's HTML fullscreen own the player geometry.
+                // Resizing the native window presenter during the same transition
+                // can clip the lower controls and stall WebView2 composition.
                 App.MainWindow.SetTwitchPlayerFullscreenLayout(true);
-                App.MainWindow.EnterFullscreenMode(enableMouseExitHook: false);
             }
             else
             {
@@ -147,7 +149,6 @@ namespace Zink.Pages
                 HostBorder.BorderThickness = _savedHostBorderThickness;
                 Background = _savedPageBackground;
                 App.MainWindow.SetTwitchPlayerFullscreenLayout(false);
-                App.MainWindow.ExitFullscreenMode();
             }
 
             try
