@@ -899,7 +899,7 @@ namespace Zink
         // Twitch uses a borderless monitor-sized overlapped window rather than
         // changing the AppWindow presenter while Chromium owns HTML fullscreen.
         // The presenter switch can interrupt WebView2's hover/input pipeline.
-        private Windows.Graphics.RectInt32? _twitchWindowRestoreBounds;
+        private global::Windows.Graphics.RectInt32? _twitchWindowRestoreBounds;
         private bool _twitchBorderlessFullscreen;
 
         public void EnterTwitchBorderlessFullscreen()
@@ -915,7 +915,7 @@ namespace Zink
                     var window = AppWindow.GetFromWindowId(id);
                     var display = DisplayArea.GetFromWindowId(id, DisplayAreaFallback.Nearest);
                     if (window.Presenter is not OverlappedPresenter presenter) return;
-                    _twitchWindowRestoreBounds = new Windows.Graphics.RectInt32(
+                    _twitchWindowRestoreBounds = new global::Windows.Graphics.RectInt32(
                         window.Position.X, window.Position.Y, window.Size.Width, window.Size.Height);
                     presenter.SetBorderAndTitleBar(false, false);
                     window.MoveAndResize(display.OuterBounds);
