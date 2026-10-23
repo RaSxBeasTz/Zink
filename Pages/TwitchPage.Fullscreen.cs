@@ -17,7 +17,7 @@ namespace Zink.Pages
             // have finished resizing.
             TwitchWebView.SizeChanged += (_, _) =>
             {
-                if (_twitchFullscreen) QueueTwitchFullscreenInputRestore();
+                // Browser handles its own fullscreen pointer capture and focus.
             };
             Unloaded += (_, _) => _twitchFullscreenInputTimer?.Stop();
         }
