@@ -37,12 +37,13 @@ namespace Zink.Pages
                         !ReferenceEquals(App.MainWindow.ContentFrame.Content, this)) return;
                     try
                     {
-                        App.MainWindow.Activate();
                         TwitchWebView.UpdateLayout();
                         TwitchWebView.IsHitTestVisible = true;
+                        // Avoid activating the top-level window during a Chromium
+                        // fullscreen transition: that can steal focus from the player.
                         var focused = TwitchWebView.Focus(FocusState.Programmatic);
                         if (TwitchWebView.CoreWebView2 != null)
-                            await TwitchWebView.CoreWebView2.ExecuteScriptAsync("window.focus(); window.__zinkTwitchInputTrace?.();");
+                            await TwitchWebView.CoreWebView2.ExecuteScriptAsync("window.__zinkTwitchInputTrace?.();");
                         DiagnosticLogService.WriteLine("Twitch fullscreen input restored; browser focused: " + focused);
                     }
                     catch (Exception error)
