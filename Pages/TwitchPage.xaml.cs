@@ -100,7 +100,8 @@ namespace Zink.Pages
                 await TwitchWebView.CoreWebView2.AddScriptToExecuteOnDocumentCreatedAsync(TwitchInputTraceScript);
                 await ConfigureTwitchAdBlockAsync();
 
-                // ? In-player fullscreen -> app fullscreen + sidebar hide
+                // In-player fullscreen -> app fullscreen + sidebar hide.
+                // The WebView2 event reports Twitch's real HTML fullscreen state.
                 TwitchWebView.CoreWebView2.ContainsFullScreenElementChanged += CoreWebView2_ContainsFullScreenElementChanged;
 
                 TwitchWebView.Source = _initialUri;
@@ -151,8 +152,10 @@ namespace Zink.Pages
             }
             catch { }
 
-            // A loading shield must not intercept a playing fullscreen stream.
-            LoadingOverlay.IsHitTestVisible = !fullscreen;
+            // The loading shield must never intercept the Twitch player.
+            // During navigation it can otherwise cover player controls even
+            // after the page has entered fullscreen.
+            LoadingOverlay.IsHitTestVisible = false;
             QueueTwitchFullscreenInputRestore();
         }
 
