@@ -877,7 +877,7 @@ namespace Zink
             {
                 var rows = TabStripGlass.Parent as Grid;
                 if (rows == null || rows.RowDefinitions.Count == 0) return;
-                var row = rows.RowDefinitions[0];
+                var row = rows.RowDefinitions[Grid.GetRow(TabStripGlass)];
                 if (enabled)
                 {
                     if (!_savedTwitchTabStripHeight.HasValue)
