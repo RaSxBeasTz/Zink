@@ -8,6 +8,7 @@ namespace Zink.Pages
 {
     public sealed partial class TwitchPage
     {
+        private DateTimeOffset _lastXamlMoveTrace;
         private static readonly string TwitchInputTracePath = Path.Combine(Path.GetTempPath(), "Zink-Twitch-input-trace.jsonl");
 
         private void InitializeTwitchInputTrace()
@@ -19,6 +20,16 @@ namespace Zink.Pages
                 if (!_twitchFullscreen) return;
                 var point = e.GetCurrentPoint(TwitchWebView).Position;
                 WriteTwitchInputTrace(new { type = "xaml-pointer", x = point.X, y = point.Y,
+                    source = e.OriginalSource?.GetType().Name, focus = TwitchWebView.FocusState.ToString() });
+            }), true);
+            AddHandler(PointerMovedEvent, new PointerEventHandler((_, e) =>
+            {
+                if (!_twitchFullscreen || DateTimeOffset.UtcNow - _lastXamlMoveTrace < TimeSpan.FromMilliseconds(700)) return;
+                _lastXamlMoveTrace = DateTimeOffset.UtcNow;
+                var point = e.GetCurrentPoint(TwitchWebView).Position;
+                WriteTwitchInputTrace(new { type = "xaml-move", x = point.X, y = point.Y,
+                    webWidth = TwitchWebView.ActualWidth, webHeight = TwitchWebView.ActualHeight,
+                    pageWidth = ActualWidth, pageHeight = ActualHeight,
                     source = e.OriginalSource?.GetType().Name, focus = TwitchWebView.FocusState.ToString() });
             }), true);
             AddHandler(KeyDownEvent, new KeyEventHandler((_, _) =>
