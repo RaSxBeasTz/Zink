@@ -8,26 +8,20 @@
     if (window.__zinkTwitchControlsGuardInstalled) return;
     window.__zinkTwitchControlsGuardInstalled = true;
 
-    const controls = `:is(.player-controls, .video-player__controls,
-        [data-a-target='player-controls'], [data-test-selector='player-controls'])`;
-    const scope = ':is(:fullscreen, [data-zink-twitch-fullscreen])';
+    // Preserve Twitch's own layout and hit-testing. Moving the controls with
+    // CSS transforms or forcing every ancestor visible can make buttons appear
+    // clickable while Chromium still routes input to an overlay.
     const style = document.createElement('style');
     style.textContent = `
-        /* An opaque child cannot reveal itself through a transparent parent. */
-        ${scope}:has(${controls}),
-        ${scope} :has(${controls}),
-        ${scope} ${controls} {
-            opacity: 1 !important;
+        :fullscreen .player-controls,
+        :fullscreen .video-player__controls,
+        :fullscreen [data-a-target='player-controls'],
+        :fullscreen [data-test-selector='player-controls'],
+        [data-zink-twitch-fullscreen] .player-controls,
+        [data-zink-twitch-fullscreen] .video-player__controls,
+        [data-zink-twitch-fullscreen] [data-a-target='player-controls'],
+        [data-zink-twitch-fullscreen] [data-test-selector='player-controls'] {
             visibility: visible !important;
-        }
-        /* Keep Twitch's original controls above the host's non-interactive
-           bottom edge. Translate the existing strip, including its popovers,
-           so its displayed bounds and browser hit-testing bounds stay together. */
-        ${scope} ${controls} {
-            translate: 0 -80px !important;
-        }
-        ${scope} ${controls},
-        ${scope} ${controls} :is(button, input, select, [role='button'], [role='slider'], a[href]) {
             pointer-events: auto !important;
         }
     `;
