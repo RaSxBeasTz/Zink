@@ -100,7 +100,8 @@ namespace Zink.Pages
                 await TwitchWebView.CoreWebView2.AddScriptToExecuteOnDocumentCreatedAsync(TwitchInputTraceScript);
                 await ConfigureTwitchAdBlockAsync();
 
-                // ? In-player fullscreen -> app fullscreen + sidebar hide
+                // In-player fullscreen -> app fullscreen + sidebar hide.
+                // The WebView2 event reports Twitch's real HTML fullscreen state.
                 TwitchWebView.CoreWebView2.ContainsFullScreenElementChanged += CoreWebView2_ContainsFullScreenElementChanged;
 
                 TwitchWebView.Source = _initialUri;
@@ -133,7 +134,12 @@ namespace Zink.Pages
                 HostBorder.BorderThickness = new Thickness(0);
                 Background = new SolidColorBrush(Microsoft.UI.Colors.Black);
 
-                App.MainWindow.EnterFullscreenMode(enableMouseExitHook: false);
+                // Match the WebView viewport to the actual fullscreen window.
+                // Twitch's HTML fullscreen controls must receive real pointer
+                // events at their displayed coordinates, not synthetic mouse
+                // events dispatched at the old viewport position.
+                App.MainWindow.SetTwitchPlayerFullscreenLayout(true);
+                App.MainWindow.EnterTwitchBorderlessFullscreen();
             }
             else
             {
@@ -141,7 +147,8 @@ namespace Zink.Pages
                 HostBorder.CornerRadius = _savedHostCornerRadius;
                 HostBorder.BorderThickness = _savedHostBorderThickness;
                 Background = _savedPageBackground;
-                App.MainWindow.ExitFullscreenMode();
+                App.MainWindow.SetTwitchPlayerFullscreenLayout(false);
+                App.MainWindow.ExitTwitchBorderlessFullscreen();
             }
 
             try
@@ -151,9 +158,10 @@ namespace Zink.Pages
             }
             catch { }
 
-            // A loading shield must not intercept a playing fullscreen stream.
-            LoadingOverlay.IsHitTestVisible = !fullscreen;
-            QueueTwitchFullscreenInputRestore();
+            // The loading shield must never intercept the Twitch player.
+            // During navigation it can otherwise cover player controls even
+            // after the page has entered fullscreen.
+            LoadingOverlay.IsHitTestVisible = false;
         }
 
         private void TwitchWebView_CoreWebView2Initialized(WebView2 sender, CoreWebView2InitializedEventArgs args)

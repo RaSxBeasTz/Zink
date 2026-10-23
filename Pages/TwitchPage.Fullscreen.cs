@@ -17,7 +17,7 @@ namespace Zink.Pages
             // have finished resizing.
             TwitchWebView.SizeChanged += (_, _) =>
             {
-                if (_twitchFullscreen) QueueTwitchFullscreenInputRestore();
+                // Browser handles its own fullscreen pointer capture and focus.
             };
             Unloaded += (_, _) => _twitchFullscreenInputTimer?.Stop();
         }
@@ -37,13 +37,11 @@ namespace Zink.Pages
                         !ReferenceEquals(App.MainWindow.ContentFrame.Content, this)) return;
                     try
                     {
-                        App.MainWindow.Activate();
+                        // WebView2 and Twitch must retain their own pointer capture,
+                        // focus and popup menus. Only refresh the XAML layout.
                         TwitchWebView.UpdateLayout();
                         TwitchWebView.IsHitTestVisible = true;
-                        var focused = TwitchWebView.Focus(FocusState.Programmatic);
-                        if (TwitchWebView.CoreWebView2 != null)
-                            await TwitchWebView.CoreWebView2.ExecuteScriptAsync("window.focus(); window.__zinkTwitchInputTrace?.();");
-                        DiagnosticLogService.WriteLine("Twitch fullscreen input restored; browser focused: " + focused);
+                        DiagnosticLogService.WriteLine("Twitch fullscreen layout settled.");
                     }
                     catch (Exception error)
                     {
