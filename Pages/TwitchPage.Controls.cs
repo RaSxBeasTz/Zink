@@ -19,14 +19,14 @@
         html[data-zink-twitch-fullscreen] .player-controls,
         html[data-zink-twitch-fullscreen] .player-controls__left-control-group,
         html[data-zink-twitch-fullscreen] .player-controls__right-control-group,
-        html[data-zink-twitch-fullscreen] [data-a-target="player-controls"] {
+        html[data-zink-twitch-fullscreen] [data-a-target=""player-controls""] {
             opacity: 1 !important;
             visibility: visible !important;
             pointer-events: auto !important;
         }
         html[data-zink-twitch-fullscreen] .player-controls button,
         html[data-zink-twitch-fullscreen] .player-controls input,
-        html[data-zink-twitch-fullscreen] .player-controls [role="slider"] {
+        html[data-zink-twitch-fullscreen] .player-controls [role=""slider""] {
             pointer-events: auto !important;
         }
     `;
