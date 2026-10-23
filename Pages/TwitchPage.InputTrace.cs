@@ -12,6 +12,7 @@ namespace Zink.Pages
 
         private void InitializeTwitchInputTrace()
         {
+            try { File.Delete(TwitchInputTracePath); } catch { }
             WriteTwitchInputTrace(new { type = "page-created", build = typeof(TwitchPage).Assembly.ManifestModule.ModuleVersionId });
             AddHandler(PointerPressedEvent, new PointerEventHandler((_, e) =>
             {
@@ -31,7 +32,7 @@ namespace Zink.Pages
         {
             try
             {
-                if (File.Exists(TwitchInputTracePath) && new FileInfo(TwitchInputTracePath).Length > 3145728) return;
+                if (File.Exists(TwitchInputTracePath) && new FileInfo(TwitchInputTracePath).Length > 12582912) return;
                 File.AppendAllText(TwitchInputTracePath, JsonSerializer.Serialize(new { time = DateTimeOffset.UtcNow, data = value }) + Environment.NewLine);
             }
             catch { }
@@ -63,7 +64,7 @@ namespace Zink.Pages
             display: css.display, zIndex: css.zIndex, x: rect.x, y: rect.y, w: rect.width, h: rect.height };
     };
     function trace(type, event) {
-        if (++count > 160) return;
+        if (++count > 650) return;
         const buttons = [...document.querySelectorAll('.player-controls button, .video-player__controls button')]
             .filter(button => button.getBoundingClientRect().width > 0 &&
                 ['player-play-pause-button', 'player-mute-unmute-button', 'player-settings-button', 'player-fullscreen-button'].includes(button.getAttribute('data-a-target'))).slice(0, 4)
@@ -84,9 +85,11 @@ namespace Zink.Pages
     for (const type of ['pointerdown', 'pointerup', 'click', 'keydown', 'focus', 'blur'])
         window.addEventListener(type, event => trace(type, event), true);
     window.addEventListener('pointermove', event => {
-        if (!document.fullscreenElement || Date.now() - lastMove < 1500) return;
+        if (!document.fullscreenElement || Date.now() - lastMove < 600) return;
         lastMove = Date.now(); trace('pointermove', event);
     }, true);
+    window.addEventListener('pointerenter', event => trace('pointerenter', event), true);
+    window.addEventListener('pointerleave', event => trace('pointerleave', event), true);
     document.addEventListener('fullscreenchange', () => {
         trace('fullscreenchange');
         for (const delay of [250, 1000, 3000]) setTimeout(() => trace('fullscreen-settled'), delay);
