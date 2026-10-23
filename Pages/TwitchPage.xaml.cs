@@ -140,9 +140,10 @@ namespace Zink.Pages
                 // Let Chromium's HTML fullscreen own the player geometry.
                 // Resizing the native window presenter during the same transition
                 // can clip the lower controls and stall WebView2 composition.
-                App.MainWindow.SetTwitchPlayerFullscreenLayout(true);
-                // Native fullscreen is required to hide the Windows taskbar.
-                // Keep the player-control CSS and WebView focus untouched.
+                // Keep the WebView at its normal, working window size while
+                // Chromium enters HTML fullscreen. Resizing the WinUI host and
+                // changing the native presenter together clips Twitch's bottom
+                // controls and can break its pointer hit testing.
                 App.MainWindow.EnterFullscreenMode(enableMouseExitHook: false);
             }
             else
@@ -151,7 +152,6 @@ namespace Zink.Pages
                 HostBorder.CornerRadius = _savedHostCornerRadius;
                 HostBorder.BorderThickness = _savedHostBorderThickness;
                 Background = _savedPageBackground;
-                App.MainWindow.SetTwitchPlayerFullscreenLayout(false);
                 App.MainWindow.ExitFullscreenMode();
             }
 
