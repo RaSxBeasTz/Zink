@@ -12,7 +12,24 @@
     // Do not override Twitch's native fullscreen player CSS. In particular,
     // transforms, z-index and pointer-events rules break settings/quality menus.
     const style = document.createElement('style');
-    style.textContent = '';
+    style.textContent = `
+        /* Keep Twitch's own controls and menus in their native positions.
+           WinUI fullscreen can prevent Twitch's hover-to-reveal state from
+           activating, so reveal only the existing control layer. */
+        html[data-zink-twitch-fullscreen] .player-controls,
+        html[data-zink-twitch-fullscreen] .player-controls__left-control-group,
+        html[data-zink-twitch-fullscreen] .player-controls__right-control-group,
+        html[data-zink-twitch-fullscreen] [data-a-target="player-controls"] {
+            opacity: 1 !important;
+            visibility: visible !important;
+            pointer-events: auto !important;
+        }
+        html[data-zink-twitch-fullscreen] .player-controls button,
+        html[data-zink-twitch-fullscreen] .player-controls input,
+        html[data-zink-twitch-fullscreen] .player-controls [role="slider"] {
+            pointer-events: auto !important;
+        }
+    `;
     function install() {
         if (!style.isConnected) (document.head || document.documentElement)?.appendChild(style);
     }
