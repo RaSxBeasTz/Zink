@@ -139,7 +139,7 @@ namespace Zink.Pages
                 // events at their displayed coordinates, not synthetic mouse
                 // events dispatched at the old viewport position.
                 App.MainWindow.SetTwitchPlayerFullscreenLayout(true);
-                App.MainWindow.EnterFullscreenMode(enableMouseExitHook: false);
+                App.MainWindow.EnterTwitchBorderlessFullscreen();
             }
             else
             {
@@ -148,7 +148,7 @@ namespace Zink.Pages
                 HostBorder.BorderThickness = _savedHostBorderThickness;
                 Background = _savedPageBackground;
                 App.MainWindow.SetTwitchPlayerFullscreenLayout(false);
-                App.MainWindow.ExitFullscreenMode();
+                App.MainWindow.ExitTwitchBorderlessFullscreen();
             }
 
             try
