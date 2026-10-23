@@ -134,6 +134,9 @@ namespace Zink.Pages
                 HostBorder.BorderThickness = new Thickness(0);
                 Background = new SolidColorBrush(Microsoft.UI.Colors.Black);
 
+                // The TabView header is a separate XAML row above the Twitch
+                // page. Native HTML fullscreen cannot fill the display until
+                // that row is removed from layout too.
                 App.MainWindow.EnterFullscreenMode(enableMouseExitHook: false);
             }
             else
